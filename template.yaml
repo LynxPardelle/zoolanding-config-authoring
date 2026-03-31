@@ -1,0 +1,88 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Zoolanding Config Authoring Lambda - SAM Template
+
+Parameters:
+  ConfigTableName:
+    Type: String
+    Default: zoolanding-config-registry
+    Description: DynamoDB table that stores site routing, lifecycle, and version metadata.
+  ConfigPayloadsBucketName:
+    Type: String
+    Default: zoolanding-config-payloads
+    Description: S3 bucket that stores versioned site payloads.
+  LogLevel:
+    Type: String
+    Default: INFO
+    AllowedValues: [DEBUG, INFO, WARNING, ERROR]
+    Description: Log level for the Lambda.
+
+Globals:
+  Function:
+    Runtime: python3.13
+    Timeout: 20
+    MemorySize: 256
+    Tracing: PassThrough
+
+Resources:
+  AuthoringApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: Prod
+      Cors:
+        AllowOrigin: "'*'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowMethods: "'POST,OPTIONS'"
+
+  ConfigAuthoringFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: .
+      Handler: lambda_function.lambda_handler
+      Description: Creates, reads, updates, publishes, and changes lifecycle state for site draft packages.
+      Environment:
+        Variables:
+          CONFIG_TABLE_NAME:
+            Ref: ConfigTableName
+          CONFIG_PAYLOADS_BUCKET_NAME:
+            Ref: ConfigPayloadsBucketName
+          LOG_LEVEL:
+            Ref: LogLevel
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:GetItem
+                - dynamodb:PutItem
+              Resource:
+                Fn::Sub: arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConfigTableName}
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+              Resource:
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource:
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}
+      Events:
+        ConfigAuthoringPost:
+          Type: Api
+          Properties:
+            RestApiId:
+              Ref: AuthoringApi
+            Path: /config-authoring
+            Method: POST
+
+Outputs:
+  ApiUrl:
+    Description: Config authoring endpoint URL.
+    Value:
+      Fn::Sub: https://${AuthoringApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/config-authoring
+  FunctionName:
+    Description: Deployed Lambda function name.
+    Value:
+      Ref: ConfigAuthoringFunction
