@@ -102,4 +102,4 @@ sites/{domain}/versions/{versionId}/
   {domain}/{pageId}/i18n/{lang}.json
 ```
 
-That layout is intentionally symmetrical with `public/assets/drafts/{domain}/...` in the Angular workspace. Shared domain-level variables, combos, and i18n act like shared components: they provide defaults for all pages and can be overridden per page.
+That layout is intentionally symmetrical with `drafts/{domain}/...` in the Angular workspace, which is served locally at `/drafts/...`. Shared domain-level variables, combos, and i18n act like shared components: they provide defaults for all pages and can be overridden per page.
