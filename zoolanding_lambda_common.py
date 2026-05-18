@@ -65,6 +65,10 @@ def conflict(message: str, **extra: Any) -> Dict[str, Any]:
     return json_response(409, {"ok": False, "error": message, **extra})
 
 
+def unauthorized(message: str = "Unauthorized", **extra: Any) -> Dict[str, Any]:
+    return json_response(401, {"ok": False, "error": message, **extra})
+
+
 def server_error(message: str = "Internal error", **extra: Any) -> Dict[str, Any]:
     return json_response(500, {"ok": False, "error": message, **extra})
 

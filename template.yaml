@@ -16,6 +16,15 @@ Parameters:
     Default: INFO
     AllowedValues: [DEBUG, INFO, WARNING, ERROR]
     Description: Log level for the Lambda.
+  DeployAuthzConfigJson:
+    Type: String
+    Default: '[]'
+    NoEcho: true
+    Description: Small inline JSON or base64 JSON array mapping deploy IAM roles to allowed draft domains, environments, and actions.
+  DeployAuthzConfigS3Key:
+    Type: String
+    Default: ''
+    Description: Optional S3 key in ConfigPayloadsBucketName containing the deploy authorization JSON array.
 
 Globals:
   Function:
@@ -33,6 +42,9 @@ Resources:
         AllowOrigin: "'*'"
         AllowHeaders: "'Content-Type,Authorization'"
         AllowMethods: "'POST,OPTIONS'"
+      Auth:
+        DefaultAuthorizer: AWS_IAM
+        AddDefaultAuthorizerToCorsPreflight: false
 
   ConfigAuthoringFunction:
     Type: AWS::Serverless::Function
@@ -40,6 +52,16 @@ Resources:
       CodeUri: .
       Handler: lambda_function.lambda_handler
       Description: Creates, reads, updates, publishes, and changes lifecycle state for site draft packages.
+      FunctionUrlConfig:
+        AuthType: AWS_IAM
+        Cors:
+          AllowOrigins:
+            - '*'
+          AllowHeaders:
+            - Content-Type
+            - Authorization
+          AllowMethods:
+            - POST
       Environment:
         Variables:
           CONFIG_TABLE_NAME:
@@ -48,6 +70,10 @@ Resources:
             Ref: ConfigPayloadsBucketName
           LOG_LEVEL:
             Ref: LogLevel
+          DEPLOY_AUTHZ_CONFIG_JSON:
+            Ref: DeployAuthzConfigJson
+          DEPLOY_AUTHZ_CONFIG_S3_KEY:
+            Ref: DeployAuthzConfigS3Key
       Policies:
         - Version: '2012-10-17'
           Statement:
@@ -76,6 +102,8 @@ Resources:
               Ref: AuthoringApi
             Path: /config-authoring
             Method: POST
+            Auth:
+              Authorizer: AWS_IAM
 
 Outputs:
   ApiUrl:
@@ -86,3 +114,7 @@ Outputs:
     Description: Deployed Lambda function name.
     Value:
       Ref: ConfigAuthoringFunction
+  FunctionUrl:
+    Description: IAM-protected Lambda Function URL for GitHub Actions deploys.
+    Value:
+      Fn::GetAtt: ConfigAuthoringFunctionUrl.FunctionUrl

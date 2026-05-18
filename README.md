@@ -8,8 +8,9 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - Store authoring payload files into the versioned S3 layout.
 - Persist alias lookup records based on `site-config.json.aliases`.
 - Pull a draft or published package back into the local draft format.
-- Publish the current draft pointer.
+- Publish the current draft pointer for `production` or `test`.
 - Mark a site as `active`, `maintenance`, or `suspended`.
+- Require signed AWS IAM deploy identity for authoring actions.
 
 ## AWS dependencies
 
@@ -23,6 +24,26 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - `CONFIG_TABLE_NAME`
 - `CONFIG_PAYLOADS_BUCKET_NAME`
 - `LOG_LEVEL`
+- `DEPLOY_AUTHZ_CONFIG_JSON`
+
+`DEPLOY_AUTHZ_CONFIG_JSON` is a JSON array that maps deploy IAM roles to allowed actions, domains, and environments. Example:
+
+```json
+[
+  {
+    "roleName": "draft-pamelabetancourt-com-test-deploy",
+    "domains": ["pamelabetancourt.com"],
+    "environments": ["test"],
+    "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"]
+  },
+  {
+    "roleName": "draft-pamelabetancourt-com-production-deploy",
+    "domains": ["pamelabetancourt.com"],
+    "environments": ["production"],
+    "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"]
+  }
+]
+```
 
 ## Deploy
 
@@ -56,32 +77,32 @@ https://2dvjmiwjod.execute-api.us-east-1.amazonaws.com/Prod/config-authoring
 - `publishDraft`
 - `setSiteStatus`
 
-Site aliases are authored in `site-config.json` through an optional `aliases` array. Those hosts resolve to the canonical `domain` at runtime, which lets you test landings on preview subdomains or temporary domains without cloning the full site entry.
+Site production aliases are authored in `site-config.json` through an optional `aliases` array. Test aliases are authored under `site-config.json.environments.test.aliases`. Alias records include an `environment` field so runtime-read can serve either the production or test published pointer.
+
+Example:
+
+```json
+{
+  "aliases": ["pamelabetancourt.com"],
+  "environments": {
+    "test": {
+      "aliases": [
+        "test.pamelabetancourt.com",
+        "test.pamelabetancourt.zoolandingpage.com.mx"
+      ]
+    }
+  }
+}
+```
 
 ## Manual smoke tests
 
-Create or replace a draft:
+The deployed API uses AWS IAM authorization. Unsigned requests should fail. Use GitHub Actions OIDC or a SigV4-capable AWS SDK client that relies on the standard credential provider chain and is authorized by the deployment policy. Never place an AWS secret access key or session token in command-line arguments.
+
+Run the local handler tests before any authenticated smoke test:
 
 ```bash
-curl -X POST "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/config-authoring" \
-  -H "Content-Type: application/json" \
-  -d @sample-create-site.json
-```
-
-Publish the current draft:
-
-```bash
-curl -X POST "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/config-authoring" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"publishDraft","domain":"test.zoolandingpage.com.mx"}'
-```
-
-Suspend a site with a professional fallback message:
-
-```bash
-curl -X POST "https://your-api-id.execute-api.us-east-1.amazonaws.com/Prod/config-authoring" \
-  -H "Content-Type: application/json" \
-  -d '{"action":"setSiteStatus","domain":"test.zoolandingpage.com.mx","status":"suspended","fallbackMode":"system","message":"This site is currently unavailable. Please contact support."}'
+python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ## Payload layout

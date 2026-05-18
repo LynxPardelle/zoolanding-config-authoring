@@ -1,4 +1,7 @@
+import base64
+import json
 import os
+import re
 from typing import Any, Dict, Optional
 
 from zoolanding_lambda_common import (
@@ -22,11 +25,18 @@ from zoolanding_lambda_common import (
     put_json_to_s3,
     server_error,
     site_pk,
+    unauthorized,
 )
 
 
 CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
+DEPLOY_AUTHZ_CONFIG_JSON = os.getenv("DEPLOY_AUTHZ_CONFIG_JSON", "[]")
+DEPLOY_AUTHZ_CONFIG_S3_KEY = os.getenv("DEPLOY_AUTHZ_CONFIG_S3_KEY", "").strip()
+
+WRITE_ACTIONS = {"createSite", "upsertDraft", "publishDraft", "setSiteStatus"}
+ALL_ACTIONS = WRITE_ACTIONS | {"getSite"}
+ENVIRONMENTS = {"production", "test"}
 
 
 def _initial_lifecycle(updated_at: str, updated_by: str) -> Dict[str, Any]:
@@ -47,6 +57,17 @@ def _read_site_file(files: list[Dict[str, Any]], suffix: str) -> Optional[Dict[s
     return None
 
 
+def _normalize_environment(value: Any) -> str:
+    environment = str(value or "production").strip().lower()
+    if environment in {"prod", "live", "main"}:
+        return "production"
+    if environment in {"testing", "stage", "staging"}:
+        return "test"
+    if environment in ENVIRONMENTS:
+        return environment
+    raise ValueError("environment must be 'production' or 'test'")
+
+
 def _normalize_aliases(domain: Any, aliases: Any) -> list[str]:
     canonical_domain = normalize_domain(domain)
     if not canonical_domain or not isinstance(aliases, list):
@@ -64,16 +85,42 @@ def _normalize_aliases(domain: Any, aliases: Any) -> list[str]:
     return normalized
 
 
+def _normalize_environment_aliases(domain: str, environments: Any) -> Dict[str, list[str]]:
+    if not isinstance(environments, dict):
+        return {}
+
+    normalized: Dict[str, list[str]] = {}
+    for environment, config in environments.items():
+        try:
+            normalized_environment = _normalize_environment(environment)
+        except ValueError:
+            continue
+        if not isinstance(config, dict):
+            continue
+        aliases = _normalize_aliases(domain, config.get("aliases"))
+        if aliases:
+            normalized[normalized_environment] = aliases
+
+    return normalized
+
+
 def _derive_site_fields(domain: str, files: list[Dict[str, Any]]) -> Dict[str, Any]:
     site_config = _read_site_file(files, "site-config.json") or {}
     return {
         "aliases": _normalize_aliases(domain, site_config.get("aliases")),
+        "environmentAliases": _normalize_environment_aliases(domain, site_config.get("environments")),
         "defaultPageId": str(site_config.get("defaultPageId") or "").strip() or "default",
         "routes": site_config.get("routes") if isinstance(site_config.get("routes"), list) else [],
     }
 
 
-def _save_alias_records(domain: str, aliases: list[str], updated_at: str, updated_by: str) -> None:
+def _save_alias_records(
+    domain: str,
+    aliases: list[str],
+    environment_aliases: Dict[str, list[str]],
+    updated_at: str,
+    updated_by: str,
+) -> None:
     for alias in aliases:
         put_item(CONFIG_TABLE_NAME, {
             "pk": alias_pk(alias),
@@ -81,9 +128,148 @@ def _save_alias_records(domain: str, aliases: list[str], updated_at: str, update
             "type": "site-alias",
             "alias": alias,
             "domain": domain,
+            "environment": "production",
             "updatedAt": updated_at,
             "updatedBy": updated_by,
         })
+
+    for environment, aliases_for_environment in environment_aliases.items():
+        for alias in aliases_for_environment:
+            put_item(CONFIG_TABLE_NAME, {
+                "pk": alias_pk(alias),
+                "sk": "SITE",
+                "type": "site-alias",
+                "alias": alias,
+                "domain": domain,
+                "environment": environment,
+                "updatedAt": updated_at,
+                "updatedBy": updated_by,
+            })
+
+
+def _load_deploy_authz_config() -> list[Dict[str, Any]]:
+    if DEPLOY_AUTHZ_CONFIG_S3_KEY:
+        try:
+            parsed = load_json_from_s3(CONFIG_PAYLOADS_BUCKET_NAME, DEPLOY_AUTHZ_CONFIG_S3_KEY)
+        except Exception:
+            log("ERROR", "DEPLOY_AUTHZ_CONFIG_S3_KEY could not be loaded")
+            return []
+        if not isinstance(parsed, list):
+            log("ERROR", "Deploy authorization config S3 object must be an array")
+            return []
+        return [entry for entry in parsed if isinstance(entry, dict)]
+
+    raw_config = (DEPLOY_AUTHZ_CONFIG_JSON or "[]").strip()
+    try:
+        parsed = json.loads(raw_config)
+    except json.JSONDecodeError:
+        try:
+            parsed = json.loads(base64.b64decode(raw_config, validate=True).decode("utf-8"))
+        except Exception:
+            log("ERROR", "DEPLOY_AUTHZ_CONFIG_JSON is not valid JSON or base64-encoded JSON")
+            return []
+    if not isinstance(parsed, list):
+        log("ERROR", "DEPLOY_AUTHZ_CONFIG_JSON must be an array")
+        return []
+    return [entry for entry in parsed if isinstance(entry, dict)]
+
+
+def _extract_nested(mapping: Any, path: list[str]) -> Any:
+    current = mapping
+    for part in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _caller_arn(event: Dict[str, Any]) -> str:
+    request_context = event.get("requestContext") or {}
+    candidates = [
+        _extract_nested(request_context, ["identity", "userArn"]),
+        _extract_nested(request_context, ["authorizer", "iam", "userArn"]),
+        _extract_nested(request_context, ["authorizer", "iam", "callerArn"]),
+        _extract_nested(request_context, ["authorizer", "principalId"]),
+    ]
+    for candidate in candidates:
+        arn = str(candidate or "").strip()
+        if arn.startswith("arn:"):
+            return arn
+    return ""
+
+
+def _role_name_from_arn(arn: str) -> str:
+    match = re.search(r":assumed-role/([^/]+)/", arn)
+    if match:
+        return match.group(1)
+    match = re.search(r":role/(.+)$", arn)
+    if match:
+        return match.group(1).split("/")[-1]
+    return ""
+
+
+def _role_arn_matches(rule_arn: str, caller_arn: str) -> bool:
+    if not rule_arn:
+        return False
+    if caller_arn == rule_arn:
+        return True
+    role_name = _role_name_from_arn(rule_arn)
+    caller_role_name = _role_name_from_arn(caller_arn)
+    return bool(role_name and caller_role_name and role_name == caller_role_name)
+
+
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _rule_allows(rule: Dict[str, Any], caller_arn: str, action: str, domain: str, environment: str) -> bool:
+    role_arns = _string_list(rule.get("roleArn")) + _string_list(rule.get("roleArns"))
+    role_names = _string_list(rule.get("roleName")) + _string_list(rule.get("roleNames"))
+    caller_role_name = _role_name_from_arn(caller_arn)
+
+    arn_allowed = any(_role_arn_matches(role_arn, caller_arn) for role_arn in role_arns)
+    name_allowed = any(role_name == caller_role_name for role_name in role_names)
+    if not arn_allowed and not name_allowed:
+        return False
+
+    actions = set(_string_list(rule.get("actions")))
+    if actions and action not in actions and "*" not in actions:
+        return False
+
+    domains = {normalize_domain(item) for item in _string_list(rule.get("domains"))}
+    if domains and domain not in domains and "*" not in domains:
+        return False
+
+    environment_values = _string_list(rule.get("environments"))
+    environments = {"*" if item == "*" else _normalize_environment(item) for item in environment_values} if environment_values else set()
+    if environments and environment not in environments and "*" not in environments:
+        return False
+
+    return True
+
+
+def _authorize_request(event: Dict[str, Any], payload: Dict[str, Any], action: str) -> tuple[bool, str]:
+    domain = normalize_domain(payload.get("domain"))
+    environment = _normalize_environment(payload.get("environment") or payload.get("stageEnvironment"))
+
+    caller_arn = _caller_arn(event)
+    if not caller_arn:
+        return False, "Missing signed deploy identity"
+
+    for rule in _load_deploy_authz_config():
+        if _rule_allows(rule, caller_arn, action, domain, environment):
+            return True, caller_arn
+
+    return False, "Deploy identity is not authorized for this action, domain, and environment"
+
+
+def _updated_by(payload: Dict[str, Any], request_id: str) -> str:
+    trusted_identity = str(payload.get("_authorizedUpdatedBy") or "").strip()
+    return trusted_identity or request_id
 
 
 def _normalize_files(domain: str, files: Any) -> list[Dict[str, Any]]:
@@ -148,6 +334,7 @@ def _load_package(domain: str, stage: str, version_id: str, prefix: str, metadat
         "metadata": {
             "registry": {
                 "aliases": metadata.get("aliases", []),
+                "environmentAliases": metadata.get("environmentAliases", {}),
                 "defaultPageId": metadata.get("defaultPageId"),
                 "routes": metadata.get("routes", []),
                 "lifecycle": metadata.get("lifecycle", {}),
@@ -220,7 +407,7 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     prefix = _store_files(domain, version_id, files)
     derived = _derive_site_fields(domain, files)
     updated_at = now_iso()
-    updated_by = str(payload.get("updatedBy") or request_id)
+    updated_by = _updated_by(payload, request_id)
 
     metadata = existing or {
         "pk": site_pk(domain),
@@ -232,6 +419,7 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     }
     metadata["defaultPageId"] = derived["defaultPageId"]
     metadata["aliases"] = derived["aliases"]
+    metadata["environmentAliases"] = derived["environmentAliases"]
     metadata["routes"] = derived["routes"]
     metadata["draft"] = {
         "versionId": version_id,
@@ -242,10 +430,13 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = updated_by
 
-    _save_alias_records(domain, derived["aliases"], updated_at, updated_by)
+    _save_alias_records(domain, derived["aliases"], derived["environmentAliases"], updated_at, updated_by)
 
     if payload.get("publishOnCreate"):
         metadata["published"] = metadata["draft"]
+        published_environments = metadata.get("publishedEnvironments") if isinstance(metadata.get("publishedEnvironments"), dict) else {}
+        published_environments["production"] = metadata["draft"]
+        metadata["publishedEnvironments"] = published_environments
         metadata["lifecycle"] = {
             **metadata.get("lifecycle", {}),
             "status": "active",
@@ -267,23 +458,32 @@ def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
     stage = str(payload.get("stage") or "draft").strip() or "draft"
     if stage not in {"draft", "published"}:
         return bad_request("stage must be 'draft' or 'published'")
+    environment = _normalize_environment(payload.get("environment") or payload.get("stageEnvironment"))
 
     metadata = _load_registry(domain)
     if not metadata:
         return not_found("Site metadata not found", domain=domain)
 
     pointer = metadata.get(stage)
+    if stage == "published":
+        published_environments = metadata.get("publishedEnvironments") if isinstance(metadata.get("publishedEnvironments"), dict) else {}
+        if environment != "production":
+            pointer = published_environments.get(environment)
+        elif not isinstance(pointer, dict):
+            pointer = published_environments.get("production")
     if not isinstance(pointer, dict):
         return not_found(f"No {stage} package found", domain=domain)
 
     version_id = str(pointer.get("versionId") or "").strip()
     prefix = str(pointer.get("prefix") or default_version_prefix(domain, version_id)).strip()
     package = _load_package(domain, stage, version_id, prefix, metadata)
+    package["environment"] = environment
     return ok(package)
 
 
 def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     domain = normalize_domain(payload.get("domain"))
+    environment = _normalize_environment(payload.get("environment"))
     metadata = _load_registry(domain)
     if not metadata:
         return not_found("Site metadata not found", domain=domain)
@@ -297,17 +497,23 @@ def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
         return bad_request("Only the current draft version can be published in this initial implementation")
 
     updated_at = now_iso()
-    metadata["published"] = {
+    published_pointer = {
         **draft_pointer,
         "updatedAt": updated_at,
-        "updatedBy": str(payload.get("updatedBy") or request_id),
+        "updatedBy": _updated_by(payload, request_id),
     }
+    published_environments = metadata.get("publishedEnvironments") if isinstance(metadata.get("publishedEnvironments"), dict) else {}
+    published_environments[environment] = published_pointer
+    metadata["publishedEnvironments"] = published_environments
+    if environment == "production":
+        metadata["published"] = published_pointer
     metadata["updatedAt"] = updated_at
-    metadata["updatedBy"] = str(payload.get("updatedBy") or request_id)
+    metadata["updatedBy"] = _updated_by(payload, request_id)
     _save_registry(metadata)
     return ok({
         "domain": domain,
-        "published": metadata.get("published"),
+        "environment": environment,
+        "published": published_pointer,
         "draft": metadata.get("draft"),
         "lifecycle": metadata.get("lifecycle"),
     })
@@ -333,11 +539,11 @@ def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]
         "supportEmail": payload.get("supportEmail") or lifecycle.get("supportEmail"),
         "supportPhone": payload.get("supportPhone") or lifecycle.get("supportPhone"),
         "updatedAt": updated_at,
-        "updatedBy": str(payload.get("updatedBy") or request_id),
+        "updatedBy": _updated_by(payload, request_id),
     })
     metadata["lifecycle"] = lifecycle
     metadata["updatedAt"] = updated_at
-    metadata["updatedBy"] = str(payload.get("updatedBy") or request_id)
+    metadata["updatedBy"] = _updated_by(payload, request_id)
     _save_registry(metadata)
     return ok({"domain": domain, "lifecycle": lifecycle})
 
@@ -353,10 +559,15 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return bad_request("Body is not valid JSON")
 
     action = str(payload.get("action") or "").strip()
-    if action not in {"createSite", "upsertDraft", "getSite", "publishDraft", "setSiteStatus"}:
+    if action not in ALL_ACTIONS:
         return bad_request("Unsupported action")
 
     try:
+        authorized, auth_message = _authorize_request(event, payload, action)
+        if not authorized:
+            return unauthorized(auth_message)
+        payload["_authorizedUpdatedBy"] = _role_name_from_arn(auth_message) or auth_message
+
         if action in {"createSite", "upsertDraft"}:
             return _create_or_replace_draft(payload, request_id)
         if action == "getSite":
