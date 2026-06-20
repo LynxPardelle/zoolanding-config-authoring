@@ -26,7 +26,8 @@ parameter_overrides = [
   "ManageStorageResources=true",
   "ConfigTableName=zoolanding-config-registry-dev",
   "ConfigPayloadsBucketName=zoolanding-config-payloads-dev",
-  "LogLevel=INFO"
+  "LogLevel=INFO",
+  "DeployAuthzConfigS3Key=system/deploy-authz.json"
 ]
 
 [test.deploy.parameters]
@@ -41,7 +42,8 @@ parameter_overrides = [
   "ManageStorageResources=true",
   "ConfigTableName=zoolanding-config-registry-test",
   "ConfigPayloadsBucketName=zoolanding-config-payloads-test",
-  "LogLevel=INFO"
+  "LogLevel=INFO",
+  "DeployAuthzConfigS3Key=system/deploy-authz.json"
 ]
 
 [prod.deploy.parameters]
@@ -56,5 +58,6 @@ parameter_overrides = [
   "ManageStorageResources=false",
   "ConfigTableName=zoolanding-config-registry",
   "ConfigPayloadsBucketName=zoolanding-config-payloads",
-  "LogLevel=INFO"
+  "LogLevel=INFO",
+  "DeployAuthzConfigS3Key=system/deploy-authz.json"
 ]
