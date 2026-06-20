@@ -8,6 +8,11 @@ Parameters:
     Default: prod
     AllowedValues: [dev, test, prod, production]
     Description: Deployment environment name used for tags and environment-specific stack configuration.
+  ManageStorageResources:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Set to true for new non-production stacks that should create the config DynamoDB table and S3 bucket.
   ConfigTableName:
     Type: String
     Default: zoolanding-config-registry
@@ -26,6 +31,12 @@ Parameters:
     Default: system/deploy-authz.json
     Description: Required private S3 key in ConfigPayloadsBucketName containing exact IAM role ARN authorization rules.
 
+Conditions:
+  ShouldManageStorageResources:
+    Fn::Equals:
+      - Ref: ManageStorageResources
+      - 'true'
+
 Globals:
   Function:
     Runtime: python3.13
@@ -40,6 +51,68 @@ Globals:
         Ref: EnvironmentName
 
 Resources:
+  ConfigRegistryTable:
+    Type: AWS::DynamoDB::Table
+    Condition: ShouldManageStorageResources
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      TableName:
+        Ref: ConfigTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      SSESpecification:
+        SSEEnabled: true
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: ConfigRegistry
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
+  ConfigPayloadsBucket:
+    Type: AWS::S3::Bucket
+    Condition: ShouldManageStorageResources
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName:
+        Ref: ConfigPayloadsBucketName
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        - Key: Project
+          Value: Zoolandingpage
+        - Key: Component
+          Value: ConfigPayloads
+        - Key: ManagedBy
+          Value: SAM
+        - Key: Environment
+          Value:
+            Ref: EnvironmentName
+
   AuthoringApi:
     Type: AWS::Serverless::Api
     Properties:

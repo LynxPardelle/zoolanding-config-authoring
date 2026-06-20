@@ -47,4 +47,4 @@ jobs:
           python -m unittest discover -s tests -p "test_*.py"
           sam validate
           sam build --no-cached
-          sam deploy --config-env test --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides "EnvironmentName=test" "DeployAuthzConfigJson=${DEPLOY_AUTHZ_CONFIG_JSON_BASE64}"
+          sam deploy --config-env test --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides "EnvironmentName=test" "ManageStorageResources=true" "DeployAuthzConfigJson=${DEPLOY_AUTHZ_CONFIG_JSON_BASE64}"
