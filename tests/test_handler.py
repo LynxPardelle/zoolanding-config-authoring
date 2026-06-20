@@ -43,6 +43,12 @@ class AuthoringHandlerTest(unittest.TestCase):
                 "environments": ["production"],
                 "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"],
             },
+            {
+                "roleName": "draft-pamela-dev-deploy",
+                "domains": ["pamelabetancourt.com"],
+                "environments": ["dev"],
+                "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"],
+            },
         ])
         self.handler = importlib.reload(importlib.import_module("lambda_function"))
         self.items = {}
@@ -189,6 +195,63 @@ class AuthoringHandlerTest(unittest.TestCase):
         metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
         self.assertEqual(metadata["published"]["versionId"], "prod-v1")
         self.assertEqual(metadata["publishedEnvironments"]["production"]["versionId"], "prod-v1")
+
+    def test_content_hub_files_are_indexed_in_site_metadata(self):
+        files = self.draft_files() + [
+            {
+                "path": "pamelabetancourt.com/content-hubs/main/hub.json",
+                "content": {
+                    "hubId": "main",
+                    "name": "Blog",
+                    "defaultLanguage": "es",
+                    "canonicalDraftDomain": "pamelabetancourt.com",
+                    "allowedDraftDomains": ["pamelabetancourt.com", "sulandingpage.com.mx"],
+                },
+            },
+            {
+                "path": "pamelabetancourt.com/content-hubs/main/articles/primer-post/metadata.json",
+                "content": {
+                    "articleId": "primer-post",
+                    "title": "Primer post",
+                    "status": "draft",
+                },
+            },
+        ]
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "dev",
+            "versionId": "dev-v1",
+            "files": files,
+        }, "draft-pamela-dev-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 200)
+        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        self.assertEqual(metadata["contentHubs"][0]["hubId"], "main")
+        self.assertEqual(metadata["contentHubs"][0]["articleIds"], ["primer-post"])
+
+    def test_content_hub_files_reject_server_only_fields(self):
+        files = self.draft_files() + [
+            {
+                "path": "pamelabetancourt.com/content-hubs/main/articles/primer-post/metadata.json",
+                "content": {
+                    "articleId": "primer-post",
+                    "clientSecret": "do-not-store",
+                },
+            },
+        ]
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "dev",
+            "versionId": "dev-v1",
+            "files": files,
+        }, "draft-pamela-dev-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertIn("server-only", parse(response)["error"])
 
 
 if __name__ == "__main__":

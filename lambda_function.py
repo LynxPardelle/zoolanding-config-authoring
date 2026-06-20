@@ -36,7 +36,9 @@ DEPLOY_AUTHZ_CONFIG_S3_KEY = os.getenv("DEPLOY_AUTHZ_CONFIG_S3_KEY", "").strip()
 
 WRITE_ACTIONS = {"createSite", "upsertDraft", "publishDraft", "setSiteStatus"}
 ALL_ACTIONS = WRITE_ACTIONS | {"getSite"}
-ENVIRONMENTS = {"production", "test"}
+ENVIRONMENTS = {"production", "test", "dev"}
+SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,78}[a-z0-9]$")
+SERVER_ONLY_KEY_PATTERN = re.compile(r"(secret|token|credential|password|privatekey|authorization)", re.IGNORECASE)
 
 
 def _initial_lifecycle(updated_at: str, updated_by: str) -> Dict[str, Any]:
@@ -61,11 +63,77 @@ def _normalize_environment(value: Any) -> str:
     environment = str(value or "production").strip().lower()
     if environment in {"prod", "live", "main"}:
         return "production"
+    if environment in {"development", "local"}:
+        return "dev"
     if environment in {"testing", "stage", "staging"}:
         return "test"
     if environment in ENVIRONMENTS:
         return environment
-    raise ValueError("environment must be 'production' or 'test'")
+    raise ValueError("environment must be 'production', 'test', or 'dev'")
+
+
+def _safe_content_id(value: Any, field_name: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not SAFE_ID_PATTERN.fullmatch(normalized):
+        raise ValueError(f"{field_name} must be a safe id using lowercase letters, numbers, dots, dashes, or underscores")
+    return normalized
+
+
+def _reject_server_only_content(value: Any, path: str = "content") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key or "")
+            if SERVER_ONLY_KEY_PATTERN.search(key_text):
+                raise ValueError(f"{path}.{key_text} cannot contain server-only or credential-like fields")
+            _reject_server_only_content(child, f"{path}.{key_text}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_server_only_content(child, f"{path}[{index}]")
+
+
+def _content_hub_file_info(domain: str, path: str) -> Optional[tuple[str, Optional[str]]]:
+    prefix = f"{domain}/content-hubs/"
+    if not path.startswith(prefix):
+        return None
+    parts = path[len(prefix):].split("/")
+    if len(parts) < 2:
+        raise ValueError("Content hub files must live under content-hubs/{hubId}/...")
+    hub_id = _safe_content_id(parts[0], "contentHubId")
+    article_id = None
+    if len(parts) >= 4 and parts[1] == "articles":
+        article_id = _safe_content_id(parts[2], "articleId")
+    return hub_id, article_id
+
+
+def _derive_content_hub_fields(domain: str, files: list[Dict[str, Any]]) -> Dict[str, Any]:
+    hubs: dict[str, Dict[str, Any]] = {}
+    for entry in files:
+        path = str(entry.get("path") or "")
+        info = _content_hub_file_info(domain, path)
+        if not info:
+            continue
+        hub_id, article_id = info
+        _reject_server_only_content(entry.get("content"), path)
+        hub = hubs.setdefault(hub_id, {"hubId": hub_id, "articleIds": []})
+        if article_id and article_id not in hub["articleIds"]:
+            hub["articleIds"].append(article_id)
+
+    site_config = _read_site_file(files, "site-config.json") or {}
+    configured_hubs = site_config.get("contentHubs")
+    if isinstance(configured_hubs, list):
+        for configured in configured_hubs:
+            if not isinstance(configured, dict):
+                continue
+            hub_id = _safe_content_id(configured.get("hubId") or configured.get("id"), "contentHubId")
+            hub = hubs.setdefault(hub_id, {"hubId": hub_id, "articleIds": []})
+            hub["name"] = str(configured.get("name") or hub_id).strip() or hub_id
+            hub["defaultLanguage"] = str(configured.get("defaultLanguage") or "es").strip() or "es"
+            hub["canonicalDraftDomain"] = normalize_domain(configured.get("canonicalDraftDomain") or domain)
+            allowed_domains = configured.get("allowedDraftDomains")
+            if isinstance(allowed_domains, list):
+                hub["allowedDraftDomains"] = [normalize_domain(item) for item in allowed_domains if normalize_domain(item)]
+
+    return {"contentHubs": sorted(hubs.values(), key=lambda item: item["hubId"])}
 
 
 def _normalize_aliases(domain: Any, aliases: Any) -> list[str]:
@@ -106,11 +174,13 @@ def _normalize_environment_aliases(domain: str, environments: Any) -> Dict[str, 
 
 def _derive_site_fields(domain: str, files: list[Dict[str, Any]]) -> Dict[str, Any]:
     site_config = _read_site_file(files, "site-config.json") or {}
+    content_hub_fields = _derive_content_hub_fields(domain, files)
     return {
         "aliases": _normalize_aliases(domain, site_config.get("aliases")),
         "environmentAliases": _normalize_environment_aliases(domain, site_config.get("environments")),
         "defaultPageId": str(site_config.get("defaultPageId") or "").strip() or "default",
         "routes": site_config.get("routes") if isinstance(site_config.get("routes"), list) else [],
+        **content_hub_fields,
     }
 
 
@@ -289,6 +359,7 @@ def _normalize_files(domain: str, files: Any) -> list[Dict[str, Any]]:
         content = entry.get("content")
         if not isinstance(content, dict):
             raise ValueError(f"File '{path}' content must be a JSON object")
+        _content_hub_file_info(domain, path)
 
         normalized.append({
             "path": path,
@@ -421,6 +492,7 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     metadata["aliases"] = derived["aliases"]
     metadata["environmentAliases"] = derived["environmentAliases"]
     metadata["routes"] = derived["routes"]
+    metadata["contentHubs"] = derived["contentHubs"]
     metadata["draft"] = {
         "versionId": version_id,
         "prefix": prefix,

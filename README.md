@@ -11,6 +11,7 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - Publish the current draft pointer for `production` or `test`.
 - Mark a site as `active`, `maintenance`, or `suspended`.
 - Require signed AWS IAM deploy identity for authoring actions.
+- Index optional content hub package metadata for blog/article features while preserving the same draft-package S3 layout.
 
 ## AWS dependencies
 
@@ -23,6 +24,7 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 
 - `CONFIG_TABLE_NAME`
 - `CONFIG_PAYLOADS_BUCKET_NAME`
+- `ENVIRONMENT_NAME`
 - `LOG_LEVEL`
 - `DEPLOY_AUTHZ_CONFIG_JSON`
 
@@ -53,7 +55,13 @@ For repeatable deployments from this repository:
 sam deploy
 ```
 
-The checked-in `samconfig.toml` already targets `us-east-1` with the correct stack name and parameter overrides.
+The checked-in `samconfig.toml` includes `dev`, `test`, and `prod` deployment profiles in `us-east-1`.
+
+- `dev` uses `zoolanding-config-registry-dev` and `zoolanding-config-payloads-dev`.
+- `test` uses `zoolanding-config-registry-test` and `zoolanding-config-payloads-test`.
+- `prod` uses the existing production table and bucket names.
+
+GitHub deploy workflows require `DEPLOY_AUTHZ_CONFIG_JSON_BASE64` so the authoring Lambda is not deployed without domain/action guardrails.
 
 The first non-interactive deployment command used was:
 
@@ -78,6 +86,21 @@ https://2dvjmiwjod.execute-api.us-east-1.amazonaws.com/Prod/config-authoring
 - `setSiteStatus`
 
 Site production aliases are authored in `site-config.json` through an optional `aliases` array. Test aliases are authored under `site-config.json.environments.test.aliases`. Alias records include an `environment` field so runtime-read can serve either the production or test published pointer.
+
+## Content hub package files
+
+Content hub files are optional and live inside the normal draft package:
+
+```text
+{domain}/content-hubs/{hubId}/hub.json
+{domain}/content-hubs/{hubId}/categories.json
+{domain}/content-hubs/{hubId}/tags.json
+{domain}/content-hubs/{hubId}/articles/{articleId}/metadata.json
+```
+
+`hubId` and `articleId` must be lowercase safe ids. Content hub JSON is rejected when it contains credential-like or server-only field names such as `secret`, `token`, `credential`, `password`, `privateKey`, or `authorization`.
+
+The Lambda stores a compact `contentHubs` index in site metadata so runtime readers can expose safe public hub metadata without scanning S3.
 
 Example:
 
