@@ -39,12 +39,9 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
       - name: Test and deploy
         shell: bash
-        env:
-          DEPLOY_AUTHZ_CONFIG_JSON_BASE64: ${{ secrets.DEPLOY_AUTHZ_CONFIG_JSON_BASE64 }}
         run: |
           set -euo pipefail
-          test -n "${DEPLOY_AUTHZ_CONFIG_JSON_BASE64:-}" || { echo "DEPLOY_AUTHZ_CONFIG_JSON_BASE64 is required"; exit 1; }
           python -m unittest discover -s tests -p "test_*.py"
           sam validate
           sam build --no-cached
-          sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides "EnvironmentName=prod" "ManageStorageResources=false" "DeployAuthzConfigJson=${DEPLOY_AUTHZ_CONFIG_JSON_BASE64}"
+          sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset

@@ -26,15 +26,10 @@ Parameters:
     Default: INFO
     AllowedValues: [DEBUG, INFO, WARNING, ERROR]
     Description: Log level for the Lambda.
-  DeployAuthzConfigJson:
-    Type: String
-    Default: '[]'
-    NoEcho: true
-    Description: Small inline JSON or base64 JSON array mapping deploy IAM roles to allowed draft domains, environments, and actions.
   DeployAuthzConfigS3Key:
     Type: String
-    Default: ''
-    Description: Optional S3 key in ConfigPayloadsBucketName containing the deploy authorization JSON array.
+    Default: system/deploy-authz.json
+    Description: Required S3 key in ConfigPayloadsBucketName containing the deploy authorization JSON array.
 
 Conditions:
   ShouldManageStorageResources:
@@ -162,8 +157,6 @@ Resources:
             Ref: EnvironmentName
           LOG_LEVEL:
             Ref: LogLevel
-          DEPLOY_AUTHZ_CONFIG_JSON:
-            Ref: DeployAuthzConfigJson
           DEPLOY_AUTHZ_CONFIG_S3_KEY:
             Ref: DeployAuthzConfigS3Key
       Policies:
@@ -178,14 +171,23 @@ Resources:
             - Effect: Allow
               Action:
                 - s3:GetObject
+              Resource:
+                - Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/sites/*
+                - Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/${DeployAuthzConfigS3Key}
+            - Effect: Allow
+              Action:
                 - s3:PutObject
               Resource:
-                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/*
+                Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}/sites/*
             - Effect: Allow
               Action:
                 - s3:ListBucket
               Resource:
                 Fn::Sub: arn:aws:s3:::${ConfigPayloadsBucketName}
+              Condition:
+                StringLike:
+                  s3:prefix:
+                    - sites/*
       Events:
         ConfigAuthoringPost:
           Type: Api

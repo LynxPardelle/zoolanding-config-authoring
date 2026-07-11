@@ -1,0 +1,15 @@
+.git/
+.github/
+.aws-sam/
+__pycache__/
+*.py[cod]
+tests/
+README.md
+LICENSE
+samconfig.toml
+.gitignore
+.aws-samignore
+.env
+.env.*
+*.pem
+*.key

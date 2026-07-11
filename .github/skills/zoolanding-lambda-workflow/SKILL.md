@@ -12,7 +12,7 @@ Use this skill for work in the config authoring Lambda.
 
 - This service owns create, pull, update, publish, and lifecycle status changes for draft packages.
 - It must stay symmetrical with the draft file layout used by the Angular repo.
-- Alias records derived from `site-config.json.aliases` are part of the runtime contract.
+- Alias proposals in `site-config.json` are contract-sensitive, but draft upsert must not mutate public alias metadata or lookup records until an allowlist and atomic ownership contract are approved.
 
 ## Workflow
 
@@ -21,7 +21,7 @@ Use this skill for work in the config authoring Lambda.
 
 2. Preserve storage symmetry.
    - Keep the S3 versioned layout aligned with `drafts/{domain}/...` expectations from the frontend workflow.
-   - Treat alias persistence and publish pointers as contract-sensitive behavior.
+   - Treat alias proposals and publish pointers as contract-sensitive behavior; do not infer that draft storage claims an alias.
 
 3. Change only the requested behavior.
    - Keep action names and payload shapes stable unless the task explicitly changes them.
@@ -38,7 +38,7 @@ Use this skill for work in the config authoring Lambda.
 
 - Pair this workflow with the repo-local `karpathy-guidelines` skill for scoped implementation, `systematic-debugging` for root-cause analysis, `risk-review` for review-only asks, and `test-driven-development` for behavior-changing code.
 - Use the repo-local `zoolanding-pr-followup` skill for CI, reviewer, and merge-readiness work.
-- For shared workspace customization audits or consolidated cross-repo summaries, use the community prompts [Workspace AI Customization Audit](../../../../zoolandingpage/.github/prompts/workspace-ai-customization-audit.prompt.md) and [Workspace Change Summary](../../../../zoolandingpage/.github/prompts/workspace-change-summary.prompt.md).
+- For shared workspace customization audits or consolidated cross-repo summaries, use the hub prompts [Workspace AI Customization Audit](https://github.com/LynxPardelle/zoolandingpage/blob/dev/.github/prompts/workspace-ai-customization-audit.prompt.md) and [Workspace Change Summary](https://github.com/LynxPardelle/zoolandingpage/blob/dev/.github/prompts/workspace-change-summary.prompt.md).
 - Use the repo-local `zoolanding-production-readiness` agent for deploy-gate review and the repo-local `zoolanding-config-platform-audit` agent when a change may require coordinated updates in the frontend or sibling services.
 - Use the repo-local `sam-deploy-check` prompt before shipping contract or SAM changes.
 

@@ -15,16 +15,18 @@ jobs:
           fetch-depth: 0
       - name: Enforce promotion graph
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
         run: |
           set -euo pipefail
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            base="${{ github.base_ref }}"
-            head="${{ github.head_ref }}"
-            if [[ "$base" == "test" && "$head" != "dev" ]]; then
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            if [[ "$BASE_REF" == "test" && "$HEAD_REF" != "dev" ]]; then
               echo "Pull requests into test must come from dev."
               exit 1
             fi
-            if [[ "$base" == "main" && "$head" != "test" ]]; then
+            if [[ "$BASE_REF" == "main" && "$HEAD_REF" != "test" ]]; then
               echo "Pull requests into main must come from test."
               exit 1
             fi
