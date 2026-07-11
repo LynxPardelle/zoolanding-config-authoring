@@ -20,19 +20,6 @@ jobs:
           python-version: '3.13'
       - name: Set up SAM
         uses: aws-actions/setup-sam@v3
-      - name: Validate deploy authz config
-        shell: bash
-        env:
-          DEPLOY_AUTHZ_CONFIG_JSON_BASE64: ${{ secrets.DEPLOY_AUTHZ_CONFIG_JSON_BASE64 }}
-        run: |
-          set -euo pipefail
-          test -n "${DEPLOY_AUTHZ_CONFIG_JSON_BASE64:-}" || { echo "DEPLOY_AUTHZ_CONFIG_JSON_BASE64 is required"; exit 1; }
-          python - <<'PY'
-          import base64, json, os
-          parsed = json.loads(base64.b64decode(os.environ["DEPLOY_AUTHZ_CONFIG_JSON_BASE64"]).decode("utf-8"))
-          if not isinstance(parsed, list) or not parsed:
-              raise SystemExit("Deploy authz config must be a non-empty JSON array")
-          PY
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
@@ -40,11 +27,9 @@ jobs:
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
       - name: Test and deploy
         shell: bash
-        env:
-          DEPLOY_AUTHZ_CONFIG_JSON_BASE64: ${{ secrets.DEPLOY_AUTHZ_CONFIG_JSON_BASE64 }}
         run: |
           set -euo pipefail
           python -m unittest discover -s tests -p "test_*.py"
           sam validate
           sam build --no-cached
-          sam deploy --config-env dev --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides "EnvironmentName=dev" "ManageStorageResources=true" "DeployAuthzConfigJson=${DEPLOY_AUTHZ_CONFIG_JSON_BASE64}"
+          sam deploy --config-env dev --no-confirm-changeset --no-fail-on-empty-changeset
