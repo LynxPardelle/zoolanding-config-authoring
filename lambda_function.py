@@ -1,11 +1,10 @@
-import base64
 import json
 import os
 import re
+import unicodedata
 from typing import Any, Dict, Optional
 
 from zoolanding_lambda_common import (
-    alias_pk,
     bad_request,
     build_version_id,
     conflict,
@@ -16,7 +15,6 @@ from zoolanding_lambda_common import (
     load_item,
     load_json_from_s3,
     log,
-    normalize_domain,
     not_found,
     now_iso,
     ok,
@@ -31,12 +29,20 @@ from zoolanding_lambda_common import (
 
 CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
-DEPLOY_AUTHZ_CONFIG_JSON = os.getenv("DEPLOY_AUTHZ_CONFIG_JSON", "[]")
 DEPLOY_AUTHZ_CONFIG_S3_KEY = os.getenv("DEPLOY_AUTHZ_CONFIG_S3_KEY", "").strip()
 
 WRITE_ACTIONS = {"createSite", "upsertDraft", "publishDraft", "setSiteStatus"}
 ALL_ACTIONS = WRITE_ACTIONS | {"getSite"}
 ENVIRONMENTS = {"production", "test"}
+DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+VERSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+WINDOWS_INVALID_PATH_CHARACTER_PATTERN = re.compile(r'[<>:"|?*]')
+WINDOWS_RESERVED_PATH_BASENAME_PATTERN = re.compile(
+    r"^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$",
+    re.IGNORECASE,
+)
+LOCAL_DRAFT_CONTEXT_FOLDERS = {"ai_notes", "findings", "errors-reports"}
+LOCAL_DRAFT_CONTEXT_FILES = {"draft-repo.config.json"}
 
 
 def _initial_lifecycle(updated_at: str, updated_by: str) -> Dict[str, Any]:
@@ -68,15 +74,47 @@ def _normalize_environment(value: Any) -> str:
     raise ValueError("environment must be 'production' or 'test'")
 
 
+def _is_windows_reserved_path_segment(segment: str) -> bool:
+    base_name = segment.split(".", 1)[0].rstrip(" .")
+    return bool(WINDOWS_RESERVED_PATH_BASENAME_PATTERN.fullmatch(base_name))
+
+
+def _has_unsafe_unicode_path_character(value: str) -> bool:
+    return any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
+
+
+def _normalize_domain(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ValueError("domain must be a hostname")
+    domain = value
+    labels = domain.split(".")
+    if (
+        not domain
+        or len(domain) > 253
+        or domain != domain.strip()
+        or domain != domain.lower()
+        or any(not DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels)
+        or _is_windows_reserved_path_segment(domain)
+    ):
+        raise ValueError("domain must be a valid hostname without scheme, credentials, port, or path")
+    return domain
+
+
+def _strict_version_id(value: Any) -> str:
+    if not isinstance(value, str) or not VERSION_ID_PATTERN.fullmatch(value):
+        raise ValueError("versionId must use 1-128 ASCII letters, numbers, dots, dashes, or underscores")
+    return value
+
+
 def _normalize_aliases(domain: Any, aliases: Any) -> list[str]:
-    canonical_domain = normalize_domain(domain)
+    canonical_domain = _normalize_domain(domain)
     if not canonical_domain or not isinstance(aliases, list):
         return []
 
     normalized: list[str] = []
     seen: set[str] = set()
     for alias in aliases:
-        alias_domain = normalize_domain(alias)
+        alias_domain = _normalize_domain(alias)
         if not alias_domain or alias_domain == canonical_domain or alias_domain in seen:
             continue
         seen.add(alias_domain)
@@ -114,62 +152,17 @@ def _derive_site_fields(domain: str, files: list[Dict[str, Any]]) -> Dict[str, A
     }
 
 
-def _save_alias_records(
-    domain: str,
-    aliases: list[str],
-    environment_aliases: Dict[str, list[str]],
-    updated_at: str,
-    updated_by: str,
-) -> None:
-    for alias in aliases:
-        put_item(CONFIG_TABLE_NAME, {
-            "pk": alias_pk(alias),
-            "sk": "SITE",
-            "type": "site-alias",
-            "alias": alias,
-            "domain": domain,
-            "environment": "production",
-            "updatedAt": updated_at,
-            "updatedBy": updated_by,
-        })
-
-    for environment, aliases_for_environment in environment_aliases.items():
-        for alias in aliases_for_environment:
-            put_item(CONFIG_TABLE_NAME, {
-                "pk": alias_pk(alias),
-                "sk": "SITE",
-                "type": "site-alias",
-                "alias": alias,
-                "domain": domain,
-                "environment": environment,
-                "updatedAt": updated_at,
-                "updatedBy": updated_by,
-            })
-
-
 def _load_deploy_authz_config() -> list[Dict[str, Any]]:
-    if DEPLOY_AUTHZ_CONFIG_S3_KEY:
-        try:
-            parsed = load_json_from_s3(CONFIG_PAYLOADS_BUCKET_NAME, DEPLOY_AUTHZ_CONFIG_S3_KEY)
-        except Exception:
-            log("ERROR", "DEPLOY_AUTHZ_CONFIG_S3_KEY could not be loaded")
-            return []
-        if not isinstance(parsed, list):
-            log("ERROR", "Deploy authorization config S3 object must be an array")
-            return []
-        return [entry for entry in parsed if isinstance(entry, dict)]
-
-    raw_config = (DEPLOY_AUTHZ_CONFIG_JSON or "[]").strip()
+    if not DEPLOY_AUTHZ_CONFIG_S3_KEY:
+        log("ERROR", "DEPLOY_AUTHZ_CONFIG_S3_KEY is required")
+        return []
     try:
-        parsed = json.loads(raw_config)
-    except json.JSONDecodeError:
-        try:
-            parsed = json.loads(base64.b64decode(raw_config, validate=True).decode("utf-8"))
-        except Exception:
-            log("ERROR", "DEPLOY_AUTHZ_CONFIG_JSON is not valid JSON or base64-encoded JSON")
-            return []
+        parsed = load_json_from_s3(CONFIG_PAYLOADS_BUCKET_NAME, DEPLOY_AUTHZ_CONFIG_S3_KEY)
+    except Exception:
+        log("ERROR", "DEPLOY_AUTHZ_CONFIG_S3_KEY could not be loaded")
+        return []
     if not isinstance(parsed, list):
-        log("ERROR", "DEPLOY_AUTHZ_CONFIG_JSON must be an array")
+        log("ERROR", "Deploy authorization config S3 object must be an array")
         return []
     return [entry for entry in parsed if isinstance(entry, dict)]
 
@@ -213,47 +206,84 @@ def _role_arn_matches(rule_arn: str, caller_arn: str) -> bool:
         return False
     if caller_arn == rule_arn:
         return True
-    role_name = _role_name_from_arn(rule_arn)
-    caller_role_name = _role_name_from_arn(caller_arn)
-    return bool(role_name and caller_role_name and role_name == caller_role_name)
+    rule_match = re.fullmatch(r"arn:([^:]+):iam::([^:]+):role/(.+)", rule_arn)
+    caller_match = re.fullmatch(r"arn:([^:]+):sts::([^:]+):assumed-role/([^/]+)/.+", caller_arn)
+    if not rule_match or not caller_match:
+        return False
+    rule_partition, rule_account, rule_path = rule_match.groups()
+    caller_partition, caller_account, caller_role_name = caller_match.groups()
+    return (
+        rule_partition == caller_partition
+        and rule_account == caller_account
+        and rule_path.rsplit('/', 1)[-1] == caller_role_name
+    )
 
 
-def _string_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    return []
+def _principal_values(rule: Dict[str, Any], singular: str, plural: str) -> Optional[list[str]]:
+    values: list[str] = []
+    if singular in rule:
+        value = rule[singular]
+        if not isinstance(value, str) or not value.strip():
+            return None
+        values.append(value.strip())
+    if plural in rule:
+        value = rule[plural]
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(not isinstance(item, str) or not item.strip() for item in value)
+        ):
+            return None
+        values.extend(item.strip() for item in value)
+    return values
+
+
+def _required_scope(rule: Dict[str, Any], key: str) -> Optional[set[str]]:
+    value = rule.get(key)
+    if not isinstance(value, list) or not value:
+        return None
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        return None
+    return {item.strip() for item in value}
 
 
 def _rule_allows(rule: Dict[str, Any], caller_arn: str, action: str, domain: str, environment: str) -> bool:
-    role_arns = _string_list(rule.get("roleArn")) + _string_list(rule.get("roleArns"))
-    role_names = _string_list(rule.get("roleName")) + _string_list(rule.get("roleNames"))
-    caller_role_name = _role_name_from_arn(caller_arn)
+    role_arns = _principal_values(rule, "roleArn", "roleArns")
+    if role_arns is None or not role_arns:
+        return False
 
     arn_allowed = any(_role_arn_matches(role_arn, caller_arn) for role_arn in role_arns)
-    name_allowed = any(role_name == caller_role_name for role_name in role_names)
-    if not arn_allowed and not name_allowed:
+    if not arn_allowed:
         return False
 
-    actions = set(_string_list(rule.get("actions")))
-    if actions and action not in actions and "*" not in actions:
+    actions = _required_scope(rule, "actions")
+    domains = _required_scope(rule, "domains")
+    environment_values = _required_scope(rule, "environments")
+    if actions is None or domains is None or environment_values is None:
         return False
 
-    domains = {normalize_domain(item) for item in _string_list(rule.get("domains"))}
-    if domains and domain not in domains and "*" not in domains:
+    if action not in actions and "*" not in actions:
         return False
 
-    environment_values = _string_list(rule.get("environments"))
-    environments = {"*" if item == "*" else _normalize_environment(item) for item in environment_values} if environment_values else set()
-    if environments and environment not in environments and "*" not in environments:
+    try:
+        domains = {"*" if item == "*" else _normalize_domain(item) for item in domains}
+    except ValueError:
+        return False
+    if domain not in domains and "*" not in domains:
+        return False
+
+    try:
+        environments = {"*" if item == "*" else _normalize_environment(item) for item in environment_values}
+    except ValueError:
+        return False
+    if environment not in environments and "*" not in environments:
         return False
 
     return True
 
 
 def _authorize_request(event: Dict[str, Any], payload: Dict[str, Any], action: str) -> tuple[bool, str]:
-    domain = normalize_domain(payload.get("domain"))
+    domain = _normalize_domain(payload.get("domain"))
     environment = _normalize_environment(payload.get("environment") or payload.get("stageEnvironment"))
 
     caller_arn = _caller_arn(event)
@@ -281,14 +311,32 @@ def _normalize_files(domain: str, files: Any) -> list[Dict[str, Any]]:
         if not isinstance(entry, dict):
             raise ValueError("Each file entry must be an object")
 
-        path = str(entry.get("path") or "").strip().replace('\\', '/')
-        if not path:
+        raw_path = entry.get("path")
+        if not isinstance(raw_path, str) or not raw_path or raw_path != raw_path.strip():
             raise ValueError("Each file entry requires a path")
-        if not path.startswith(f"{domain}/"):
-            raise ValueError(f"File path '{path}' must start with '{domain}/'")
+        path = raw_path
+        parts = path.split('/')
+        if (
+            path != unicodedata.normalize("NFC", path)
+            or '\\' in path
+            or WINDOWS_INVALID_PATH_CHARACTER_PATTERN.search(path)
+            or path.startswith('/')
+            or _has_unsafe_unicode_path_character(path)
+            or parts[0] != domain
+            or any(part in {'', '.', '..'} for part in parts)
+            or any(part.endswith(('.', ' ')) for part in parts)
+            or any(_is_windows_reserved_path_segment(part) for part in parts)
+            or any(
+                part.casefold() in LOCAL_DRAFT_CONTEXT_FOLDERS
+                or part.casefold() in LOCAL_DRAFT_CONTEXT_FILES
+                for part in parts[1:]
+            )
+            or not path.endswith('.json')
+        ):
+            raise ValueError("Each file entry path must be a strict JSON path below the requested domain")
         content = entry.get("content")
         if not isinstance(content, dict):
-            raise ValueError(f"File '{path}' content must be a JSON object")
+            raise ValueError("Each file entry content must be a JSON object")
 
         normalized.append({
             "path": path,
@@ -394,18 +442,19 @@ def _save_registry(metadata: Dict[str, Any]) -> None:
 
 
 def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
-    domain = normalize_domain(payload.get("domain"))
-    if not domain:
-        return bad_request("Missing domain")
+    domain = _normalize_domain(payload.get("domain"))
+    if payload.get("publishOnCreate"):
+        return bad_request("publishOnCreate is not supported; use publishDraft with separate authorization")
 
     files = _normalize_files(domain, payload.get("files"))
     existing = _load_registry(domain)
     if payload.get("action") == "createSite" and existing and not payload.get("allowOverwrite"):
         return conflict("Site already exists", domain=domain)
 
-    version_id = str(payload.get("versionId") or build_version_id(request_id)).strip()
-    prefix = _store_files(domain, version_id, files)
+    raw_version_id = payload["versionId"] if "versionId" in payload else build_version_id(request_id)
+    version_id = _strict_version_id(raw_version_id)
     derived = _derive_site_fields(domain, files)
+    prefix = _store_files(domain, version_id, files)
     updated_at = now_iso()
     updated_by = _updated_by(payload, request_id)
 
@@ -418,8 +467,6 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
         "lifecycle": _initial_lifecycle(updated_at, updated_by),
     }
     metadata["defaultPageId"] = derived["defaultPageId"]
-    metadata["aliases"] = derived["aliases"]
-    metadata["environmentAliases"] = derived["environmentAliases"]
     metadata["routes"] = derived["routes"]
     metadata["draft"] = {
         "versionId": version_id,
@@ -429,20 +476,6 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     }
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = updated_by
-
-    _save_alias_records(domain, derived["aliases"], derived["environmentAliases"], updated_at, updated_by)
-
-    if payload.get("publishOnCreate"):
-        metadata["published"] = metadata["draft"]
-        published_environments = metadata.get("publishedEnvironments") if isinstance(metadata.get("publishedEnvironments"), dict) else {}
-        published_environments["production"] = metadata["draft"]
-        metadata["publishedEnvironments"] = published_environments
-        metadata["lifecycle"] = {
-            **metadata.get("lifecycle", {}),
-            "status": "active",
-            "updatedAt": updated_at,
-            "updatedBy": updated_by,
-        }
 
     _save_registry(metadata)
     return ok({
@@ -454,7 +487,7 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
 
 
 def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
-    domain = normalize_domain(payload.get("domain"))
+    domain = _normalize_domain(payload.get("domain"))
     stage = str(payload.get("stage") or "draft").strip() or "draft"
     if stage not in {"draft", "published"}:
         return bad_request("stage must be 'draft' or 'published'")
@@ -482,7 +515,7 @@ def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
-    domain = normalize_domain(payload.get("domain"))
+    domain = _normalize_domain(payload.get("domain"))
     environment = _normalize_environment(payload.get("environment"))
     metadata = _load_registry(domain)
     if not metadata:
@@ -520,7 +553,7 @@ def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
 
 
 def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
-    domain = normalize_domain(payload.get("domain"))
+    domain = _normalize_domain(payload.get("domain"))
     status = str(payload.get("status") or "").strip()
     if status not in {"active", "maintenance", "suspended"}:
         return bad_request("status must be one of: active, maintenance, suspended")

@@ -10,5 +10,6 @@ capabilities = "CAPABILITY_IAM"
 parameter_overrides = [
   "ConfigTableName=zoolanding-config-registry",
   "ConfigPayloadsBucketName=zoolanding-config-payloads",
-  "LogLevel=INFO"
+  "LogLevel=INFO",
+  "DeployAuthzConfigS3Key=system/deploy-authz.json"
 ]

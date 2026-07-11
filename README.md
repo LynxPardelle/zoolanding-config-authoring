@@ -1,12 +1,14 @@
 # Zoolanding Config Authoring
 
+Agent entrypoint: [AGENTS.md](./AGENTS.md). Historical changes: [changelog/README.md](./changelog/README.md).
+
 This Lambda handles create, pull, update, publish, and lifecycle status changes for site draft packages.
 
 ## Responsibilities
 
 - Create a new site registry record.
 - Store authoring payload files into the versioned S3 layout.
-- Persist alias lookup records based on `site-config.json.aliases`.
+- Validate proposed aliases inside the versioned draft package without mutating public alias metadata or lookup records during draft upsert.
 - Pull a draft or published package back into the local draft format.
 - Publish the current draft pointer for `production` or `test`.
 - Mark a site as `active`, `maintenance`, or `suspended`.
@@ -24,20 +26,20 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - `CONFIG_TABLE_NAME`
 - `CONFIG_PAYLOADS_BUCKET_NAME`
 - `LOG_LEVEL`
-- `DEPLOY_AUTHZ_CONFIG_JSON`
+- `DEPLOY_AUTHZ_CONFIG_S3_KEY`
 
-`DEPLOY_AUTHZ_CONFIG_JSON` is a JSON array that maps deploy IAM roles to allowed actions, domains, and environments. Example:
+`DEPLOY_AUTHZ_CONFIG_S3_KEY` points to a JSON array in `CONFIG_PAYLOADS_BUCKET_NAME`. Every rule requires an exact IAM role ARN plus non-empty actions, domains, and environments. Wildcards work only when `"*"` is explicit. Example:
 
 ```json
 [
   {
-    "roleName": "draft-pamelabetancourt-com-test-deploy",
+    "roleArn": "arn:aws:iam::123456789012:role/draft-pamelabetancourt-com-test-deploy",
     "domains": ["pamelabetancourt.com"],
     "environments": ["test"],
     "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"]
   },
   {
-    "roleName": "draft-pamelabetancourt-com-production-deploy",
+    "roleArn": "arn:aws:iam::123456789012:role/draft-pamelabetancourt-com-production-deploy",
     "domains": ["pamelabetancourt.com"],
     "environments": ["production"],
     "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"]
@@ -53,13 +55,7 @@ For repeatable deployments from this repository:
 sam deploy
 ```
 
-The checked-in `samconfig.toml` already targets `us-east-1` with the correct stack name and parameter overrides.
-
-The first non-interactive deployment command used was:
-
-```bash
-sam deploy --stack-name zoolanding-config-authoring --region us-east-1 --capabilities CAPABILITY_IAM --resolve-s3 --no-confirm-changeset --no-fail-on-empty-changeset --parameter-overrides ConfigTableName=zoolanding-config-registry ConfigPayloadsBucketName=zoolanding-config-payloads LogLevel=INFO
-```
+The checked-in `samconfig.toml` targets `us-east-1` and uses `system/deploy-authz.json`. Upload and validate that private object before deploying; missing or malformed authorization configuration denies every request.
 
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
@@ -77,7 +73,11 @@ https://2dvjmiwjod.execute-api.us-east-1.amazonaws.com/Prod/config-authoring
 - `publishDraft`
 - `setSiteStatus`
 
-Site production aliases are authored in `site-config.json` through an optional `aliases` array. Test aliases are authored under `site-config.json.environments.test.aliases`. Alias records include an `environment` field so runtime-read can serve either the production or test published pointer.
+Proposed production aliases are authored in `site-config.json` through an optional `aliases` array. Proposed test aliases are authored under `site-config.json.environments.test.aliases`.
+
+Draft upsert keeps those proposals only inside the versioned package. Public alias metadata, claim, and revocation remain unchanged until Zoolanding defines an explicit alias allowlist and an atomic ownership/collision contract. Do not treat a successful draft upsert as an alias claim.
+
+`publishOnCreate` is unsupported. Publication always requires the separately authorized `publishDraft` action.
 
 Example:
 
@@ -97,7 +97,7 @@ Example:
 
 ## Manual smoke tests
 
-The deployed API uses AWS IAM authorization. Unsigned requests should fail. Use GitHub Actions OIDC or a SigV4-capable AWS SDK client that relies on the standard credential provider chain and is authorized by the deployment policy. Never place an AWS secret access key or session token in command-line arguments.
+The deployed API uses AWS IAM authorization. Unsigned requests should fail. Use GitHub Actions OIDC or a SigV4-capable AWS SDK client that relies on the standard credential provider chain and whose exact role ARN is allowed by the S3 authorization object. Never place an AWS secret access key or session token in command-line arguments.
 
 Run the local handler tests before any authenticated smoke test:
 
