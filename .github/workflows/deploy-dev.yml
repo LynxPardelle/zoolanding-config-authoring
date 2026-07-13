@@ -25,6 +25,15 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Recover interrupted CloudFormation rollback
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(aws cloudformation describe-stacks --stack-name zoolanding-config-authoring-dev --query 'Stacks[0].StackStatus' --output text 2>/dev/null || true)"
+          if [[ "$status" == "UPDATE_ROLLBACK_FAILED" ]]; then
+            aws cloudformation continue-update-rollback --stack-name zoolanding-config-authoring-dev
+            aws cloudformation wait stack-rollback-complete --stack-name zoolanding-config-authoring-dev
+          fi
       - name: Test and deploy
         shell: bash
         run: |
