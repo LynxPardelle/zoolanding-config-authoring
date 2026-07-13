@@ -13,6 +13,7 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - Publish the current draft pointer for `production` or `test`.
 - Mark a site as `active`, `maintenance`, or `suspended`.
 - Require signed AWS IAM deploy identity for authoring actions.
+- Index optional content hub package metadata for blog/article features while preserving the same draft-package S3 layout.
 
 ## AWS dependencies
 
@@ -25,10 +26,11 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 
 - `CONFIG_TABLE_NAME`
 - `CONFIG_PAYLOADS_BUCKET_NAME`
+- `ENVIRONMENT_NAME`
 - `LOG_LEVEL`
 - `DEPLOY_AUTHZ_CONFIG_S3_KEY`
 
-`DEPLOY_AUTHZ_CONFIG_S3_KEY` points to a JSON array in `CONFIG_PAYLOADS_BUCKET_NAME`. Every rule requires an exact IAM role ARN plus non-empty actions, domains, and environments. Wildcards work only when `"*"` is explicit. Example:
+`DEPLOY_AUTHZ_CONFIG_S3_KEY` points to a JSON array in `CONFIG_PAYLOADS_BUCKET_NAME`. Every rule requires an exact IAM role ARN, plus non-empty actions, domains, and environments. Wildcards work only when `"*"` is explicit. Example:
 
 ```json
 [
@@ -55,7 +57,19 @@ For repeatable deployments from this repository:
 sam deploy
 ```
 
-The checked-in `samconfig.toml` targets `us-east-1` and uses `system/deploy-authz.json`. Upload and validate that private object before deploying; missing or malformed authorization configuration denies every request.
+The checked-in `samconfig.toml` includes `dev`, `test`, and `prod` deployment profiles in `us-east-1`.
+
+- `dev` uses `zoolanding-config-registry-dev` and `zoolanding-config-payloads-dev`.
+- `test` uses `zoolanding-config-registry-test` and `zoolanding-config-payloads-test`.
+- `prod` uses the existing production table and bucket names.
+
+The checked-in deploy profiles use `system/deploy-authz.json`. Upload and validate that object in the environment's private config bucket before deploying; missing or malformed authorization configuration denies every request.
+
+Deploy with the checked-in environment profile so the S3 authorization key and environment-specific storage names stay together:
+
+```bash
+sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset
+```
 
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
@@ -78,6 +92,21 @@ Proposed production aliases are authored in `site-config.json` through an option
 Draft upsert keeps those proposals only inside the versioned package. Public alias metadata, claim, and revocation remain unchanged until Zoolanding defines an explicit alias allowlist and an atomic ownership/collision contract. Do not treat a successful draft upsert as an alias claim.
 
 `publishOnCreate` is unsupported. Publication always requires the separately authorized `publishDraft` action.
+
+## Content hub package files
+
+Content hub files are optional and live inside the normal draft package:
+
+```text
+{domain}/content-hubs/{hubId}/hub.json
+{domain}/content-hubs/{hubId}/categories.json
+{domain}/content-hubs/{hubId}/tags.json
+{domain}/content-hubs/{hubId}/articles/{articleId}/metadata.json
+```
+
+`hubId` and `articleId` must be lowercase safe ids. Content hub JSON is rejected when it contains credential-like or server-only field names such as `secret`, `token`, `credential`, `password`, `privateKey`, or `authorization`.
+
+The Lambda stores a compact `contentHubs` index in site metadata so runtime readers can expose safe public hub metadata without scanning S3.
 
 Example:
 

@@ -33,7 +33,8 @@ DEPLOY_AUTHZ_CONFIG_S3_KEY = os.getenv("DEPLOY_AUTHZ_CONFIG_S3_KEY", "").strip()
 
 WRITE_ACTIONS = {"createSite", "upsertDraft", "publishDraft", "setSiteStatus"}
 ALL_ACTIONS = WRITE_ACTIONS | {"getSite"}
-ENVIRONMENTS = {"production", "test"}
+ENVIRONMENTS = {"production", "test", "dev"}
+SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,78}[a-z0-9]$")
 DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 VERSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WINDOWS_INVALID_PATH_CHARACTER_PATTERN = re.compile(r'[<>:"|?*]')
@@ -43,6 +44,7 @@ WINDOWS_RESERVED_PATH_BASENAME_PATTERN = re.compile(
 )
 LOCAL_DRAFT_CONTEXT_FOLDERS = {"ai_notes", "findings", "errors-reports"}
 LOCAL_DRAFT_CONTEXT_FILES = {"draft-repo.config.json"}
+SERVER_ONLY_KEY_PATTERN = re.compile(r"(secret|token|credential|password|privatekey|authorization)", re.IGNORECASE)
 
 
 def _initial_lifecycle(updated_at: str, updated_by: str) -> Dict[str, Any]:
@@ -67,11 +69,13 @@ def _normalize_environment(value: Any) -> str:
     environment = str(value or "production").strip().lower()
     if environment in {"prod", "live", "main"}:
         return "production"
+    if environment in {"development", "local"}:
+        return "dev"
     if environment in {"testing", "stage", "staging"}:
         return "test"
     if environment in ENVIRONMENTS:
         return environment
-    raise ValueError("environment must be 'production' or 'test'")
+    raise ValueError("environment must be 'production', 'test', or 'dev'")
 
 
 def _is_windows_reserved_path_segment(segment: str) -> bool:
@@ -83,20 +87,22 @@ def _has_unsafe_unicode_path_character(value: str) -> bool:
     return any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
 
 
-def _normalize_domain(value: Any) -> str:
+def _strict_domain(value: Any, field_name: str = "domain") -> str:
     if not isinstance(value, str):
-        raise ValueError("domain must be a hostname")
+        raise ValueError(f"{field_name} must be a hostname")
     domain = value
-    labels = domain.split(".")
     if (
         not domain
         or len(domain) > 253
         or domain != domain.strip()
         or domain != domain.lower()
-        or any(not DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels)
+        or any(character in domain for character in "/\\:")
         or _is_windows_reserved_path_segment(domain)
     ):
-        raise ValueError("domain must be a valid hostname without scheme, credentials, port, or path")
+        raise ValueError(f"{field_name} must be a canonical hostname without scheme, port, or path")
+    labels = domain.split(".")
+    if any(not DOMAIN_LABEL_PATTERN.fullmatch(label) for label in labels):
+        raise ValueError(f"{field_name} must be a valid hostname")
     return domain
 
 
@@ -106,16 +112,80 @@ def _strict_version_id(value: Any) -> str:
     return value
 
 
+def _safe_content_id(value: Any, field_name: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not SAFE_ID_PATTERN.fullmatch(normalized):
+        raise ValueError(f"{field_name} must be a safe id using lowercase letters, numbers, dots, dashes, or underscores")
+    return normalized
+
+
+def _reject_server_only_content(value: Any, path: str = "content") -> None:
+    if isinstance(value, dict):
+        for key, child in value.items():
+            key_text = str(key or "")
+            if SERVER_ONLY_KEY_PATTERN.search(key_text):
+                raise ValueError(f"{path}.{key_text} cannot contain server-only or credential-like fields")
+            _reject_server_only_content(child, f"{path}.{key_text}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            _reject_server_only_content(child, f"{path}[{index}]")
+
+
+def _content_hub_file_info(domain: str, path: str) -> Optional[tuple[str, Optional[str]]]:
+    prefix = f"{domain}/content-hubs/"
+    if not path.startswith(prefix):
+        return None
+    parts = path[len(prefix):].split("/")
+    if len(parts) < 2:
+        raise ValueError("Content hub files must live under content-hubs/{hubId}/...")
+    hub_id = _safe_content_id(parts[0], "contentHubId")
+    article_id = None
+    if len(parts) >= 4 and parts[1] == "articles":
+        article_id = _safe_content_id(parts[2], "articleId")
+    return hub_id, article_id
+
+
+def _derive_content_hub_fields(domain: str, files: list[Dict[str, Any]]) -> Dict[str, Any]:
+    hubs: dict[str, Dict[str, Any]] = {}
+    for entry in files:
+        path = str(entry.get("path") or "")
+        info = _content_hub_file_info(domain, path)
+        if not info:
+            continue
+        hub_id, article_id = info
+        _reject_server_only_content(entry.get("content"), path)
+        hub = hubs.setdefault(hub_id, {"hubId": hub_id, "articleIds": []})
+        if article_id and article_id not in hub["articleIds"]:
+            hub["articleIds"].append(article_id)
+
+    site_config = _read_site_file(files, "site-config.json") or {}
+    configured_hubs = site_config.get("contentHubs")
+    if isinstance(configured_hubs, list):
+        for configured in configured_hubs:
+            if not isinstance(configured, dict):
+                continue
+            hub_id = _safe_content_id(configured.get("hubId") or configured.get("id"), "contentHubId")
+            hub = hubs.setdefault(hub_id, {"hubId": hub_id, "articleIds": []})
+            hub["name"] = str(configured.get("name") or hub_id).strip() or hub_id
+            hub["defaultLanguage"] = str(configured.get("defaultLanguage") or "es").strip() or "es"
+            hub["canonicalDraftDomain"] = _strict_domain(configured.get("canonicalDraftDomain") or domain, "canonicalDraftDomain")
+            allowed_domains = configured.get("allowedDraftDomains")
+            if isinstance(allowed_domains, list):
+                hub["allowedDraftDomains"] = [_strict_domain(item, "allowedDraftDomain") for item in allowed_domains]
+
+    return {"contentHubs": sorted(hubs.values(), key=lambda item: item["hubId"])}
+
+
 def _normalize_aliases(domain: Any, aliases: Any) -> list[str]:
-    canonical_domain = _normalize_domain(domain)
-    if not canonical_domain or not isinstance(aliases, list):
+    canonical_domain = _strict_domain(domain)
+    if not isinstance(aliases, list):
         return []
 
     normalized: list[str] = []
     seen: set[str] = set()
     for alias in aliases:
-        alias_domain = _normalize_domain(alias)
-        if not alias_domain or alias_domain == canonical_domain or alias_domain in seen:
+        alias_domain = _strict_domain(alias, "alias")
+        if alias_domain == canonical_domain or alias_domain in seen:
             continue
         seen.add(alias_domain)
         normalized.append(alias_domain)
@@ -144,11 +214,13 @@ def _normalize_environment_aliases(domain: str, environments: Any) -> Dict[str, 
 
 def _derive_site_fields(domain: str, files: list[Dict[str, Any]]) -> Dict[str, Any]:
     site_config = _read_site_file(files, "site-config.json") or {}
+    content_hub_fields = _derive_content_hub_fields(domain, files)
     return {
         "aliases": _normalize_aliases(domain, site_config.get("aliases")),
         "environmentAliases": _normalize_environment_aliases(domain, site_config.get("environments")),
         "defaultPageId": str(site_config.get("defaultPageId") or "").strip() or "default",
         "routes": site_config.get("routes") if isinstance(site_config.get("routes"), list) else [],
+        **content_hub_fields,
     }
 
 
@@ -202,80 +274,48 @@ def _role_name_from_arn(arn: str) -> str:
 
 
 def _role_arn_matches(rule_arn: str, caller_arn: str) -> bool:
-    if not rule_arn:
-        return False
-    if caller_arn == rule_arn:
-        return True
-    rule_match = re.fullmatch(r"arn:([^:]+):iam::([^:]+):role/(.+)", rule_arn)
-    caller_match = re.fullmatch(r"arn:([^:]+):sts::([^:]+):assumed-role/([^/]+)/.+", caller_arn)
+    rule_match = re.fullmatch(r"arn:([^:]+):iam::(\d{12}):role/(.+)", rule_arn)
+    caller_match = re.fullmatch(r"arn:([^:]+):(?:iam|sts)::(\d{12}):(?:role/(.+)|assumed-role/([^/]+)/[^/]+)", caller_arn)
     if not rule_match or not caller_match:
         return False
-    rule_partition, rule_account, rule_path = rule_match.groups()
-    caller_partition, caller_account, caller_role_name = caller_match.groups()
+    rule_role_name = rule_match.group(3).rsplit("/", 1)[-1]
+    caller_role_name = (caller_match.group(3) or caller_match.group(4) or "").rsplit("/", 1)[-1]
     return (
-        rule_partition == caller_partition
-        and rule_account == caller_account
-        and rule_path.rsplit('/', 1)[-1] == caller_role_name
+        rule_match.group(1) == caller_match.group(1)
+        and rule_match.group(2) == caller_match.group(2)
+        and rule_role_name == caller_role_name
     )
 
 
-def _principal_values(rule: Dict[str, Any], singular: str, plural: str) -> Optional[list[str]]:
-    values: list[str] = []
-    if singular in rule:
-        value = rule[singular]
-        if not isinstance(value, str) or not value.strip():
-            return None
-        values.append(value.strip())
-    if plural in rule:
-        value = rule[plural]
-        if (
-            not isinstance(value, list)
-            or not value
-            or any(not isinstance(item, str) or not item.strip() for item in value)
-        ):
-            return None
-        values.extend(item.strip() for item in value)
-    return values
-
-
-def _required_scope(rule: Dict[str, Any], key: str) -> Optional[set[str]]:
-    value = rule.get(key)
-    if not isinstance(value, list) or not value:
-        return None
-    if any(not isinstance(item, str) or not item.strip() for item in value):
-        return None
-    return {item.strip() for item in value}
+def _string_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
 
 
 def _rule_allows(rule: Dict[str, Any], caller_arn: str, action: str, domain: str, environment: str) -> bool:
-    role_arns = _principal_values(rule, "roleArn", "roleArns")
-    if role_arns is None or not role_arns:
+    role_arns = _string_list(rule.get("roleArn")) + _string_list(rule.get("roleArns"))
+    actions = set(_string_list(rule.get("actions")))
+    domain_values = _string_list(rule.get("domains"))
+    environment_values = _string_list(rule.get("environments"))
+    if not role_arns or not actions or not domain_values or not environment_values:
         return False
-
-    arn_allowed = any(_role_arn_matches(role_arn, caller_arn) for role_arn in role_arns)
-    if not arn_allowed:
-        return False
-
-    actions = _required_scope(rule, "actions")
-    domains = _required_scope(rule, "domains")
-    environment_values = _required_scope(rule, "environments")
-    if actions is None or domains is None or environment_values is None:
+    if not any(_role_arn_matches(role_arn, caller_arn) for role_arn in role_arns):
         return False
 
     if action not in actions and "*" not in actions:
         return False
 
     try:
-        domains = {"*" if item == "*" else _normalize_domain(item) for item in domains}
+        domains = {"*" if item == "*" else _strict_domain(item, "authorization domain") for item in domain_values}
+        environments = {"*" if item == "*" else _normalize_environment(item) for item in environment_values}
     except ValueError:
         return False
     if domain not in domains and "*" not in domains:
         return False
 
-    try:
-        environments = {"*" if item == "*" else _normalize_environment(item) for item in environment_values}
-    except ValueError:
-        return False
     if environment not in environments and "*" not in environments:
         return False
 
@@ -283,7 +323,7 @@ def _rule_allows(rule: Dict[str, Any], caller_arn: str, action: str, domain: str
 
 
 def _authorize_request(event: Dict[str, Any], payload: Dict[str, Any], action: str) -> tuple[bool, str]:
-    domain = _normalize_domain(payload.get("domain"))
+    domain = _strict_domain(payload.get("domain"))
     environment = _normalize_environment(payload.get("environment") or payload.get("stageEnvironment"))
 
     caller_arn = _caller_arn(event)
@@ -315,28 +355,30 @@ def _normalize_files(domain: str, files: Any) -> list[Dict[str, Any]]:
         if not isinstance(raw_path, str) or not raw_path or raw_path != raw_path.strip():
             raise ValueError("Each file entry requires a path")
         path = raw_path
-        parts = path.split('/')
+        parts = path.split("/")
         if (
             path != unicodedata.normalize("NFC", path)
-            or '\\' in path
+            or "\\" in path
             or WINDOWS_INVALID_PATH_CHARACTER_PATTERN.search(path)
-            or path.startswith('/')
+            or path.startswith("/")
             or _has_unsafe_unicode_path_character(path)
+            or len(parts) < 2
             or parts[0] != domain
-            or any(part in {'', '.', '..'} for part in parts)
-            or any(part.endswith(('.', ' ')) for part in parts)
+            or any(not part or part in {".", ".."} for part in parts)
+            or any(part.endswith((".", " ")) for part in parts)
             or any(_is_windows_reserved_path_segment(part) for part in parts)
             or any(
                 part.casefold() in LOCAL_DRAFT_CONTEXT_FOLDERS
                 or part.casefold() in LOCAL_DRAFT_CONTEXT_FILES
                 for part in parts[1:]
             )
-            or not path.endswith('.json')
+            or not path.endswith(".json")
         ):
             raise ValueError("Each file entry path must be a strict JSON path below the requested domain")
         content = entry.get("content")
         if not isinstance(content, dict):
             raise ValueError("Each file entry content must be a JSON object")
+        _content_hub_file_info(domain, path)
 
         normalized.append({
             "path": path,
@@ -442,9 +484,9 @@ def _save_registry(metadata: Dict[str, Any]) -> None:
 
 
 def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
-    domain = _normalize_domain(payload.get("domain"))
-    if payload.get("publishOnCreate"):
-        return bad_request("publishOnCreate is not supported; use publishDraft with separate authorization")
+    domain = _strict_domain(payload.get("domain"))
+    if "publishOnCreate" in payload:
+        return bad_request("publishOnCreate is not supported; use the separately authorized publishDraft action")
 
     files = _normalize_files(domain, payload.get("files"))
     existing = _load_registry(domain)
@@ -468,6 +510,7 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     }
     metadata["defaultPageId"] = derived["defaultPageId"]
     metadata["routes"] = derived["routes"]
+    metadata["contentHubs"] = derived["contentHubs"]
     metadata["draft"] = {
         "versionId": version_id,
         "prefix": prefix,
@@ -487,7 +530,7 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
 
 
 def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
-    domain = _normalize_domain(payload.get("domain"))
+    domain = _strict_domain(payload.get("domain"))
     stage = str(payload.get("stage") or "draft").strip() or "draft"
     if stage not in {"draft", "published"}:
         return bad_request("stage must be 'draft' or 'published'")
@@ -515,7 +558,7 @@ def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
-    domain = _normalize_domain(payload.get("domain"))
+    domain = _strict_domain(payload.get("domain"))
     environment = _normalize_environment(payload.get("environment"))
     metadata = _load_registry(domain)
     if not metadata:
@@ -553,7 +596,7 @@ def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
 
 
 def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
-    domain = _normalize_domain(payload.get("domain"))
+    domain = _strict_domain(payload.get("domain"))
     status = str(payload.get("status") or "").strip()
     if status not in {"active", "maintenance", "suspended"}:
         return bad_request("status must be one of: active, maintenance, suspended")

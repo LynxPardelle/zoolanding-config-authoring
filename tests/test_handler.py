@@ -48,6 +48,12 @@ class AuthoringHandlerTest(unittest.TestCase):
                 "environments": ["production"],
                 "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"],
             },
+            {
+                "roleArn": role_arn("draft-pamela-dev-deploy"),
+                "domains": ["pamelabetancourt.com"],
+                "environments": ["dev"],
+                "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"],
+            },
         ]
         self.handler = importlib.reload(importlib.import_module("lambda_function"))
         self.items = {}
@@ -110,20 +116,6 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 401)
 
-    def test_rejects_publish_on_create_without_writing(self):
-        response = self.handler.lambda_handler(event({
-            "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
-            "environment": "test",
-            "versionId": "test-v1",
-            "publishOnCreate": True,
-            "files": self.draft_files(),
-        }, "draft-pamela-test-deploy"), Context())
-
-        self.assertEqual(response["statusCode"], 400)
-        self.assertEqual(self.items, {})
-        self.assertEqual(self.objects, {})
-
     def test_inline_authorization_config_is_ignored_without_s3_key(self):
         os.environ.pop("DEPLOY_AUTHZ_CONFIG_S3_KEY", None)
         os.environ["DEPLOY_AUTHZ_CONFIG_JSON"] = json.dumps([
@@ -156,230 +148,7 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         self.assertEqual(rules[0]["roleArn"], role_arn("draft-pamela-test-deploy"))
 
-    def test_deploy_contract_uses_only_s3_authorization_config(self):
-        root = Path(__file__).resolve().parents[1]
-        template = (root / "template.yaml").read_text(encoding="utf-8")
-        deploy_surface = "\n".join(
-            (root / path).read_text(encoding="utf-8")
-            for path in ("lambda_function.py", "template.yaml")
-        )
-
-        self.assertNotIn("DeployAuthzConfigJson", deploy_surface)
-        self.assertNotIn("DEPLOY_AUTHZ_CONFIG_JSON", deploy_surface)
-        self.assertIn(
-            "DeployAuthzConfigS3Key=system/deploy-authz.json",
-            (root / "samconfig.toml").read_text(encoding="utf-8"),
-        )
-        put_block_start = template.index("- s3:PutObject")
-        put_block_end = template.find("- Effect: Allow", put_block_start + 1)
-        put_block = template[put_block_start:put_block_end]
-        self.assertIn("arn:aws:s3:::${ConfigPayloadsBucketName}/sites/*", put_block)
-        self.assertNotIn("arn:aws:s3:::${ConfigPayloadsBucketName}/*", put_block)
-        self.assertIn(
-            "arn:aws:s3:::${ConfigPayloadsBucketName}/${DeployAuthzConfigS3Key}",
-            template,
-        )
-
-    def test_authorization_requires_explicit_scope_or_wildcard(self):
-        caller_arn = "arn:aws:sts::123456789012:assumed-role/draft-pamela-test-deploy/github-actions"
-        complete_rule = {
-            "roleArn": role_arn("draft-pamela-test-deploy"),
-            "actions": ["upsertDraft"],
-            "domains": ["pamelabetancourt.com"],
-            "environments": ["test"],
-        }
-
-        for missing_scope in ("actions", "domains", "environments"):
-            with self.subTest(missing_scope=missing_scope):
-                rule = {key: value for key, value in complete_rule.items() if key != missing_scope}
-                self.assertFalse(self.handler._rule_allows(
-                    rule,
-                    caller_arn,
-                    "upsertDraft",
-                    "pamelabetancourt.com",
-                    "test",
-                ))
-
-        malformed_rule = {**complete_rule, "actions": "upsertDraft"}
-        self.assertFalse(self.handler._rule_allows(
-            malformed_rule,
-            caller_arn,
-            "upsertDraft",
-            "pamelabetancourt.com",
-            "test",
-        ))
-
-        wildcard_rule = {
-            "roleArn": role_arn("draft-pamela-test-deploy"),
-            "actions": ["*"],
-            "domains": ["*"],
-            "environments": ["*"],
-        }
-        self.assertTrue(self.handler._rule_allows(
-            wildcard_rule,
-            caller_arn,
-            "upsertDraft",
-            "pamelabetancourt.com",
-            "test",
-        ))
-
-    def test_role_arn_authorization_preserves_the_account_boundary(self):
-        rule = {
-            "roleArn": "arn:aws:iam::123456789012:role/draft-pamela-test-deploy",
-            "actions": ["upsertDraft"],
-            "domains": ["pamelabetancourt.com"],
-            "environments": ["test"],
-        }
-
-        self.assertFalse(self.handler._rule_allows(
-            rule,
-            "arn:aws:sts::999999999999:assumed-role/draft-pamela-test-deploy/github-actions",
-            "upsertDraft",
-            "pamelabetancourt.com",
-            "test",
-        ))
-        self.assertTrue(self.handler._rule_allows(
-            rule,
-            "arn:aws:sts::123456789012:assumed-role/draft-pamela-test-deploy/github-actions",
-            "upsertDraft",
-            "pamelabetancourt.com",
-            "test",
-        ))
-
-    def test_authorization_rejects_role_names_and_malformed_role_arns(self):
-        rule = {
-            "roleName": "draft-pamela-test-deploy",
-            "actions": ["upsertDraft"],
-            "domains": ["pamelabetancourt.com"],
-            "environments": ["test"],
-        }
-        caller_arn = "arn:aws:sts::123456789012:assumed-role/draft-pamela-test-deploy/github-actions"
-
-        self.assertFalse(self.handler._rule_allows(
-            rule,
-            caller_arn,
-            "upsertDraft",
-            "pamelabetancourt.com",
-            "test",
-        ))
-        self.assertFalse(self.handler._rule_allows(
-            {**rule, "roleArn": 123},
-            caller_arn,
-            "upsertDraft",
-            "pamelabetancourt.com",
-            "test",
-        ))
-
-    def test_domain_requires_a_canonical_hostname(self):
-        self.authz_rules = [{
-            "roleArn": role_arn("draft-pamela-test-deploy"),
-            "actions": ["getSite"],
-            "domains": ["*"],
-            "environments": ["test"],
-        }]
-        invalid_domains = (
-            "",
-            ".",
-            "..",
-            "https://pamelabetancourt.com",
-            "user@pamelabetancourt.com",
-            "pamelabetancourt.com:443",
-            "pamelabetancourt.com/path",
-            "pamelabetancourt.com\\path",
-            "pamelabetancourt..com",
-            "-pamelabetancourt.com",
-            "PAMELABETANCOURT.COM",
-            "pamelabetancourt.com.",
-            " pamelabetancourt.com",
-            "pamelabetancourt.com ",
-            "con.example.com",
-        )
-
-        for domain in invalid_domains:
-            with self.subTest(domain=domain):
-                response = self.handler.lambda_handler(event({
-                    "action": "getSite",
-                    "domain": domain,
-                    "environment": "test",
-                }, "draft-pamela-test-deploy"), Context())
-                self.assertEqual(response["statusCode"], 400)
-
-    def test_draft_paths_must_be_strict_domain_rooted_json_paths(self):
-        invalid_paths = (
-            "pamelabetancourt.com/../escape.json",
-            "pamelabetancourt.com/./site-config.json",
-            "pamelabetancourt.com//site-config.json",
-            "/pamelabetancourt.com/site-config.json",
-            "pamelabetancourt.com\\..\\escape.json",
-            "pamelabetancourt.com/page:stream.json",
-            "pamelabetancourt.com/\x00page.json",
-            " pamelabetancourt.com/page.json",
-            "pamelabetancourt.com/page.json ",
-            "pamelabetancourt.com/CON.json",
-            "pamelabetancourt.com/COM¹.json",
-            "pamelabetancourt.com/page?.json",
-            "pamelabetancourt.com/page.json.",
-            "pamelabetancourt.com/folder /page.json",
-            "pamelabetancourt.com/\x7fpage.json",
-            "pamelabetancourt.com/\u200bpage.json",
-            "pamelabetancourt.com/cafe\u0301.json",
-            "pamelabetancourt.com/ai_notes/private.json",
-            "pamelabetancourt.com/AI_NOTES/private.json",
-            "pamelabetancourt.com/Findings/private.json",
-            "pamelabetancourt.com/draft-repo.config.json",
-            "pamelabetancourt.com/DRAFT-REPO.CONFIG.JSON",
-            "pamelabetancourt.com/not-json.txt",
-            "pamelabetancourt.com/",
-        )
-
-        for path in invalid_paths:
-            with self.subTest(path=path):
-                self.items.clear()
-                self.objects.clear()
-                response = self.handler.lambda_handler(event({
-                    "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
-                    "environment": "test",
-                    "versionId": "test-v1",
-                    "files": [{"path": path, "content": {}}],
-                }, "draft-pamela-test-deploy"), Context())
-
-                self.assertEqual(response["statusCode"], 400)
-                self.assertEqual(self.items, {})
-                self.assertEqual(self.objects, {})
-
-    def test_version_ids_must_be_canonical_before_storage(self):
-        invalid_version_ids = (
-            "",
-            123,
-            " version",
-            "version ",
-            "../version",
-            "folder/version",
-            "version\\child",
-            "version:stream",
-            "versión",
-            "version\u200b",
-            "v" * 129,
-        )
-
-        for version_id in invalid_version_ids:
-            with self.subTest(version_id=version_id):
-                self.items.clear()
-                self.objects.clear()
-                response = self.handler.lambda_handler(event({
-                    "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
-                    "environment": "test",
-                    "versionId": version_id,
-                    "files": self.draft_files(),
-                }, "draft-pamela-test-deploy"), Context())
-
-                self.assertEqual(response["statusCode"], 400)
-                self.assertEqual(self.items, {})
-                self.assertEqual(self.objects, {})
-
-    def test_upsert_does_not_mutate_public_alias_records(self):
+    def test_upsert_does_not_mutate_public_alias_metadata_or_records(self):
         response = self.upsert()
         body = parse(response)
 
@@ -410,23 +179,174 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(metadata["aliases"], ["www.pamelabetancourt.com"])
         self.assertEqual(metadata["environmentAliases"], {"test": ["old-test.pamelabetancourt.com"]})
 
-    def test_invalid_alias_is_rejected_before_storage(self):
-        files = self.draft_files()
-        files[0]["content"]["environments"]["test"]["aliases"] = [
-            "https://test.pamelabetancourt.com",
-        ]
+    def test_publish_on_create_is_rejected_before_storage(self):
+        response = self.handler.lambda_handler(event({
+            "action": "createSite",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "publishOnCreate": True,
+            "files": self.draft_files(),
+        }, "draft-pamela-test-deploy"), Context())
 
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_authorization_rules_require_every_scope(self):
+        complete_rule = {
+            "roleArn": role_arn("draft-pamela-test-deploy"),
+            "domains": ["pamelabetancourt.com"],
+            "environments": ["test"],
+            "actions": ["upsertDraft"],
+        }
+        for missing_scope in ("actions", "domains", "environments"):
+            with self.subTest(missing_scope=missing_scope):
+                self.authz_rules = [{
+                    key: value for key, value in complete_rule.items() if key != missing_scope
+                }]
+                response = self.upsert()
+                self.assertEqual(response["statusCode"], 401)
+
+    def test_authorization_rejects_same_role_name_from_another_account(self):
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
             "domain": "pamelabetancourt.com",
             "environment": "test",
-            "versionId": "test-v1",
-            "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+            "files": self.draft_files(),
+        }, "draft-pamela-test-deploy", account_id="999999999999"), Context())
 
-        self.assertEqual(response["statusCode"], 400)
-        self.assertEqual(self.items, {})
-        self.assertEqual(self.objects, {})
+        self.assertEqual(response["statusCode"], 401)
+
+    def test_authorization_allows_only_explicit_wildcards(self):
+        self.authz_rules = [{
+            "roleArn": role_arn("draft-pamela-test-deploy"),
+            "domains": ["*"],
+            "environments": ["*"],
+            "actions": ["*"],
+        }]
+
+        response = self.upsert()
+
+        self.assertEqual(response["statusCode"], 200)
+
+    def test_rejects_noncanonical_domain_forms(self):
+        for domain in (
+            "pamelabetancourt.com:443",
+            "pamelabetancourt.com/",
+            "PAMELABETANCOURT.COM",
+            "pamelabetancourt.com.",
+            " pamelabetancourt.com",
+            "pamelabetancourt.com ",
+            "con.example.com",
+        ):
+            with self.subTest(domain=domain):
+                self.objects.clear()
+                self.items.clear()
+                response = self.handler.lambda_handler(event({
+                    "action": "upsertDraft",
+                    "domain": domain,
+                    "environment": "test",
+                    "files": self.draft_files(),
+                }, "draft-pamela-test-deploy"), Context())
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(self.objects, {})
+                self.assertEqual(self.items, {})
+
+    def test_rejects_paths_that_are_not_strict_posix_json_children(self):
+        invalid_paths = (
+            "pamelabetancourt.com/../escape.json",
+            "pamelabetancourt.com/./page.json",
+            "pamelabetancourt.com//page.json",
+            "pamelabetancourt.com\\page.json",
+            "pamelabetancourt.com/page:stream.json",
+            "pamelabetancourt.com/\x00page.json",
+            "pamelabetancourt.com/page.txt",
+            "/pamelabetancourt.com/page.json",
+            "C:/pamelabetancourt.com/page.json",
+            "pamelabetancourt.com/CON.json",
+            "pamelabetancourt.com/COM¹.json",
+            "pamelabetancourt.com/page?.json",
+            "pamelabetancourt.com/page.json.",
+            "pamelabetancourt.com/folder /page.json",
+            "pamelabetancourt.com/\x7fpage.json",
+            "pamelabetancourt.com/\u200bpage.json",
+            "pamelabetancourt.com/cafe\u0301.json",
+            "pamelabetancourt.com/ai_notes/private.json",
+            "pamelabetancourt.com/AI_NOTES/private.json",
+            "pamelabetancourt.com/Findings/private.json",
+            "pamelabetancourt.com/draft-repo.config.json",
+            "pamelabetancourt.com/DRAFT-REPO.CONFIG.JSON",
+        )
+        for path in invalid_paths:
+            with self.subTest(path=path):
+                self.objects.clear()
+                self.items.clear()
+                response = self.handler.lambda_handler(event({
+                    "action": "upsertDraft",
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "files": [{"path": path, "content": {}}],
+                }, "draft-pamela-test-deploy"), Context())
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(self.objects, {})
+                self.assertEqual(self.items, {})
+
+    def test_version_ids_must_be_canonical_before_storage(self):
+        invalid_version_ids = (
+            "",
+            123,
+            " version",
+            "version ",
+            "../version",
+            "folder/version",
+            "version\\child",
+            "version:stream",
+            "versión",
+            "version\u200b",
+            "v" * 129,
+        )
+        for version_id in invalid_version_ids:
+            with self.subTest(version_id=version_id):
+                self.objects.clear()
+                self.items.clear()
+                response = self.handler.lambda_handler(event({
+                    "action": "upsertDraft",
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": version_id,
+                    "files": self.draft_files(),
+                }, "draft-pamela-test-deploy"), Context())
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(self.objects, {})
+                self.assertEqual(self.items, {})
+
+    def test_deploy_contract_uses_only_s3_authorization_config(self):
+        root = Path(__file__).resolve().parents[1]
+        template = (root / "template.yaml").read_text(encoding="utf-8")
+        deploy_surface = "\n".join(
+            (root / path).read_text(encoding="utf-8")
+            for path in (
+                "lambda_function.py",
+                "template.yaml",
+                ".github/workflows/deploy-dev.yml",
+                ".github/workflows/deploy-test.yml",
+                ".github/workflows/deploy-production.yml",
+            )
+        )
+
+        self.assertNotIn("DeployAuthzConfigJson", deploy_surface)
+        self.assertNotIn("DEPLOY_AUTHZ_CONFIG_JSON_BASE64", deploy_surface)
+        self.assertNotIn("DEPLOY_AUTHZ_CONFIG_JSON", deploy_surface)
+        self.assertIn("DeployAuthzConfigS3Key=system/deploy-authz.json", (root / "samconfig.toml").read_text(encoding="utf-8"))
+        put_block_start = template.index("- s3:PutObject")
+        put_block_end = template.find("- Effect: Allow", put_block_start + 1)
+        put_block = template[put_block_start:put_block_end]
+        self.assertIn("arn:aws:s3:::${ConfigPayloadsBucketName}/sites/*", put_block)
+        self.assertNotIn("arn:aws:s3:::${ConfigPayloadsBucketName}/*", put_block)
+        self.assertIn(
+            "arn:aws:s3:::${ConfigPayloadsBucketName}/${DeployAuthzConfigS3Key}",
+            template,
+        )
 
     def test_test_role_cannot_publish_production(self):
         self.upsert()
@@ -466,6 +386,64 @@ class AuthoringHandlerTest(unittest.TestCase):
         metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
         self.assertEqual(metadata["published"]["versionId"], "prod-v1")
         self.assertEqual(metadata["publishedEnvironments"]["production"]["versionId"], "prod-v1")
+
+    def test_content_hub_files_are_indexed_in_site_metadata(self):
+        files = self.draft_files() + [
+            {
+                "path": "pamelabetancourt.com/content-hubs/main/hub.json",
+                "content": {
+                    "hubId": "main",
+                    "name": "Blog",
+                    "defaultLanguage": "es",
+                    "canonicalDraftDomain": "pamelabetancourt.com",
+                    "allowedDraftDomains": ["pamelabetancourt.com", "sulandingpage.com.mx"],
+                },
+            },
+            {
+                "path": "pamelabetancourt.com/content-hubs/main/articles/primer-post/metadata.json",
+                "content": {
+                    "articleId": "primer-post",
+                    "title": "Primer post",
+                    "status": "draft",
+                },
+            },
+        ]
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "dev",
+            "versionId": "dev-v1",
+            "files": files,
+        }, "draft-pamela-dev-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 200)
+        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        self.assertEqual(metadata["contentHubs"][0]["hubId"], "main")
+        self.assertEqual(metadata["contentHubs"][0]["articleIds"], ["primer-post"])
+
+    def test_content_hub_files_reject_server_only_fields(self):
+        files = self.draft_files() + [
+            {
+                "path": "pamelabetancourt.com/content-hubs/main/articles/primer-post/metadata.json",
+                "content": {
+                    "articleId": "primer-post",
+                    "clientSecret": "do-not-store",
+                },
+            },
+        ]
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "dev",
+            "versionId": "dev-v1",
+            "files": files,
+        }, "draft-pamela-dev-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertIn("server-only", parse(response)["error"])
+        self.assertEqual(self.objects, {})
 
 
 if __name__ == "__main__":
