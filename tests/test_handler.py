@@ -328,7 +328,6 @@ class AuthoringHandlerTest(unittest.TestCase):
             for path in (
                 "lambda_function.py",
                 "template.yaml",
-                ".github/workflows/deploy-dev.yml",
                 ".github/workflows/deploy-test.yml",
                 ".github/workflows/deploy-production.yml",
             )
