@@ -1,0 +1,186 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ZoolandingCommercePolicy",
+  "type": "object",
+  "required": ["version", "scope", "commerce"],
+  "properties": {
+    "version": { "const": 1 },
+    "scope": { "$ref": "#/definitions/scope" },
+    "commerce": { "$ref": "#/definitions/commerce" }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 253,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 96,
+      "enum": [
+        "commerce:catalog:read",
+        "commerce:catalog:write",
+        "commerce:inventory:write",
+        "commerce:subscription:manage"
+      ]
+    },
+    "sameOriginPath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^/(?!/)(?!.*[\\\\\\s\\u0000-\\u001F\\u007F]).*$"
+    },
+    "scope": {
+      "type": "object",
+      "required": ["environment", "tenantId", "draftId", "domain"],
+      "properties": {
+        "environment": { "enum": ["test", "production"] },
+        "tenantId": { "$ref": "#/definitions/safeId" },
+        "draftId": { "$ref": "#/definitions/safeId" },
+        "domain": { "$ref": "#/definitions/domain" }
+      },
+      "additionalProperties": false
+    },
+    "noAdminAccess": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": { "mode": { "const": "none" } },
+      "additionalProperties": false
+    },
+    "authProfileAccess": {
+      "type": "object",
+      "required": ["mode", "authProfileId", "capabilities"],
+      "properties": {
+        "mode": { "const": "auth-profile" },
+        "authProfileId": { "$ref": "#/definitions/safeId" },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/capability" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "payments": {
+      "type": "object",
+      "required": ["bindingId", "oneTime", "subscriptions", "editablePrices", "coupons", "operatorPauses", "proration"],
+      "properties": {
+        "bindingId": { "$ref": "#/definitions/safeId" },
+        "oneTime": { "type": "boolean" },
+        "subscriptions": { "type": "boolean" },
+        "editablePrices": { "type": "boolean" },
+        "coupons": { "type": "boolean" },
+        "operatorPauses": { "type": "boolean" },
+        "proration": { "enum": ["disabled", "operator-selectable"] }
+      },
+      "additionalProperties": false
+    },
+    "inventory": {
+      "type": "object",
+      "required": ["enabled", "tracked", "backorders", "locationId"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "tracked": { "type": "boolean" },
+        "backorders": { "const": false },
+        "locationId": { "$ref": "#/definitions/safeId" }
+      },
+      "additionalProperties": false
+    },
+    "shipping": {
+      "type": "object",
+      "required": ["enabled", "methods"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "methods": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "enum": ["fixed", "free", "pickup"] }
+        }
+      },
+      "additionalProperties": false
+    },
+    "fiscalDisabled": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": { "enabled": { "const": false } },
+      "additionalProperties": false
+    },
+    "fiscalEnabled": {
+      "type": "object",
+      "required": ["enabled", "manual", "disclosureId", "taxBehavior", "retentionDays", "requestWindowHours"],
+      "properties": {
+        "enabled": { "const": true },
+        "manual": { "const": true },
+        "disclosureId": { "const": "manual-invoice-v1" },
+        "taxBehavior": { "enum": ["exclusive", "inclusive", "provider-calculated"] },
+        "accountantApprovalId": { "$ref": "#/definitions/safeId" },
+        "retentionDays": { "type": "integer", "minimum": 1, "maximum": 3650 },
+        "requestWindowHours": { "type": "integer", "minimum": 1, "maximum": 720 }
+      },
+      "additionalProperties": false
+    },
+    "checkout": {
+      "type": "object",
+      "required": ["successPath", "cancelPath", "termsPath", "privacyPath", "refundPolicyPath", "supportPath"],
+      "properties": {
+        "successPath": { "$ref": "#/definitions/sameOriginPath" },
+        "cancelPath": { "$ref": "#/definitions/sameOriginPath" },
+        "termsPath": { "$ref": "#/definitions/sameOriginPath" },
+        "privacyPath": { "$ref": "#/definitions/sameOriginPath" },
+        "refundPolicyPath": { "$ref": "#/definitions/sameOriginPath" },
+        "supportPath": { "$ref": "#/definitions/sameOriginPath" }
+      },
+      "additionalProperties": false
+    },
+    "commerce": {
+      "type": "object",
+      "required": ["status", "adminAccess", "sellableTypes", "payments", "inventory", "shipping", "fiscal", "checkout"],
+      "properties": {
+        "status": { "enum": ["disabled", "active"] },
+        "adminAccess": {
+          "oneOf": [
+            { "$ref": "#/definitions/noAdminAccess" },
+            { "$ref": "#/definitions/authProfileAccess" }
+          ]
+        },
+        "sellableTypes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": { "enum": ["physical", "service", "subscription", "add_on"] }
+        },
+        "payments": { "$ref": "#/definitions/payments" },
+        "inventory": { "$ref": "#/definitions/inventory" },
+        "shipping": { "$ref": "#/definitions/shipping" },
+        "fiscal": {
+          "oneOf": [
+            { "$ref": "#/definitions/fiscalDisabled" },
+            { "$ref": "#/definitions/fiscalEnabled" }
+          ]
+        },
+        "checkout": { "$ref": "#/definitions/checkout" },
+        "notificationPolicyIds": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/safeId" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
