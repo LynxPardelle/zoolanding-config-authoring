@@ -27,6 +27,10 @@ jobs:
     runs-on: ubuntu-latest
     needs: guard
     environment: production
+    env:
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      SAM_CLI_TELEMETRY: 0
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6

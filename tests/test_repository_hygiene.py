@@ -27,6 +27,9 @@ class RepositoryHygieneTest(unittest.TestCase):
 
         for workflow_name in ("deploy-test.yml", "deploy-production.yml"):
             workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            self.assertIn("AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}", workflow)
+            self.assertIn("AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}", workflow)
+            self.assertIn("SAM_CLI_TELEMETRY: 0", workflow)
             build_index = workflow.index("python tools/build_lambda_artifact.py\n")
             verify_index = workflow.index(
                 "python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigAuthoringFunction"
