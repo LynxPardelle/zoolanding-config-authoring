@@ -56,11 +56,15 @@ def review_change_set(
     if not isinstance(change_set, dict):
         raise ChangeSetReviewError("change set description is invalid")
     _require_change_set_arn(expected_change_set_arn, expected_change_set_name)
+    change_set_type_is_invalid = (
+        "ChangeSetType" in change_set
+        and change_set["ChangeSetType"] != "UPDATE"
+    )
     if (
         change_set.get("StackName") != expected_stack_name
         or change_set.get("ChangeSetName") != expected_change_set_name
         or change_set.get("ChangeSetId") != expected_change_set_arn
-        or change_set.get("ChangeSetType") != "UPDATE"
+        or change_set_type_is_invalid
         or _parameters(change_set.get("Parameters")) != dict(expected_parameters)
     ):
         raise ChangeSetReviewError("change set identity or parameters are not exact")

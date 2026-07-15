@@ -73,6 +73,7 @@ class RepositoryHygieneTest(unittest.TestCase):
             self.assertIn("cancel-in-progress: false", workflow)
             self.assertIn('CHANGE_SET_NAME: "zoolanding-${{ github.run_id }}-${{ github.run_attempt }}"', workflow)
             self.assertIn("cloudformation create-change-set", workflow)
+            self.assertEqual(workflow.count("--change-set-type UPDATE"), 1)
             self.assertIn("cloudformation describe-change-set", workflow)
             self.assertIn("tools/review_cloudformation_change_set.py", workflow)
             self.assertIn('--s3-bucket "$EXPECTED_BUCKET"', workflow)
