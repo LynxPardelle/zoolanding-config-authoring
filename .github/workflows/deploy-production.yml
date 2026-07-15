@@ -16,7 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       test_run_id: ${{ steps.exact_test_run.outputs.test_run_id }}
+      test_run_attempt: ${{ steps.exact_test_run.outputs.test_run_attempt }}
       test_source_sha: ${{ steps.exact_test_run.outputs.test_source_sha }}
+      test_artifact_id: ${{ steps.exact_test_artifact.outputs.test_artifact_id }}
+      test_artifact_name: ${{ steps.exact_test_artifact.outputs.test_artifact_name }}
     permissions:
       contents: read
       actions: read
@@ -25,7 +28,7 @@ jobs:
       SOURCE_BRANCH: "test"
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
       - name: Require test merge
@@ -101,14 +104,91 @@ jobs:
           if len(matches) != 1 or not re.fullmatch(r"[a-f0-9]{40}", expected_sha):
               raise SystemExit("exact promoted test commit has no unique successful Deploy Test run")
           output_path.write_text(
-              f"test_run_id={matches[0]['id']}\ntest_source_sha={expected_sha}\n",
+              f"test_run_id={matches[0]['id']}\n"
+              f"test_run_attempt={matches[0]['run_attempt']}\n"
+              f"test_source_sha={expected_sha}\n",
               encoding="utf-8",
           )
+          PY
+      - name: Resolve exact immutable test artifact
+        id: exact_test_artifact
+        shell: bash
+        env:
+          TEST_RUN_ID: ${{ steps.exact_test_run.outputs.test_run_id }}
+          TEST_RUN_ATTEMPT: ${{ steps.exact_test_run.outputs.test_run_attempt }}
+          TEST_SOURCE_SHA: ${{ steps.exact_test_run.outputs.test_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TEST_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TEST_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TEST_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          artifacts="$RUNNER_TEMP/exact-test-artifacts.json"
+          gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${TEST_RUN_ID}/artifacts" \
+            -f per_page=100 > "$artifacts"
+          python - "$artifacts" "$TEST_RUN_ID" "$TEST_RUN_ATTEMPT" "$TEST_SOURCE_SHA" "$GITHUB_OUTPUT" <<'PY'
+          # inline-test-artifact-resolver:start
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          expected_run_id = int(sys.argv[2])
+          expected_run_attempt = int(sys.argv[3])
+          expected_sha = sys.argv[4]
+          output_path = Path(sys.argv[5])
+          name_pattern = re.compile(
+              rf"config-authoring-test-{expected_run_id}-([1-9][0-9]*)-{re.escape(expected_sha)}"
+          )
+          artifacts = payload.get("artifacts") if isinstance(payload, dict) else None
+          if not isinstance(artifacts, list):
+              raise SystemExit("test artifact evidence is unavailable")
+          matches = []
+          for artifact in artifacts:
+              run = artifact.get("workflow_run") if isinstance(artifact, dict) else None
+              name = artifact.get("name") if isinstance(artifact, dict) else None
+              name_match = name_pattern.fullmatch(name) if isinstance(name, str) else None
+              artifact_attempt = int(name_match.group(1)) if name_match else None
+              if (
+                  isinstance(artifact, dict)
+                  and artifact_attempt is not None
+                  and artifact_attempt <= expected_run_attempt
+                  and isinstance(artifact.get("id"), int)
+                  and artifact["id"] >= 1
+                  and isinstance(artifact.get("size_in_bytes"), int)
+                  and artifact["size_in_bytes"] >= 1
+                  and artifact.get("expired") is False
+                  and isinstance(run, dict)
+                  and run.get("id") == expected_run_id
+                  and run.get("head_branch") == "test"
+                  and run.get("head_sha") == expected_sha
+              ):
+                  matches.append((artifact_attempt, artifact))
+          if not matches:
+              raise SystemExit("exact successful test artifact is unavailable or ambiguous")
+          latest_attempt = max(attempt for attempt, _ in matches)
+          latest = [artifact for attempt, artifact in matches if attempt == latest_attempt]
+          if len(latest) != 1:
+              raise SystemExit("exact successful test artifact is unavailable or ambiguous")
+          selected = latest[0]
+          output_path.write_text(
+              f"test_artifact_id={selected['id']}\n"
+              f"test_artifact_name={selected['name']}\n",
+              encoding="utf-8",
+          )
+          # inline-test-artifact-resolver:end
           PY
 
   validate:
     runs-on: ubuntu-latest
     needs: guard
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact-id }}
+      artifact_name: ${{ steps.artifact_metadata.outputs.name }}
+      manifest_digest: ${{ steps.manifest.outputs.digest }}
+      test_source_sha: ${{ needs.guard.outputs.test_source_sha }}
     permissions:
       contents: read
       actions: read
@@ -117,18 +197,103 @@ jobs:
       AWS_REGION: us-east-1
       SAM_CLI_TELEMETRY: 0
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-python@v6
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
-      - uses: aws-actions/setup-sam@v3
-      - name: Download exact successful test-run artifact
-        uses: actions/download-artifact@v4
+      - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
         with:
-          name: config-authoring-test-${{ needs.guard.outputs.test_source_sha }}
-          path: .aws-sam/promoted-test
+          version: 1.163.0
+          use-installer: true
+          token: ${{ github.token }}
+      - name: Validate promoted test artifact metadata
+        shell: bash
+        env:
+          TEST_RUN_ID: ${{ needs.guard.outputs.test_run_id }}
+          TEST_ARTIFACT_ID: ${{ needs.guard.outputs.test_artifact_id }}
+          TEST_ARTIFACT_NAME: ${{ needs.guard.outputs.test_artifact_name }}
+          TEST_SOURCE_SHA: ${{ needs.guard.outputs.test_source_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$TEST_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TEST_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$TEST_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]
+          [[ "$TEST_ARTIFACT_NAME" =~ ^config-authoring-test-${TEST_RUN_ID}-[1-9][0-9]*-${TEST_SOURCE_SHA}$ ]]
+      - name: Download exact successful test-run artifact by ID
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.guard.outputs.test_artifact_id }}
+          path: .aws-sam/promoted-test-artifact
           github-token: ${{ github.token }}
           run-id: ${{ needs.guard.outputs.test_run_id }}
+      - name: Reverify exact test merge without credentials
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          SOURCE_BRANCH: test
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          commit="$(git rev-parse HEAD)"
+          source_tip="$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")"
+          commit_tree="$(git rev-parse "${commit}^{tree}")"
+          source_tree="$(git rev-parse "${source_tip}^{tree}")"
+          parents_line="$(git rev-list --parents -n 1 HEAD)"
+          python tools/verify_promotion_provenance.py \
+            --commit "$commit" \
+            --before-sha "$BEFORE_SHA" \
+            --source-tip "$source_tip" \
+            --commit-tree "$commit_tree" \
+            --source-tree "$source_tree" \
+            --parents-line "$parents_line"
+      - name: Verify and normalize exact promoted test artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          promoted=.aws-sam/promoted-test-artifact
+          if [[ -n "$(find "$promoted" -type l -print -quit)" ]]; then
+            echo "artifact_link_invalid"
+            exit 1
+          fi
+          test -f "$promoted/build-manifest.sha256"
+          (cd "$promoted/build" && sha256sum --check --strict ../build-manifest.sha256)
+          printf '%s\n' \
+            './ConfigAuthoringFunction/lambda_function.py' \
+            './ConfigAuthoringFunction/schemas/server-features/commerce.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './ConfigAuthoringFunction/server_policy_validation.py' \
+            './ConfigAuthoringFunction/zoolanding_lambda_common.py' \
+            './config-authoring-manifest.json' \
+            './template.yaml' > "$RUNNER_TEMP/expected-promoted-build-files.txt"
+          cut -c67- "$promoted/build-manifest.sha256" | LC_ALL=C sort \
+            > "$RUNNER_TEMP/promoted-manifest-paths.txt"
+          (cd "$promoted/build" && LC_ALL=C find . \( -type f -o -type l \) -print | LC_ALL=C sort) \
+            > "$RUNNER_TEMP/promoted-build-paths.txt"
+          diff -u "$RUNNER_TEMP/expected-promoted-build-files.txt" "$RUNNER_TEMP/promoted-manifest-paths.txt"
+          diff -u "$RUNNER_TEMP/expected-promoted-build-files.txt" "$RUNNER_TEMP/promoted-build-paths.txt"
+          printf '%s\n' \
+            './build-manifest.sha256' \
+            './build/ConfigAuthoringFunction/lambda_function.py' \
+            './build/ConfigAuthoringFunction/schemas/server-features/commerce.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './build/ConfigAuthoringFunction/server_policy_validation.py' \
+            './build/ConfigAuthoringFunction/zoolanding_lambda_common.py' \
+            './build/config-authoring-manifest.json' \
+            './build/template.yaml' > "$RUNNER_TEMP/expected-promoted-artifact-files.txt"
+          (cd "$promoted" && LC_ALL=C find . \( -type f -o -type l \) -print | LC_ALL=C sort) \
+            > "$RUNNER_TEMP/promoted-artifact-paths.txt"
+          diff -u "$RUNNER_TEMP/expected-promoted-artifact-files.txt" "$RUNNER_TEMP/promoted-artifact-paths.txt"
+          python tools/build_lambda_artifact.py \
+            --normalize-artifact "$promoted/build/ConfigAuthoringFunction"
+          python tools/build_lambda_artifact.py \
+            --verify-sam-build "$promoted/build" \
+            --expected-source-commit "${{ needs.guard.outputs.test_source_sha }}"
       - name: Test and build exact artifact without AWS credentials
         shell: bash
         run: |
@@ -138,21 +303,41 @@ jobs:
           sam validate --lint
           sam build --no-cached
           python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigAuthoringFunction
+          python tools/build_lambda_artifact.py --normalize-artifact .aws-sam/build/ConfigAuthoringFunction
           python tools/build_lambda_artifact.py \
             --write-sam-manifest .aws-sam/build \
             --source-commit "$GITHUB_SHA"
           python tools/build_lambda_artifact.py \
             --verify-sam-build .aws-sam/build \
             --expected-source-commit "$GITHUB_SHA"
-          python tools/build_lambda_artifact.py \
-            --verify-sam-build .aws-sam/promoted-test \
-            --expected-source-commit "${{ needs.guard.outputs.test_source_sha }}"
-          cmp -s .aws-sam/build/template.yaml .aws-sam/promoted-test/template.yaml
+          cmp -s .aws-sam/build/template.yaml .aws-sam/promoted-test-artifact/build/template.yaml
+      - name: Bind promoted manifest digest
+        id: manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="$(sha256sum .aws-sam/promoted-test-artifact/build-manifest.sha256 | cut -d ' ' -f 1)"
+          if [[ ! "$digest" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "manifest_digest_invalid"
+            exit 1
+          fi
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - name: Define artifact identity
+        id: artifact_metadata
+        shell: bash
+        env:
+          ARTIFACT_NAME: config-authoring-production-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          printf 'name=%s\n' "$ARTIFACT_NAME" >> "$GITHUB_OUTPUT"
       - name: Upload exact validated artifact
-        uses: actions/upload-artifact@v4
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: config-authoring-production-${{ github.sha }}
-          path: .aws-sam/promoted-test/
+          name: ${{ steps.artifact_metadata.outputs.name }}
+          path: |
+            .aws-sam/promoted-test-artifact/build/
+            .aws-sam/promoted-test-artifact/build-manifest.sha256
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 7
@@ -169,27 +354,134 @@ jobs:
       AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
       SAM_CLI_TELEMETRY: 0
     steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ github.sha }}
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.13'
-      - uses: aws-actions/setup-sam@v3
-      - name: Download validated artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: config-authoring-production-${{ github.sha }}
-          path: .aws-sam/build
-      - name: Recheck exact validated artifact before credentials
+      - name: Validate artifact handoff metadata
+        shell: bash
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+          EXPECTED_ARTIFACT_NAME: ${{ needs.validate.outputs.artifact_name }}
+          EXPECTED_MANIFEST_DIGEST: ${{ needs.validate.outputs.manifest_digest }}
+          EXPECTED_SOURCE_SHA: ${{ needs.validate.outputs.test_source_sha }}
         run: |
           set -euo pipefail
-          python tools/build_lambda_artifact.py --normalize-artifact .aws-sam/build/ConfigAuthoringFunction
-          python tools/build_lambda_artifact.py \
-            --verify-sam-build .aws-sam/build \
-            --expected-source-commit "${{ needs.guard.outputs.test_source_sha }}"
-          sam validate --lint --template-file .aws-sam/build/template.yaml
-      - uses: aws-actions/configure-aws-credentials@v6
+          if [[ ! "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]; then
+            echo "artifact_id_invalid"
+            exit 1
+          fi
+          artifact_name_pattern="^config-authoring-production-${GITHUB_RUN_ID}-[1-9][0-9]*-${GITHUB_SHA}$"
+          if [[ ! "$EXPECTED_ARTIFACT_NAME" =~ $artifact_name_pattern ]]; then
+            echo "artifact_name_invalid"
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_MANIFEST_DIGEST" =~ ^[a-f0-9]{64}$ ]]; then
+            echo "manifest_digest_invalid"
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_SOURCE_SHA" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "source_sha_invalid"
+            exit 1
+          fi
+      - name: Download validated artifact by immutable ID
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          artifact-ids: ${{ needs.validate.outputs.artifact_id }}
+          path: .aws-sam
+      - name: Verify and normalize exact validated artifact
+        shell: bash
+        env:
+          EXPECTED_MANIFEST_DIGEST: ${{ needs.validate.outputs.manifest_digest }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$(find .aws-sam -type l -print -quit)" ]]; then
+            echo "artifact_link_invalid"
+            exit 1
+          fi
+          test -f .aws-sam/build-manifest.sha256
+          printf '%s  %s\n' "$EXPECTED_MANIFEST_DIGEST" '.aws-sam/build-manifest.sha256' \
+            | sha256sum --check --strict -
+          (cd .aws-sam/build && sha256sum --check --strict ../build-manifest.sha256)
+          printf '%s\n' \
+            './ConfigAuthoringFunction/lambda_function.py' \
+            './ConfigAuthoringFunction/schemas/server-features/commerce.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './ConfigAuthoringFunction/server_policy_validation.py' \
+            './ConfigAuthoringFunction/zoolanding_lambda_common.py' \
+            './config-authoring-manifest.json' \
+            './template.yaml' > "$RUNNER_TEMP/expected-build-files.txt"
+          cut -c67- .aws-sam/build-manifest.sha256 | LC_ALL=C sort > "$RUNNER_TEMP/manifest-paths.txt"
+          (cd .aws-sam/build && LC_ALL=C find . \( -type f -o -type l \) -print | LC_ALL=C sort) \
+            > "$RUNNER_TEMP/artifact-paths.txt"
+          diff -u "$RUNNER_TEMP/expected-build-files.txt" "$RUNNER_TEMP/manifest-paths.txt"
+          diff -u "$RUNNER_TEMP/expected-build-files.txt" "$RUNNER_TEMP/artifact-paths.txt"
+          printf '%s\n' \
+            './build-manifest.sha256' \
+            './build/ConfigAuthoringFunction/lambda_function.py' \
+            './build/ConfigAuthoringFunction/schemas/server-features/commerce.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './build/ConfigAuthoringFunction/server_policy_validation.py' \
+            './build/ConfigAuthoringFunction/zoolanding_lambda_common.py' \
+            './build/config-authoring-manifest.json' \
+            './build/template.yaml' > "$RUNNER_TEMP/expected-artifact-files.txt"
+          (cd .aws-sam && LC_ALL=C find . \( -type f -o -type l \) -print | LC_ALL=C sort) \
+            > "$RUNNER_TEMP/all-artifact-paths.txt"
+          diff -u "$RUNNER_TEMP/expected-artifact-files.txt" "$RUNNER_TEMP/all-artifact-paths.txt"
+          find .aws-sam/build/ConfigAuthoringFunction -type f -exec touch -t 198001010000.00 {} +
+          find .aws-sam/build/ConfigAuthoringFunction -depth -type d -exec touch -t 198001010000.00 {} +
+      - uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+        with:
+          version: 1.163.0
+          use-installer: true
+          token: ${{ github.token }}
+      - name: Validate transported SAM template
+        run: sam validate --lint --template-file .aws-sam/build/template.yaml
+      - uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+          SOURCE_BRANCH: test
+          TARGET_BRANCH: main
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const fail = code => { throw new Error(code); };
+            const isSha = value => /^[a-f0-9]{40}$/.test(value ?? '');
+            const repository = process.env.GITHUB_REPOSITORY;
+            const sha = process.env.EXPECTED_SHA;
+            const sourceBranch = process.env.SOURCE_BRANCH;
+            const targetBranch = process.env.TARGET_BRANCH;
+            const event = context.payload;
+            if (!repository || !isSha(sha) || context.eventName !== 'push'
+              || process.env.GITHUB_REF !== `refs/heads/${targetBranch}`
+              || event.forced === true || event.created === true || event.deleted === true
+              || event.after !== sha || !isSha(event.before) || /^0+$/.test(event.before)) {
+              fail('promotion_context_invalid');
+            }
+            const [owner, repo] = repository.split('/');
+            if (!owner || !repo) fail('promotion_repository_invalid');
+            const { data: commit } = await github.rest.git.getCommit({ owner, repo, commit_sha: sha });
+            const parents = Array.isArray(commit.parents) ? commit.parents.map(parent => parent.sha) : [];
+            if (parents.length !== 2 || parents.some(parent => !isSha(parent))) {
+              fail('promotion_merge_commit_required');
+            }
+            if (parents[0] !== event.before) fail('promotion_first_parent_mismatch');
+            const { data: source } = await github.rest.repos.getBranch({ owner, repo, branch: sourceBranch });
+            if (!isSha(source.commit?.sha) || parents[1] !== source.commit.sha) {
+              fail('promotion_source_tip_mismatch');
+            }
+            const { data: sourceCommit } = await github.rest.git.getCommit({
+              owner,
+              repo,
+              commit_sha: source.commit.sha,
+            });
+            if (!isSha(commit.tree?.sha) || commit.tree.sha !== sourceCommit.tree?.sha) {
+              fail('promotion_tree_mismatch');
+            }
+            const { data: target } = await github.rest.repos.getBranch({ owner, repo, branch: targetBranch });
+            if (target.commit?.sha !== sha) fail('promotion_target_tip_mismatch');
+            core.info('promotion_provenance_verified');
+      - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
@@ -222,10 +514,106 @@ jobs:
           [[ "$code_location" == https://* ]]
           curl --fail --silent --show-error --location "$code_location" --output "$deployed_zip"
           unset code_location
-          python tools/build_lambda_artifact.py \
-            --verify-deployed-zip "$deployed_zip" \
-            --against-artifact .aws-sam/build/ConfigAuthoringFunction \
-            --expected-code-sha256 "$test_code_sha"
+          python3 - .aws-sam/build/ConfigAuthoringFunction "$deployed_zip" "$test_code_sha" <<'PY'
+          # inline-lambda-zip-verifier:start
+          import base64
+          import hashlib
+          import io
+          import os
+          from pathlib import Path, PurePosixPath
+          import stat
+          import sys
+          import zipfile
+
+          RUNTIME_FILES = {
+              "lambda_function.py",
+              "schemas/server-features/commerce.schema.json",
+              "schemas/server-features/data-spaces.schema.json",
+              "schemas/server-features/integration-bindings.schema.json",
+              "schemas/server-features/notification-policies.schema.json",
+              "server_policy_validation.py",
+              "zoolanding_lambda_common.py",
+          }
+          MAX_ZIP_BYTES = 10 * 1024 * 1024
+          MAX_FILE_BYTES = 2 * 1024 * 1024
+
+
+          def fail(code):
+              raise SystemExit(code)
+
+
+          def unsafe_link(path):
+              junction_check = getattr(path, "is_junction", None)
+              return path.is_symlink() or bool(junction_check and junction_check())
+
+
+          if len(sys.argv) != 4:
+              fail("lambda_zip_arguments_invalid")
+          artifact_root = Path(sys.argv[1]).absolute()
+          archive_path = Path(sys.argv[2]).absolute()
+          expected_code_sha = sys.argv[3]
+          if not artifact_root.is_dir() or unsafe_link(artifact_root):
+              fail("lambda_artifact_root_invalid")
+          inventory = set()
+          for current_root, directory_names, file_names in os.walk(
+              artifact_root,
+              topdown=True,
+              followlinks=False,
+          ):
+              current_path = Path(current_root)
+              for name in (*directory_names, *file_names):
+                  if unsafe_link(current_path / name):
+                      fail("lambda_artifact_link_invalid")
+              inventory.update(
+                  (current_path / name).relative_to(artifact_root).as_posix()
+                  for name in file_names
+              )
+          if inventory != RUNTIME_FILES:
+              fail("lambda_artifact_inventory_invalid")
+          if (
+              not archive_path.is_file()
+              or unsafe_link(archive_path)
+              or archive_path.stat().st_size < 1
+              or archive_path.stat().st_size > MAX_ZIP_BYTES
+          ):
+              fail("lambda_zip_invalid")
+          archive_bytes = archive_path.read_bytes()
+          actual_code_sha = base64.b64encode(hashlib.sha256(archive_bytes).digest()).decode("ascii")
+          if actual_code_sha != expected_code_sha:
+              fail("lambda_code_sha_mismatch")
+          deployed_files = {}
+          try:
+              with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
+                  for info in archive.infolist():
+                      path = PurePosixPath(info.filename)
+                      if (
+                          info.filename != path.as_posix()
+                          or path.is_absolute()
+                          or ".." in path.parts
+                          or "\\" in info.filename
+                          or stat.S_ISLNK(info.external_attr >> 16)
+                          or info.flag_bits & 0x1
+                      ):
+                          fail("lambda_zip_path_invalid")
+                      if info.is_dir():
+                          continue
+                      if (
+                          info.filename in deployed_files
+                          or info.filename not in RUNTIME_FILES
+                          or info.file_size > MAX_FILE_BYTES
+                      ):
+                          fail("lambda_zip_inventory_invalid")
+                      deployed_files[info.filename] = archive.read(info)
+          except (zipfile.BadZipFile, RuntimeError, OSError):
+              fail("lambda_zip_invalid")
+          expected_files = {
+              relative_path: (artifact_root / relative_path).read_bytes()
+              for relative_path in RUNTIME_FILES
+          }
+          if deployed_files != expected_files:
+              fail("lambda_zip_bytes_mismatch")
+          # inline-lambda-zip-verifier:end
+          PY
           printf '%s\n' "$test_code_sha" > "$bound_code_sha"
       - name: Create, review, and execute an exact nonreplacement change set
         env:
@@ -249,20 +637,179 @@ jobs:
             --output-template-file "$packaged" \
             --use-json \
             --region "$AWS_REGION"
-          packaged_key="$(python tools/build_lambda_artifact.py \
-            --extract-packaged-code-key "$packaged" \
-            --expected-bucket "$EXPECTED_BUCKET" \
-            --expected-prefix "$package_prefix")"
+          packaged_key="$(python3 - "$packaged" "$EXPECTED_BUCKET" "$package_prefix" <<'PY'
+          # inline-packaged-key-parser:start
+          import json
+          from pathlib import Path
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+
+          def fail(code):
+              raise SystemExit(code)
+
+
+          def reject_duplicates(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      fail("packaged_template_duplicate_key")
+                  result[key] = value
+              return result
+
+
+          if len(sys.argv) != 4:
+              fail("packaged_template_arguments_invalid")
+          template_path = Path(sys.argv[1]).absolute()
+          expected_bucket = sys.argv[2]
+          expected_prefix = sys.argv[3]
+          if re.fullmatch(r"[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]", expected_bucket) is None:
+              fail("packaged_bucket_invalid")
+          if re.fullmatch(
+              r"system/deploy-artifacts/[a-f0-9]{40}/[1-9][0-9]*/[1-9][0-9]*",
+              expected_prefix,
+          ) is None:
+              fail("packaged_prefix_invalid")
+          try:
+              template = json.loads(
+                  template_path.read_text(encoding="utf-8"),
+                  object_pairs_hook=reject_duplicates,
+              )
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+              fail("packaged_template_invalid")
+          resources = template.get("Resources") if isinstance(template, dict) else None
+          function = resources.get("ConfigAuthoringFunction") if isinstance(resources, dict) else None
+          properties = function.get("Properties") if isinstance(function, dict) else None
+          code_uri = properties.get("CodeUri") if isinstance(properties, dict) else None
+          if not isinstance(code_uri, str):
+              fail("packaged_code_uri_missing")
+          parsed = urlsplit(code_uri)
+          if (
+              parsed.scheme != "s3"
+              or parsed.netloc != expected_bucket
+              or parsed.query
+              or parsed.fragment
+              or "%" in parsed.path
+              or not parsed.path.startswith("/")
+          ):
+              fail("packaged_code_uri_invalid")
+          key = parsed.path[1:]
+          if re.fullmatch(
+              re.escape(expected_prefix) + r"/[A-Za-z0-9._-]{16,128}",
+              key,
+          ) is None:
+              fail("packaged_code_key_invalid")
+          print(key)
+          # inline-packaged-key-parser:end
+          PY
+          )"
           aws s3api get-object \
             --bucket "$EXPECTED_BUCKET" \
             --key "$packaged_key" \
             "$packaged_zip" \
             --no-cli-pager > /dev/null
           bound_test_code_sha="$(cat "$RUNNER_TEMP/live-test-code-sha.txt")"
-          python tools/build_lambda_artifact.py \
-            --verify-deployed-zip "$packaged_zip" \
-            --against-artifact .aws-sam/build/ConfigAuthoringFunction \
-            --expected-code-sha256 "$bound_test_code_sha"
+          python3 - .aws-sam/build/ConfigAuthoringFunction "$packaged_zip" "$bound_test_code_sha" <<'PY'
+          # inline-lambda-zip-verifier:start
+          import base64
+          import hashlib
+          import io
+          import os
+          from pathlib import Path, PurePosixPath
+          import stat
+          import sys
+          import zipfile
+
+          RUNTIME_FILES = {
+              "lambda_function.py",
+              "schemas/server-features/commerce.schema.json",
+              "schemas/server-features/data-spaces.schema.json",
+              "schemas/server-features/integration-bindings.schema.json",
+              "schemas/server-features/notification-policies.schema.json",
+              "server_policy_validation.py",
+              "zoolanding_lambda_common.py",
+          }
+          MAX_ZIP_BYTES = 10 * 1024 * 1024
+          MAX_FILE_BYTES = 2 * 1024 * 1024
+
+
+          def fail(code):
+              raise SystemExit(code)
+
+
+          def unsafe_link(path):
+              junction_check = getattr(path, "is_junction", None)
+              return path.is_symlink() or bool(junction_check and junction_check())
+
+
+          if len(sys.argv) != 4:
+              fail("lambda_zip_arguments_invalid")
+          artifact_root = Path(sys.argv[1]).absolute()
+          archive_path = Path(sys.argv[2]).absolute()
+          expected_code_sha = sys.argv[3]
+          if not artifact_root.is_dir() or unsafe_link(artifact_root):
+              fail("lambda_artifact_root_invalid")
+          inventory = set()
+          for current_root, directory_names, file_names in os.walk(
+              artifact_root,
+              topdown=True,
+              followlinks=False,
+          ):
+              current_path = Path(current_root)
+              for name in (*directory_names, *file_names):
+                  if unsafe_link(current_path / name):
+                      fail("lambda_artifact_link_invalid")
+              inventory.update(
+                  (current_path / name).relative_to(artifact_root).as_posix()
+                  for name in file_names
+              )
+          if inventory != RUNTIME_FILES:
+              fail("lambda_artifact_inventory_invalid")
+          if (
+              not archive_path.is_file()
+              or unsafe_link(archive_path)
+              or archive_path.stat().st_size < 1
+              or archive_path.stat().st_size > MAX_ZIP_BYTES
+          ):
+              fail("lambda_zip_invalid")
+          archive_bytes = archive_path.read_bytes()
+          actual_code_sha = base64.b64encode(hashlib.sha256(archive_bytes).digest()).decode("ascii")
+          if actual_code_sha != expected_code_sha:
+              fail("lambda_code_sha_mismatch")
+          deployed_files = {}
+          try:
+              with zipfile.ZipFile(io.BytesIO(archive_bytes), "r") as archive:
+                  for info in archive.infolist():
+                      path = PurePosixPath(info.filename)
+                      if (
+                          info.filename != path.as_posix()
+                          or path.is_absolute()
+                          or ".." in path.parts
+                          or "\\" in info.filename
+                          or stat.S_ISLNK(info.external_attr >> 16)
+                          or info.flag_bits & 0x1
+                      ):
+                          fail("lambda_zip_path_invalid")
+                      if info.is_dir():
+                          continue
+                      if (
+                          info.filename in deployed_files
+                          or info.filename not in RUNTIME_FILES
+                          or info.file_size > MAX_FILE_BYTES
+                      ):
+                          fail("lambda_zip_inventory_invalid")
+                      deployed_files[info.filename] = archive.read(info)
+          except (zipfile.BadZipFile, RuntimeError, OSError):
+              fail("lambda_zip_invalid")
+          expected_files = {
+              relative_path: (artifact_root / relative_path).read_bytes()
+              for relative_path in RUNTIME_FILES
+          }
+          if deployed_files != expected_files:
+              fail("lambda_zip_bytes_mismatch")
+          # inline-lambda-zip-verifier:end
+          PY
           change_set_arn="$(aws cloudformation create-change-set \
             --stack-name "$STACK_NAME" \
             --change-set-name "$CHANGE_SET_NAME" \
@@ -293,16 +840,90 @@ jobs:
             --include-property-values \
             --output json \
             --no-cli-pager > "$description"
-          decision="$(python tools/review_cloudformation_change_set.py "$description" \
-            --expected-stack-name "$STACK_NAME" \
-            --expected-change-set-name "$CHANGE_SET_NAME" \
-            --expected-change-set-arn "$change_set_arn" \
-            --expected-parameter "EnvironmentName=$EXPECTED_ENVIRONMENT" \
-            --expected-parameter "ManageStorageResources=$EXPECTED_MANAGE_STORAGE" \
-            --expected-parameter "ConfigTableName=$EXPECTED_TABLE" \
-            --expected-parameter "ConfigPayloadsBucketName=$EXPECTED_BUCKET" \
-            --expected-parameter "LogLevel=INFO" \
-            --expected-parameter "DeployAuthzConfigS3Key=system/deploy-authz-v2.json")"
+          expected_parameters="{\"EnvironmentName\":\"${EXPECTED_ENVIRONMENT}\",\"ManageStorageResources\":\"${EXPECTED_MANAGE_STORAGE}\",\"ConfigTableName\":\"${EXPECTED_TABLE}\",\"ConfigPayloadsBucketName\":\"${EXPECTED_BUCKET}\",\"LogLevel\":\"INFO\",\"DeployAuthzConfigS3Key\":\"system/deploy-authz-v2.json\"}"
+          decision="$(python3 - "$description" "$STACK_NAME" "$CHANGE_SET_NAME" "$change_set_arn" "$expected_parameters" <<'PY'
+          # inline-change-set-review:start
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          NO_CHANGE_REASON = (
+              "The submitted information didn't contain changes. "
+              "Submit different information to create a change set."
+          )
+
+
+          def fail(code):
+              raise SystemExit(code)
+
+
+          if len(sys.argv) != 6:
+              fail("change_set_review_arguments_invalid")
+          description, expected_stack, expected_name, expected_arn, parameter_json = sys.argv[1:]
+          try:
+              payload = json.loads(Path(description).read_text(encoding="utf-8"))
+              expected_parameters = json.loads(parameter_json)
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+              fail("change_set_description_invalid")
+          if not isinstance(payload, dict) or not isinstance(expected_parameters, dict) or not expected_parameters:
+              fail("change_set_description_invalid")
+          if not all(isinstance(key, str) and isinstance(value, str) for key, value in expected_parameters.items()):
+              fail("change_set_expected_parameters_invalid")
+          arn_pattern = (
+              r"^arn:(?:aws|aws-us-gov|aws-cn):cloudformation:[a-z0-9-]+:[0-9]{12}:"
+              + r"changeSet/" + re.escape(expected_name) + r"/[A-Za-z0-9-]+$"
+          )
+          if re.fullmatch(arn_pattern, expected_arn) is None:
+              fail("change_set_arn_invalid")
+          parameters = payload.get("Parameters")
+          if not isinstance(parameters, list):
+              fail("change_set_parameters_invalid")
+          actual_parameters = {}
+          for entry in parameters:
+              if not isinstance(entry, dict):
+                  fail("change_set_parameters_invalid")
+              key = entry.get("ParameterKey")
+              value = entry.get("ParameterValue")
+              if not isinstance(key, str) or not isinstance(value, str) or key in actual_parameters:
+                  fail("change_set_parameters_invalid")
+              actual_parameters[key] = value
+          invalid_type = "ChangeSetType" in payload and payload.get("ChangeSetType") != "UPDATE"
+          if (
+              payload.get("StackName") != expected_stack
+              or payload.get("ChangeSetName") != expected_name
+              or payload.get("ChangeSetId") != expected_arn
+              or invalid_type
+              or actual_parameters != expected_parameters
+          ):
+              fail("change_set_identity_invalid")
+          status = payload.get("Status")
+          execution_status = payload.get("ExecutionStatus")
+          changes = payload.get("Changes")
+          if (
+              status == "FAILED"
+              and execution_status == "UNAVAILABLE"
+              and payload.get("StatusReason") == NO_CHANGE_REASON
+              and changes in (None, [])
+          ):
+              print("noop")
+              raise SystemExit(0)
+          if status != "CREATE_COMPLETE" or execution_status != "AVAILABLE":
+              fail("change_set_not_available")
+          if not isinstance(changes, list) or not changes:
+              fail("change_set_changes_invalid")
+          for change in changes:
+              if not isinstance(change, dict) or change.get("Type") != "Resource":
+                  fail("change_set_entry_invalid")
+              resource = change.get("ResourceChange")
+              if not isinstance(resource, dict) or resource.get("Action") not in {"Add", "Modify"}:
+                  fail("change_set_resource_invalid")
+              if resource.get("Replacement") not in (None, "False"):
+                  fail("change_set_replacement_invalid")
+          print("execute")
+          # inline-change-set-review:end
+          PY
+          )"
           if [[ "$decision" == "noop" ]]; then
             aws cloudformation delete-change-set \
               --stack-name "$STACK_NAME" \

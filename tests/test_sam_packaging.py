@@ -3,10 +3,12 @@ import base64
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -105,6 +107,88 @@ class SamPackagingTest(unittest.TestCase):
 
         self.assertEqual(first_digest, artifact_digest(STAGED_ARTIFACT))
 
+    def test_builder_rejects_a_junction_like_build_root_before_cleanup(self):
+        with mock.patch.object(
+            Path,
+            "is_junction",
+            autospec=True,
+            side_effect=lambda path: path == build_lambda_artifact.BUILD_ROOT,
+        ):
+            with self.assertRaisesRegex(build_lambda_artifact.ArtifactError, "junction"):
+                build_lambda_artifact._assert_safe_build_location()
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows junction test")
+    def test_builder_rejects_a_real_windows_build_root_junction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_root = root / "repository"
+            external = root / "external"
+            build_root = project_root / ".build"
+            artifact_root = build_root / "config-authoring"
+            project_root.mkdir()
+            external.mkdir()
+            sentinel = external / "must-survive.txt"
+            sentinel.write_text("do not delete\n", encoding="utf-8")
+            junction = subprocess.run(
+                ["cmd.exe", "/d", "/c", "mklink", "/J", str(build_root), str(external)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if junction.returncode != 0:
+                self.skipTest(f"mklink /J unavailable: {junction.stderr.strip()}")
+
+            try:
+                with (
+                    mock.patch.object(build_lambda_artifact, "PROJECT_ROOT", project_root),
+                    mock.patch.object(build_lambda_artifact, "BUILD_ROOT", build_root),
+                    mock.patch.object(build_lambda_artifact, "DEFAULT_ARTIFACT", artifact_root),
+                ):
+                    with self.assertRaisesRegex(build_lambda_artifact.ArtifactError, "junction"):
+                        build_lambda_artifact._assert_safe_build_location()
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "do not delete\n")
+            finally:
+                build_root.rmdir()
+
+    def test_builder_rejects_a_nested_junction_like_build_entry_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project_root = Path(directory)
+            build_root = project_root / ".build"
+            artifact_root = build_root / "config-authoring"
+            trap = artifact_root / "trap"
+            trap.mkdir(parents=True)
+
+            with (
+                mock.patch.object(build_lambda_artifact, "PROJECT_ROOT", project_root),
+                mock.patch.object(build_lambda_artifact, "BUILD_ROOT", build_root),
+                mock.patch.object(build_lambda_artifact, "DEFAULT_ARTIFACT", artifact_root),
+                mock.patch.object(
+                    build_lambda_artifact,
+                    "_is_unsafe_link",
+                    side_effect=lambda path: path == trap,
+                ),
+            ):
+                with self.assertRaisesRegex(build_lambda_artifact.ArtifactError, "junction"):
+                    build_lambda_artifact._assert_safe_build_location()
+
+    def test_builder_rejects_a_junction_like_runtime_source_parent(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as directory:
+            build_root = Path(directory) / ".build"
+            artifact_root = build_root / "config-authoring"
+            with (
+                mock.patch.object(build_lambda_artifact, "BUILD_ROOT", build_root),
+                mock.patch.object(build_lambda_artifact, "DEFAULT_ARTIFACT", artifact_root),
+                mock.patch.object(
+                    build_lambda_artifact,
+                    "_is_unsafe_link",
+                    side_effect=lambda path: path.name == "schemas",
+                ),
+                mock.patch.object(shutil, "copyfile", wraps=shutil.copyfile) as copyfile,
+            ):
+                with self.assertRaisesRegex(build_lambda_artifact.ArtifactError, "junction"):
+                    build_lambda_artifact.build_artifact()
+                copyfile.assert_not_called()
+
     def test_verifier_fails_closed_on_unexpected_file(self):
         build = self.run_builder()
         self.assertEqual(0, build.returncode, build.stderr)
@@ -116,6 +200,33 @@ class SamPackagingTest(unittest.TestCase):
 
         self.assertNotEqual(0, result.returncode)
         self.assertIn("unexpected artifact files: README.md", result.stderr)
+
+    def test_inventory_rejects_a_junction_like_entry_before_traversal(self):
+        build = self.run_builder()
+        self.assertEqual(0, build.returncode, build.stderr)
+
+        with mock.patch.object(
+            build_lambda_artifact,
+            "_is_unsafe_link",
+            side_effect=lambda path: path.name == "schemas",
+        ):
+            with self.assertRaisesRegex(build_lambda_artifact.ArtifactError, "junction"):
+                build_lambda_artifact.verify_artifact(STAGED_ARTIFACT)
+
+    def test_inventory_rejects_a_non_regular_file_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            candidate = root / "not-regular"
+            candidate.write_text("placeholder", encoding="utf-8")
+            real_is_file = Path.is_file
+            with mock.patch.object(
+                Path,
+                "is_file",
+                autospec=True,
+                side_effect=lambda path: False if path == candidate else real_is_file(path),
+            ):
+                with self.assertRaisesRegex(build_lambda_artifact.ArtifactError, "non-regular"):
+                    build_lambda_artifact._relative_inventory(root)
 
     def test_normalizer_restores_reproducible_timestamps_after_artifact_transport(self):
         build = self.run_builder()
