@@ -41,6 +41,28 @@ class ArtifactError(RuntimeError):
     """Raised when an artifact cannot be built or verified safely."""
 
 
+def _is_unsafe_link(path: Path) -> bool:
+    junction_check = getattr(path, "is_junction", None)
+    return path.is_symlink() or bool(junction_check and junction_check())
+
+
+def _assert_contained_without_links(path: Path, root: Path, label: str) -> None:
+    lexical_root = Path(os.path.abspath(root))
+    lexical_path = Path(os.path.abspath(path))
+    try:
+        relative_path = lexical_path.relative_to(lexical_root)
+    except ValueError as exc:
+        raise ArtifactError(f"{label} escapes project root: {path}") from exc
+
+    current = lexical_root
+    for part in relative_path.parts:
+        current /= part
+        if _is_unsafe_link(current):
+            raise ArtifactError(f"{label} contains a symlink or junction: {current}")
+    if not lexical_path.resolve(strict=False).is_relative_to(lexical_root.resolve()):
+        raise ArtifactError(f"{label} escapes project root: {path}")
+
+
 def _canonical_json_bytes(value: object) -> bytes:
     return (json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n").encode("utf-8")
 
@@ -52,14 +74,38 @@ def _source_commit(value: str) -> str:
 
 
 def _relative_inventory(root: Path) -> set[str]:
-    if not root.is_dir() or root.is_symlink():
+    if not root.is_dir() or _is_unsafe_link(root):
         raise ArtifactError(f"artifact directory is missing or unsafe: {root}")
 
     inventory: set[str] = set()
-    for path in root.rglob("*"):
-        if path.is_symlink():
-            raise ArtifactError(f"artifact contains a symlink: {path.relative_to(root).as_posix()}")
-        if path.is_file():
+    for current_root, directory_names, file_names in os.walk(
+        root,
+        topdown=True,
+        followlinks=False,
+    ):
+        current_path = Path(current_root)
+        for name in directory_names:
+            path = current_path / name
+            if _is_unsafe_link(path):
+                raise ArtifactError(
+                    "artifact contains a symlink or junction: "
+                    f"{path.relative_to(root).as_posix()}"
+                )
+            if not path.is_dir():
+                raise ArtifactError(
+                    f"artifact contains a non-directory entry: {path.relative_to(root).as_posix()}"
+                )
+        for name in file_names:
+            path = current_path / name
+            if _is_unsafe_link(path):
+                raise ArtifactError(
+                    "artifact contains a symlink or junction: "
+                    f"{path.relative_to(root).as_posix()}"
+                )
+            if not path.is_file():
+                raise ArtifactError(
+                    f"artifact contains a non-regular entry: {path.relative_to(root).as_posix()}"
+                )
             inventory.add(path.relative_to(root).as_posix())
     return inventory
 
@@ -78,8 +124,9 @@ def verify_artifact(artifact_root: Path) -> None:
     for relative_path in RUNTIME_FILES:
         source = PROJECT_ROOT / relative_path
         deployed = artifact_root / relative_path
-        if not source.is_file() or source.is_symlink():
+        if not source.is_file():
             raise ArtifactError(f"runtime source is missing or unsafe: {relative_path.as_posix()}")
+        _assert_contained_without_links(source, PROJECT_ROOT, "runtime source")
         if deployed.read_bytes() != source.read_bytes():
             raise ArtifactError(f"artifact content differs from source: {relative_path.as_posix()}")
 
@@ -102,7 +149,7 @@ def artifact_manifest(artifact_root: Path, source_commit: str) -> dict[str, obje
 
 
 def _strict_json_object(path: Path) -> dict[str, object]:
-    if not path.is_file() or path.is_symlink():
+    if not path.is_file() or _is_unsafe_link(path):
         raise ArtifactError(f"manifest is missing or unsafe: {path}")
 
     def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -133,10 +180,10 @@ def _sam_build_inventory(build_root: Path) -> set[str]:
 
 def write_sam_manifest(build_root: Path, source_commit: str) -> Path:
     build_root = build_root.absolute()
-    if not build_root.is_dir() or build_root.is_symlink():
+    if not build_root.is_dir() or _is_unsafe_link(build_root):
         raise ArtifactError(f"SAM build directory is missing or unsafe: {build_root}")
     template = build_root / "template.yaml"
-    if not template.is_file() or template.is_symlink():
+    if not template.is_file() or _is_unsafe_link(template):
         raise ArtifactError("SAM build template is missing or unsafe")
     function_root = build_root / "ConfigAuthoringFunction"
     manifest = artifact_manifest(function_root, source_commit)
@@ -168,7 +215,7 @@ def verify_deployed_zip(artifact_root: Path, deployed_zip_path: Path, expected_c
     verify_artifact(artifact_root)
     if (
         not deployed_zip_path.is_file()
-        or deployed_zip_path.is_symlink()
+        or _is_unsafe_link(deployed_zip_path)
         or deployed_zip_path.stat().st_size < 1
         or deployed_zip_path.stat().st_size > MAX_DEPLOYED_ZIP_BYTES
     ):
@@ -269,31 +316,26 @@ def normalize_artifact(artifact_root: Path) -> None:
 
 
 def _assert_safe_build_location() -> None:
-    if BUILD_ROOT.exists() and BUILD_ROOT.is_symlink():
-        raise ArtifactError(f"build root must not be a symlink: {BUILD_ROOT}")
-    if DEFAULT_ARTIFACT.exists():
-        if DEFAULT_ARTIFACT.is_symlink():
-            raise ArtifactError(f"artifact path must not be a symlink: {DEFAULT_ARTIFACT}")
-        for path in DEFAULT_ARTIFACT.rglob("*"):
-            if path.is_symlink():
-                raise ArtifactError(
-                    f"existing artifact contains a symlink: {path.relative_to(DEFAULT_ARTIFACT).as_posix()}"
-                )
+    for path in (BUILD_ROOT, DEFAULT_ARTIFACT):
+        _assert_contained_without_links(path, PROJECT_ROOT, "build path")
+    if BUILD_ROOT.exists():
+        _relative_inventory(BUILD_ROOT)
 
 
 def build_artifact() -> Path:
     _assert_safe_build_location()
+    for relative_path in RUNTIME_FILES:
+        source = PROJECT_ROOT / relative_path
+        if not source.is_file():
+            raise ArtifactError(f"runtime source is missing or unsafe: {relative_path.as_posix()}")
+        _assert_contained_without_links(source, PROJECT_ROOT, "runtime source")
+
     if DEFAULT_ARTIFACT.exists():
         shutil.rmtree(DEFAULT_ARTIFACT)
     DEFAULT_ARTIFACT.mkdir(parents=True)
 
     for relative_path in RUNTIME_FILES:
         source = PROJECT_ROOT / relative_path
-        if not source.is_file() or source.is_symlink():
-            raise ArtifactError(f"runtime source is missing or unsafe: {relative_path.as_posix()}")
-        if not source.resolve().is_relative_to(PROJECT_ROOT.resolve()):
-            raise ArtifactError(f"runtime source escapes project root: {relative_path.as_posix()}")
-
         destination = DEFAULT_ARTIFACT / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, destination)

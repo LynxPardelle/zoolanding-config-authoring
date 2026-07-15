@@ -54,15 +54,18 @@ class RepositoryHygieneTest(unittest.TestCase):
         for workflow_name in ("deploy-test.yml", "deploy-production.yml"):
             workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
             self.assertIn("  validate:\n", workflow)
-            self.assertIn("actions/upload-artifact@v4", workflow)
-            self.assertIn("actions/download-artifact@v4", workflow)
+            self.assertIn("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1", workflow)
+            self.assertIn("actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0", workflow)
             validate_section = workflow[workflow.index("  validate:\n"):workflow.index("  deploy:\n")]
             deploy_section = workflow[workflow.index("  deploy:\n"):]
             self.assertNotIn("id-token: write", validate_section)
             self.assertIn("id-token: write", deploy_section)
             self.assertIn("python -m unittest", validate_section)
             self.assertNotIn("python -m unittest", deploy_section)
-            self.assertIn("--normalize-artifact .aws-sam/build/ConfigAuthoringFunction", deploy_section)
+            self.assertIn("--normalize-artifact .aws-sam/build/ConfigAuthoringFunction", validate_section)
+            self.assertNotIn("tools/", deploy_section)
+            self.assertIn("artifact-ids: ${{ needs.validate.outputs.artifact_id }}", deploy_section)
+            self.assertIn("sha256sum --check --strict", deploy_section)
 
     def test_deploy_workflows_serialize_and_execute_only_reviewed_nonreplacement_change_sets(self):
         reviewer = (ROOT / "tools" / "review_cloudformation_change_set.py").read_text(encoding="utf-8")
@@ -75,7 +78,10 @@ class RepositoryHygieneTest(unittest.TestCase):
             self.assertIn("cloudformation create-change-set", workflow)
             self.assertEqual(workflow.count("--change-set-type UPDATE"), 1)
             self.assertIn("cloudformation describe-change-set", workflow)
-            self.assertIn("tools/review_cloudformation_change_set.py", workflow)
+            deploy_section = workflow[workflow.index("  deploy:\n"):]
+            self.assertIn("# inline-change-set-review:start", deploy_section)
+            self.assertIn('resource.get("Replacement") not in (None, "False")', deploy_section)
+            self.assertNotIn("tools/review_cloudformation_change_set.py", deploy_section)
             self.assertIn('--s3-bucket "$EXPECTED_BUCKET"', workflow)
             self.assertIn(
                 'system/deploy-artifacts/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}',
@@ -106,7 +112,7 @@ class RepositoryHygieneTest(unittest.TestCase):
                 ),
                 1,
             )
-            self.assertEqual(workflow.count(f"DeployAuthzConfigS3Key={v2_key}"), 1)
+            self.assertEqual(workflow.count(f'\\"DeployAuthzConfigS3Key\\":\\"{v2_key}\\"'), 1)
             self.assertNotIn(f"DeployAuthzConfigS3Key={legacy_key}", workflow)
 
     def test_production_guard_requires_successful_test_deployment_run(self):
@@ -122,19 +128,19 @@ class RepositoryHygieneTest(unittest.TestCase):
     def test_production_reuses_exact_test_run_artifact_and_checks_live_test_before_execution(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy-production.yml").read_text(encoding="utf-8")
         self.assertIn("run-id: ${{ needs.guard.outputs.test_run_id }}", workflow)
-        self.assertIn("config-authoring-test-${{ needs.guard.outputs.test_source_sha }}", workflow)
-        self.assertIn("--verify-sam-build .aws-sam/promoted-test", workflow)
-        self.assertIn("--verify-deployed-zip", workflow)
-        self.assertIn("--expected-code-sha256", workflow)
+        self.assertIn("test_artifact_id: ${{ steps.exact_test_artifact.outputs.test_artifact_id }}", workflow)
+        self.assertIn("artifact-ids: ${{ needs.guard.outputs.test_artifact_id }}", workflow)
+        self.assertIn("path: .aws-sam/promoted-test-artifact", workflow)
+        self.assertIn("# inline-lambda-zip-verifier:start", workflow)
+        self.assertIn("# inline-packaged-key-parser:start", workflow)
         self.assertIn("lambda get-function", workflow)
         self.assertIn("lambda get-function-configuration", workflow)
         self.assertIn("unset code_location", workflow)
         self.assertNotIn("live-test-function.json", workflow)
         self.assertIn("--use-json", workflow)
-        self.assertIn("--extract-packaged-code-key", workflow)
         self.assertIn("s3api get-object", workflow)
-        self.assertGreaterEqual(workflow.count("--verify-deployed-zip"), 2)
-        pre_execute = workflow.index("--verify-deployed-zip")
+        self.assertEqual(workflow.count("# inline-lambda-zip-verifier:start"), 2)
+        pre_execute = workflow.index("# inline-lambda-zip-verifier:start")
         execute = workflow.index("cloudformation execute-change-set")
         self.assertLess(pre_execute, execute)
 
