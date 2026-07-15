@@ -422,6 +422,87 @@ class WorkflowIdentityBoundaryTest(unittest.TestCase):
             rejected = run_inline_python(parser, str(template), "other-bucket", prefix)
             self.assertNotEqual(rejected.returncode, 0)
 
+    def test_production_reuses_the_exact_live_test_zip_and_pins_its_s3_version(self):
+        production = workflow("deploy-production.yml")
+        bind_start = production.index(
+            "      - name: Bind current live test Lambda bytes to the exact promoted artifact"
+        )
+        change_start = production.index(
+            "      - name: Create, review, and execute an exact nonreplacement change set"
+        )
+        next_step = production.index(
+            "      - name: Require production Lambda bytes to equal the promoted test Lambda"
+        )
+        bind_step = production[bind_start:change_start]
+        change_step = production[change_start:next_step]
+
+        self.assertNotIn("trap 'rm -f \"$deployed_zip\"' EXIT", bind_step)
+        self.assertIn('live_test_zip="$RUNNER_TEMP/live-test-lambda.zip"', change_step)
+        self.assertIn(
+            "trap 'rm -f \"$live_test_zip\" \"$packaged_zip\"' EXIT",
+            change_step,
+        )
+        self.assertIn('--body "$live_test_zip"', change_step)
+        self.assertIn('--if-match "$sam_package_etag"', change_step)
+        self.assertIn("# inline-packaged-version-binder:start", change_step)
+        self.assertIn('"Version": expected_version_id', change_step)
+        self.assertIn('test "$downloaded_version_id" = "$exact_version_id"', change_step)
+
+        upload = change_step.index("s3api put-object")
+        download = change_step.index("s3api get-object", upload)
+        verify = change_step.index("# inline-lambda-zip-verifier:start", download)
+        change_set = change_step.index("cloudformation create-change-set", verify)
+        self.assertLess(upload, download)
+        self.assertLess(download, verify)
+        self.assertLess(verify, change_set)
+
+        binders = marked_blocks(production, "inline-packaged-version-binder")
+        self.assertEqual(len(binders), 1)
+        binder = binders[0]
+        bucket = "zoolanding-config-payloads"
+        key = f"system/deploy-artifacts/{'a' * 40}/123/1/{'b' * 32}"
+        version_id = "3Lg_example-version+1="
+        with tempfile.TemporaryDirectory() as directory:
+            template = pathlib.Path(directory) / "packaged.json"
+            template.write_text(
+                json.dumps({
+                    "Resources": {
+                        "ConfigAuthoringFunction": {
+                            "Properties": {"CodeUri": f"s3://{bucket}/{key}"},
+                        },
+                    },
+                }),
+                encoding="utf-8",
+            )
+            accepted = run_inline_python(
+                binder,
+                str(template),
+                bucket,
+                key,
+                version_id,
+            )
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            code_uri = json.loads(template.read_text(encoding="utf-8"))["Resources"][
+                "ConfigAuthoringFunction"
+            ]["Properties"]["CodeUri"]
+            self.assertEqual(
+                code_uri,
+                {"Bucket": bucket, "Key": key, "Version": version_id},
+            )
+
+            template.write_text(
+                '{"Resources":{},"Resources":{}}',
+                encoding="utf-8",
+            )
+            duplicate = run_inline_python(
+                binder,
+                str(template),
+                bucket,
+                key,
+                version_id,
+            )
+            self.assertNotEqual(duplicate.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

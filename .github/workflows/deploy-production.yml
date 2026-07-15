@@ -496,7 +496,6 @@ jobs:
           [[ "$test_function_arn" == arn:aws:lambda:*:*:function:zoolanding-config-* ]]
           deployed_zip="$RUNNER_TEMP/live-test-lambda.zip"
           bound_code_sha="$RUNNER_TEMP/live-test-code-sha.txt"
-          trap 'rm -f "$deployed_zip"' EXIT
           test_code_sha="$(aws lambda get-function-configuration \
             --function-name "$test_function_arn" \
             --query 'CodeSha256' \
@@ -627,9 +626,12 @@ jobs:
           set -euo pipefail
           packaged="$RUNNER_TEMP/packaged-template.json"
           packaged_zip="$RUNNER_TEMP/packaged-production-lambda.zip"
+          live_test_zip="$RUNNER_TEMP/live-test-lambda.zip"
           description="$RUNNER_TEMP/reviewed-change-set.json"
           package_prefix="system/deploy-artifacts/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
-          trap 'rm -f "$packaged_zip"' EXIT
+          trap 'rm -f "$live_test_zip" "$packaged_zip"' EXIT
+          test -f "$live_test_zip"
+          bound_test_code_sha="$(cat "$RUNNER_TEMP/live-test-code-sha.txt")"
           sam package \
             --template-file .aws-sam/build/template.yaml \
             --s3-bucket "$EXPECTED_BUCKET" \
@@ -704,12 +706,90 @@ jobs:
           # inline-packaged-key-parser:end
           PY
           )"
-          aws s3api get-object \
+          sam_package_etag="$(aws s3api head-object \
+            --bucket "$EXPECTED_BUCKET" \
+            --key "$packaged_key" \
+            --query 'ETag' \
+            --output text \
+            --no-cli-pager)"
+          test -n "$sam_package_etag"
+          test "$sam_package_etag" != "None"
+          exact_version_id="$(aws s3api put-object \
+            --bucket "$EXPECTED_BUCKET" \
+            --key "$packaged_key" \
+            --body "$live_test_zip" \
+            --if-match "$sam_package_etag" \
+            --query 'VersionId' \
+            --output text \
+            --no-cli-pager)"
+          test -n "$exact_version_id"
+          test "$exact_version_id" != "None"
+          python3 - "$packaged" "$EXPECTED_BUCKET" "$packaged_key" "$exact_version_id" <<'PY'
+          # inline-packaged-version-binder:start
+          import json
+          from pathlib import Path
+          import sys
+
+
+          def fail(code):
+              raise SystemExit(code)
+
+
+          def reject_duplicates(pairs):
+              result = {}
+              for key, value in pairs:
+                  if key in result:
+                      fail("packaged_template_duplicate_key")
+                  result[key] = value
+              return result
+
+
+          if len(sys.argv) != 5:
+              fail("packaged_version_arguments_invalid")
+          template_path = Path(sys.argv[1]).absolute()
+          expected_bucket, expected_key, expected_version_id = sys.argv[2:]
+          version_bytes = expected_version_id.encode("utf-8")
+          if (
+              not expected_version_id
+              or len(version_bytes) > 1024
+              or any(ord(character) < 0x21 or ord(character) == 0x7F for character in expected_version_id)
+          ):
+              fail("packaged_version_invalid")
+          try:
+              template = json.loads(
+                  template_path.read_text(encoding="utf-8"),
+                  object_pairs_hook=reject_duplicates,
+              )
+          except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+              fail("packaged_template_invalid")
+          resources = template.get("Resources") if isinstance(template, dict) else None
+          function = resources.get("ConfigAuthoringFunction") if isinstance(resources, dict) else None
+          properties = function.get("Properties") if isinstance(function, dict) else None
+          code_uri = properties.get("CodeUri") if isinstance(properties, dict) else None
+          if code_uri != f"s3://{expected_bucket}/{expected_key}":
+              fail("packaged_code_uri_changed")
+          properties["CodeUri"] = {
+              "Bucket": expected_bucket,
+              "Key": expected_key,
+              "Version": expected_version_id,
+          }
+          try:
+              template_path.write_text(
+                  json.dumps(template, separators=(",", ":")) + "\n",
+                  encoding="utf-8",
+              )
+          except OSError:
+              fail("packaged_template_write_failed")
+          # inline-packaged-version-binder:end
+          PY
+          downloaded_version_id="$(aws s3api get-object \
             --bucket "$EXPECTED_BUCKET" \
             --key "$packaged_key" \
             "$packaged_zip" \
-            --no-cli-pager > /dev/null
-          bound_test_code_sha="$(cat "$RUNNER_TEMP/live-test-code-sha.txt")"
+            --query 'VersionId' \
+            --output text \
+            --no-cli-pager)"
+          test "$downloaded_version_id" = "$exact_version_id"
           python3 - .aws-sam/build/ConfigAuthoringFunction "$packaged_zip" "$bound_test_code_sha" <<'PY'
           # inline-lambda-zip-verifier:start
           import base64
