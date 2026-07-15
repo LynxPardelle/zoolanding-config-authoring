@@ -61,6 +61,19 @@ class ReviewCloudFormationChangeSetTest(unittest.TestCase):
     def test_accepts_exact_nonreplacement_update(self):
         self.assertEqual(self.review(valid_change_set()), "execute")
 
+    def test_accepts_real_describe_shape_when_change_set_type_is_omitted(self):
+        payload = valid_change_set()
+        payload.pop("ChangeSetType")
+
+        self.assertEqual(self.review(payload), "execute")
+
+    def test_rejects_present_null_change_set_type(self):
+        payload = valid_change_set()
+        payload["ChangeSetType"] = None
+
+        with self.assertRaises(ChangeSetReviewError):
+            self.review(payload)
+
     def test_accepts_only_an_exact_no_change_failure_as_noop(self):
         payload = valid_change_set()
         payload.update({
