@@ -60,5 +60,11 @@ jobs:
           fi
       - name: Set up SAM
         uses: aws-actions/setup-sam@v3
+      - name: Stage allowlisted Lambda artifact
+        run: python tools/build_lambda_artifact.py
       - name: Validate SAM template
         run: sam validate
+      - name: Build and verify SAM artifact
+        run: |
+          sam build --no-cached
+          python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigAuthoringFunction
