@@ -319,27 +319,21 @@ def _exact_parameter_map(stack: dict[str, Any]) -> dict[str, str]:
     return result
 
 
-def _stack_api_url(stack: dict[str, Any]) -> str:
+def _stack_authoring_endpoint(stack: dict[str, Any]) -> str:
     outputs = stack.get("Outputs")
     if not isinstance(outputs, list):
-        raise BootstrapError("test stack API output is unavailable")
+        raise BootstrapError("test stack authoring endpoint output is unavailable")
     urls = [
         output.get("OutputValue")
         for output in outputs
-        if isinstance(output, dict) and output.get("OutputKey") == "ApiUrl"
+        if isinstance(output, dict) and output.get("OutputKey") == "FunctionUrl"
     ]
     if (
         len(urls) != 1
         or not isinstance(urls[0], str)
-        or not re.fullmatch(
-            r"https://[a-z0-9-]+\.execute-api\.us-east-1\.amazonaws\.com/"
-            r"[A-Za-z0-9._~!$&'()*+,;=:@%/-]+",
-            urls[0],
-        )
-        or "@" in urls[0].split("/", 3)[2]
-        or "\\" in urls[0]
+        or not re.fullmatch(r"https://[a-z0-9]+\.lambda-url\.us-east-1\.on\.aws/", urls[0])
     ):
-        raise BootstrapError("test stack API output is invalid")
+        raise BootstrapError("test stack authoring endpoint output is invalid")
     return urls[0]
 
 
@@ -350,12 +344,9 @@ def _normalize_authoring_endpoint(value: Any) -> str:
     if (
         not normalized
         or not re.fullmatch(
-            r"https://[a-z0-9-]+\.execute-api\.us-east-1\.amazonaws\.com/"
-            r"[A-Za-z0-9._~!$&'()*+,;=:@%/-]+",
+            r"https://[a-z0-9]+\.lambda-url\.us-east-1\.on\.aws",
             normalized,
         )
-        or "@" in normalized.split("/", 3)[2]
-        or "\\" in normalized
     ):
         raise BootstrapError("test authoring endpoint is invalid")
     return normalized
@@ -391,9 +382,95 @@ def _aware_timestamp(value: Any, label: str) -> datetime:
     return parsed
 
 
+def _git_sha(value: Any) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[a-f0-9]{40}", value) is not None
+
+
+def _commit_tree(value: Any, expected_sha: str, label: str) -> str:
+    tree = value.get("tree") if isinstance(value, dict) else None
+    if (
+        not isinstance(value, dict)
+        or value.get("sha") != expected_sha
+        or not isinstance(tree, dict)
+        or not _git_sha(tree.get("sha"))
+    ):
+        raise BootstrapError(f"{label} is invalid")
+    return tree["sha"]
+
+
+def _validate_canary_dispatch_provenance(
+    snapshot: dict[str, Any],
+    *,
+    owner: str,
+    canary_repo: str,
+    canary_commit_sha: str,
+    canary_started: datetime,
+) -> dict[str, Any]:
+    expected_repo = f"{_strict_owner(owner)}/{_strict_repo(canary_repo)}"
+    canary_commit = snapshot.get("canaryCommit")
+    canary_tree = _commit_tree(canary_commit, canary_commit_sha, "test canary merge commit")
+    parents = canary_commit.get("parents") if isinstance(canary_commit, dict) else None
+    if (
+        not isinstance(parents, list)
+        or len(parents) != 2
+        or any(not isinstance(parent, dict) or not _git_sha(parent.get("sha")) for parent in parents)
+    ):
+        raise BootstrapError("test canary merge commit must have exactly two parents")
+    base_sha = parents[0]["sha"]
+    dev_sha = parents[1]["sha"]
+
+    dev_ref = snapshot.get("canaryDevRef")
+    dev_object = dev_ref.get("object") if isinstance(dev_ref, dict) else None
+    if (
+        not isinstance(dev_object, dict)
+        or dev_object.get("type") != "commit"
+        or dev_object.get("sha") != dev_sha
+    ):
+        raise BootstrapError("test canary source is not the current dev tip")
+    dev_tree = _commit_tree(snapshot.get("canaryDevCommit"), dev_sha, "test canary dev commit")
+    if canary_tree != dev_tree:
+        raise BootstrapError("test canary merge tree differs from its dev source tree")
+
+    pulls = snapshot.get("canaryPulls")
+    if not isinstance(pulls, list) or len(pulls) != 1 or not isinstance(pulls[0], dict):
+        raise BootstrapError("test canary merge must have exactly one associated pull request")
+    pull = pulls[0]
+    base = pull.get("base")
+    head = pull.get("head")
+    base_repo = base.get("repo") if isinstance(base, dict) else None
+    head_repo = head.get("repo") if isinstance(head, dict) else None
+    merged_at = _aware_timestamp(pull.get("merged_at"), "test canary pull request merge time")
+    if (
+        not isinstance(pull.get("number"), int)
+        or pull["number"] < 1
+        or pull.get("state") != "closed"
+        or pull.get("merge_commit_sha") != canary_commit_sha
+        or not isinstance(base, dict)
+        or base.get("ref") != "test"
+        or base.get("sha") != base_sha
+        or not isinstance(base_repo, dict)
+        or base_repo.get("full_name") != expected_repo
+        or not isinstance(head, dict)
+        or head.get("ref") != "dev"
+        or head.get("sha") != dev_sha
+        or not isinstance(head_repo, dict)
+        or head_repo.get("full_name") != expected_repo
+        or merged_at >= canary_started
+    ):
+        raise BootstrapError("test canary pull request provenance is not exact")
+    return {
+        "pullRequest": pull["number"],
+        "mergeCommit": canary_commit_sha,
+        "baseCommit": base_sha,
+        "devCommit": dev_sha,
+        "tree": canary_tree,
+    }
+
+
 def validate_test_green_snapshot(
     snapshot: dict[str, Any],
     *,
+    owner: str,
     test_commit: str,
     test_run_id: int,
     canary_repo: str,
@@ -403,6 +480,7 @@ def validate_test_green_snapshot(
 ) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or not re.fullmatch(r"[a-f0-9]{40}", test_commit):
         raise BootstrapError("test deployment evidence context is invalid")
+    owner = _strict_owner(owner)
     canary_repo = _strict_repo(canary_repo)
     if (
         not isinstance(test_run_id, int)
@@ -439,6 +517,7 @@ def validate_test_green_snapshot(
         or remote_object.get("type") != "commit"
         or not isinstance(run, dict)
         or run.get("databaseId") != test_run_id
+        or run.get("runAttempt") != 1
         or run.get("status") != "completed"
         or run.get("conclusion") != "success"
         or run.get("headSha") != test_commit
@@ -479,6 +558,7 @@ def validate_test_green_snapshot(
         or canary_object.get("type") != "commit"
         or not isinstance(canary_run, dict)
         or canary_run.get("databaseId") != canary_run_id
+        or canary_run.get("runAttempt") != 1
         or canary_run.get("status") != "completed"
         or canary_run.get("conclusion") != "success"
         or canary_run.get("headSha") != canary_object.get("sha")
@@ -487,10 +567,17 @@ def validate_test_green_snapshot(
         or canary_run.get("workflowName") != "Deploy test draft"
         or canary_run.get("workflowId") != canary_workflow_id
         or canary_run.get("path") != ".github/workflows/deploy-test.yml"
-        or canary_started < authoring_finished
+        or authoring_finished >= canary_started
         or endpoint_updated >= canary_started
     ):
         raise BootstrapError("signed canonical draft test canary is not green and ordered")
+    canary_provenance = _validate_canary_dispatch_provenance(
+        snapshot,
+        owner=owner,
+        canary_repo=canary_repo,
+        canary_commit_sha=canary_run["headSha"],
+        canary_started=canary_started,
+    )
 
     stack_result = snapshot.get("stack")
     stacks = stack_result.get("Stacks") if isinstance(stack_result, dict) else None
@@ -509,8 +596,11 @@ def validate_test_green_snapshot(
     }
     if _exact_parameter_map(stack) != expected_parameters:
         raise BootstrapError("test stack parameters do not match the reviewed environment")
-    api_url = _stack_api_url(stack)
-    if _normalize_authoring_endpoint(endpoint_evidence.get("value")) != _normalize_authoring_endpoint(api_url):
+    authoring_endpoint = _stack_authoring_endpoint(stack)
+    if (
+        _normalize_authoring_endpoint(endpoint_evidence.get("value"))
+        != _normalize_authoring_endpoint(authoring_endpoint)
+    ):
         raise BootstrapError("test canary authoring endpoint does not match the reviewed stack")
 
     resource_result = snapshot.get("stackResource")
@@ -522,6 +612,8 @@ def validate_test_green_snapshot(
         or not isinstance(resource.get("PhysicalResourceId"), str)
         or not isinstance(function, dict)
         or function.get("FunctionName") != resource.get("PhysicalResourceId")
+        or not isinstance(function.get("FunctionArn"), str)
+        or not function.get("FunctionArn")
         or function.get("Runtime") != "python3.13"
         or function.get("State") != "Active"
         or function.get("LastUpdateStatus") != "Successful"
@@ -531,6 +623,15 @@ def validate_test_green_snapshot(
         or not function.get("RevisionId")
     ):
         raise BootstrapError("test Lambda deployment is not active and exact")
+    function_url_config = snapshot.get("functionUrlConfig")
+    if (
+        not isinstance(function_url_config, dict)
+        or function_url_config.get("FunctionArn") != function.get("FunctionArn")
+        or function_url_config.get("FunctionUrl") != authoring_endpoint
+        or function_url_config.get("AuthType") != "AWS_IAM"
+        or function_url_config.get("InvokeMode") != "BUFFERED"
+    ):
+        raise BootstrapError("test Lambda Function URL is not exact and IAM-protected")
     expected_variables = {
         "CONFIG_TABLE_NAME": "zoolanding-config-registry-test",
         "CONFIG_PAYLOADS_BUCKET_NAME": ENVIRONMENT_BUCKETS["test"],
@@ -579,8 +680,8 @@ def validate_test_green_snapshot(
     if snapshot.get("canaryBinding") != expected_canary_binding:
         raise BootstrapError("test canary is not bound to the current private bundle")
     if (
-        _aware_timestamp(scope_head.get("lastModified"), "test scope last-modified time") > canary_started
-        or _aware_timestamp(authz_head.get("lastModified"), "test authorization last-modified time") > canary_started
+        _aware_timestamp(scope_head.get("lastModified"), "test scope last-modified time") >= canary_started
+        or _aware_timestamp(authz_head.get("lastModified"), "test authorization last-modified time") >= canary_started
     ):
         raise BootstrapError("test canary predates the current private bundle")
     if (
@@ -591,6 +692,35 @@ def validate_test_green_snapshot(
         or snapshot.get("unsignedApiStatus") != 403
     ):
         raise BootstrapError("test private readback or unsigned API probe is not exact")
+
+    final_state = snapshot.get("finalState")
+    stable_keys = {
+        "remoteRef",
+        "authoringWorkflow",
+        "run",
+        "canaryRef",
+        "canaryWorkflow",
+        "canaryRun",
+        "canaryCommit",
+        "canaryDevRef",
+        "canaryDevCommit",
+        "canaryPulls",
+        "canaryAuthoringEndpoint",
+        "stack",
+        "stackResource",
+        "function",
+        "functionUrlConfig",
+        "bucketState",
+        "scopeHead",
+        "authzHead",
+        "scopeCurrent",
+        "authzCurrent",
+        "unsignedApiStatus",
+    }
+    if not isinstance(final_state, dict) or set(final_state) != stable_keys:
+        raise BootstrapError("final test evidence revalidation is unavailable")
+    if any(final_state.get(key) != snapshot.get(key) for key in stable_keys):
+        raise BootstrapError("test evidence changed during final revalidation")
 
     return {
         "version": 1,
@@ -604,9 +734,10 @@ def validate_test_green_snapshot(
             "status": "completed",
             "conclusion": "success",
             "authoringEndpointSha256": sha256_hex(
-                _normalize_authoring_endpoint(api_url).encode("utf-8")
+                _normalize_authoring_endpoint(authoring_endpoint).encode("utf-8")
             ),
             "authoringEndpointVariableUpdatedAt": endpoint_evidence["updatedAt"],
+            "provenance": canary_provenance,
             "testBundle": expected_canary_binding,
         },
         "stack": {"name": TEST_STACK_NAME, "status": stack["StackStatus"]},
@@ -626,7 +757,7 @@ def validate_test_green_snapshot(
             "versionId": authz_head.get("versionId"),
             "sha256": sha256_hex(expected_authz_bytes),
         },
-        "apiUrlSha256": sha256_hex(api_url.encode("utf-8")),
+        "authoringEndpointSha256": sha256_hex(authoring_endpoint.encode("utf-8")),
         "unsignedApiStatus": 403,
     }
 
@@ -660,6 +791,7 @@ def _rest_run_evidence(value: Any) -> dict[str, Any]:
         raise BootstrapError("GitHub workflow run evidence is unavailable")
     return {
         "databaseId": value.get("id"),
+        "runAttempt": value.get("run_attempt"),
         "status": value.get("status"),
         "conclusion": value.get("conclusion"),
         "headSha": value.get("head_sha"),
@@ -789,6 +921,29 @@ def collect_test_green_evidence(
     canary_run = _rest_run_evidence(runner.run_json([
         "gh", "api", f"repos/{owner}/{canary_repo}/actions/runs/{canary_run_id}",
     ]))
+    canary_commit_sha = canary_run.get("headSha") if isinstance(canary_run, dict) else None
+    if not _git_sha(canary_commit_sha):
+        raise BootstrapError("test canary run commit is invalid")
+    canary_commit = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{canary_commit_sha}",
+    ])
+    canary_dev_ref = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/git/ref/heads/dev",
+    ])
+    canary_dev_object = (
+        canary_dev_ref.get("object") if isinstance(canary_dev_ref, dict) else None
+    )
+    canary_dev_sha = (
+        canary_dev_object.get("sha") if isinstance(canary_dev_object, dict) else None
+    )
+    if not _git_sha(canary_dev_sha):
+        raise BootstrapError("test canary dev ref is invalid")
+    canary_dev_commit = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{canary_dev_sha}",
+    ])
+    canary_pulls = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/commits/{canary_commit_sha}/pulls",
+    ])
     canary_authoring_endpoint = _github_environment_variable_evidence(
         runner,
         owner,
@@ -804,7 +959,7 @@ def collect_test_green_evidence(
     stacks = stack.get("Stacks") if isinstance(stack, dict) else None
     if not isinstance(stacks, list) or len(stacks) != 1 or not isinstance(stacks[0], dict):
         raise BootstrapError("test stack evidence is unavailable")
-    api_url = _stack_api_url(stacks[0])
+    authoring_endpoint = _stack_authoring_endpoint(stacks[0])
     stack_resource = runner.run_json([
         "aws", "cloudformation", "describe-stack-resource", "--profile", profile,
         "--region", region, "--stack-name", TEST_STACK_NAME,
@@ -819,6 +974,11 @@ def collect_test_green_evidence(
     function_name = resource.get("PhysicalResourceId") if isinstance(resource, dict) else None
     if not isinstance(function_name, str) or not function_name:
         raise BootstrapError("test Lambda resource evidence is unavailable")
+    function_url_config = runner.run_json([
+        "aws", "lambda", "get-function-url-config", "--profile", profile,
+        "--region", region, "--function-name", function_name,
+        "--output", "json", "--no-cli-pager",
+    ])
     function, artifact_evidence = collect_artifact_evidence(
         runner=runner,
         owner=owner,
@@ -841,10 +1001,15 @@ def collect_test_green_evidence(
         "canaryRef": canary_ref,
         "canaryWorkflow": canary_workflow,
         "canaryRun": canary_run,
+        "canaryCommit": canary_commit,
+        "canaryDevRef": canary_dev_ref,
+        "canaryDevCommit": canary_dev_commit,
+        "canaryPulls": canary_pulls,
         "canaryAuthoringEndpoint": canary_authoring_endpoint,
         "stack": stack,
         "stackResource": stack_resource,
         "function": function,
+        "functionUrlConfig": function_url_config,
         "artifactEvidence": artifact_evidence,
         "bucketState": s3.bucket_state(bucket, account_id),
         "scopeHead": scope_head,
@@ -859,10 +1024,143 @@ def collect_test_green_evidence(
         "scopeVersioned": s3.get_object(bucket, SCOPE_KEY, account_id, scope_head["versionId"]),
         "authzCurrent": s3.get_object(bucket, AUTHZ_KEY, account_id),
         "authzVersioned": s3.get_object(bucket, AUTHZ_KEY, account_id, authz_head["versionId"]),
-        "unsignedApiStatus": _unsigned_api_status(api_url),
+        "unsignedApiStatus": _unsigned_api_status(authoring_endpoint),
+    }
+
+    final_remote_ref = runner.run_json([
+        "gh", "api", f"repos/{owner}/{AUTHORING_REPOSITORY}/git/ref/heads/test",
+    ])
+    final_authoring_workflow = runner.run_json([
+        "gh", "api",
+        f"repos/{owner}/{AUTHORING_REPOSITORY}/actions/workflows/deploy-test.yml",
+    ])
+    final_run = _rest_run_evidence(runner.run_json([
+        "gh", "api", f"repos/{owner}/{AUTHORING_REPOSITORY}/actions/runs/{test_run_id}",
+    ]))
+    final_canary_ref = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/git/ref/heads/test",
+    ])
+    final_canary_workflow = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/actions/workflows/deploy-test.yml",
+    ])
+    final_canary_run = _rest_run_evidence(runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/actions/runs/{canary_run_id}",
+    ]))
+    final_canary_object = (
+        final_canary_ref.get("object") if isinstance(final_canary_ref, dict) else None
+    )
+    final_canary_sha = (
+        final_canary_object.get("sha") if isinstance(final_canary_object, dict) else None
+    )
+    if not _git_sha(final_canary_sha):
+        raise BootstrapError("final test canary ref is invalid")
+    final_canary_commit = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{final_canary_sha}",
+    ])
+    final_canary_dev_ref = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/git/ref/heads/dev",
+    ])
+    final_canary_dev_object = (
+        final_canary_dev_ref.get("object")
+        if isinstance(final_canary_dev_ref, dict)
+        else None
+    )
+    final_canary_dev_sha = (
+        final_canary_dev_object.get("sha")
+        if isinstance(final_canary_dev_object, dict)
+        else None
+    )
+    if not _git_sha(final_canary_dev_sha):
+        raise BootstrapError("final test canary dev ref is invalid")
+    final_canary_dev_commit = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{final_canary_dev_sha}",
+    ])
+    final_canary_pulls = runner.run_json([
+        "gh", "api", f"repos/{owner}/{canary_repo}/commits/{final_canary_sha}/pulls",
+    ])
+    final_canary_authoring_endpoint = _github_environment_variable_evidence(
+        runner,
+        owner,
+        canary_repo,
+        "test",
+        "AUTHORING_ENDPOINT",
+    )
+    final_stack = runner.run_json([
+        "aws", "cloudformation", "describe-stacks", "--profile", profile,
+        "--region", region, "--stack-name", TEST_STACK_NAME,
+        "--output", "json", "--no-cli-pager",
+    ])
+    final_stacks = final_stack.get("Stacks") if isinstance(final_stack, dict) else None
+    if (
+        not isinstance(final_stacks, list)
+        or len(final_stacks) != 1
+        or not isinstance(final_stacks[0], dict)
+    ):
+        raise BootstrapError("final test stack evidence is unavailable")
+    final_authoring_endpoint = _stack_authoring_endpoint(final_stacks[0])
+    final_stack_resource = runner.run_json([
+        "aws", "cloudformation", "describe-stack-resource", "--profile", profile,
+        "--region", region, "--stack-name", TEST_STACK_NAME,
+        "--logical-resource-id", TEST_FUNCTION_LOGICAL_ID,
+        "--output", "json", "--no-cli-pager",
+    ])
+    final_resource = (
+        final_stack_resource.get("StackResourceDetail")
+        if isinstance(final_stack_resource, dict)
+        else None
+    )
+    final_function_name = (
+        final_resource.get("PhysicalResourceId") if isinstance(final_resource, dict) else None
+    )
+    if not isinstance(final_function_name, str) or not final_function_name:
+        raise BootstrapError("final test Lambda resource evidence is unavailable")
+    final_function_result = runner.run_json([
+        "aws", "lambda", "get-function", "--profile", profile,
+        "--region", region, "--function-name", final_function_name,
+        "--output", "json", "--no-cli-pager",
+    ])
+    final_function = (
+        final_function_result.get("Configuration")
+        if isinstance(final_function_result, dict)
+        else None
+    )
+    if not isinstance(final_function, dict):
+        raise BootstrapError("final test Lambda configuration is unavailable")
+    final_function_url_config = runner.run_json([
+        "aws", "lambda", "get-function-url-config", "--profile", profile,
+        "--region", region, "--function-name", final_function_name,
+        "--output", "json", "--no-cli-pager",
+    ])
+    final_scope_head = s3.head_object(bucket, SCOPE_KEY, account_id)
+    final_authz_head = s3.head_object(bucket, AUTHZ_KEY, account_id)
+    if final_scope_head is None or final_authz_head is None:
+        raise BootstrapError("final test private scope or authorization object is missing")
+    snapshot["finalState"] = {
+        "remoteRef": final_remote_ref,
+        "authoringWorkflow": final_authoring_workflow,
+        "run": final_run,
+        "canaryRef": final_canary_ref,
+        "canaryWorkflow": final_canary_workflow,
+        "canaryRun": final_canary_run,
+        "canaryCommit": final_canary_commit,
+        "canaryDevRef": final_canary_dev_ref,
+        "canaryDevCommit": final_canary_dev_commit,
+        "canaryPulls": final_canary_pulls,
+        "canaryAuthoringEndpoint": final_canary_authoring_endpoint,
+        "stack": final_stack,
+        "stackResource": final_stack_resource,
+        "function": final_function,
+        "functionUrlConfig": final_function_url_config,
+        "bucketState": s3.bucket_state(bucket, account_id),
+        "scopeHead": final_scope_head,
+        "authzHead": final_authz_head,
+        "scopeCurrent": s3.get_object(bucket, SCOPE_KEY, account_id),
+        "authzCurrent": s3.get_object(bucket, AUTHZ_KEY, account_id),
+        "unsignedApiStatus": _unsigned_api_status(final_authoring_endpoint),
     }
     return validate_test_green_snapshot(
         snapshot,
+        owner=owner,
         test_commit=test_commit,
         test_run_id=test_run_id,
         canary_repo=canary_repo,
