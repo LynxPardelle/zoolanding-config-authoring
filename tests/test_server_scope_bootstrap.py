@@ -668,6 +668,46 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                     expected_current_scope_sha256="MISSING",
                 )
 
+    def test_v2_bootstrap_creates_parallel_authz_without_touching_legacy_key(self):
+        self.assertEqual(bootstrap.LEGACY_AUTHZ_KEY, "system/deploy-authz.json")
+        self.assertEqual(bootstrap.AUTHZ_KEY, "system/deploy-authz-v2.json")
+        self.assertNotEqual(bootstrap.AUTHZ_KEY, bootstrap.LEGACY_AUTHZ_KEY)
+        scope_bytes = bootstrap.canonical_json_bytes({"version": 1, "scopes": []})
+        authz_bytes = bootstrap.canonical_json_bytes([])
+        legacy_body = bootstrap.canonical_json_bytes([{"roleName": "legacy-test-role"}])
+        s3 = FakeS3()
+        s3.heads[bootstrap.LEGACY_AUTHZ_KEY] = {
+            "etag": '"legacy"',
+            "versionId": "legacy-version",
+        }
+        s3.objects[bootstrap.LEGACY_AUTHZ_KEY] = legacy_body
+        s3.objects[(bootstrap.LEGACY_AUTHZ_KEY, "legacy-version")] = legacy_body
+
+        result = bootstrap.apply_private_bundle(
+            s3,
+            bucket="bucket",
+            expected_owner="123456789012",
+            scope_bytes=scope_bytes,
+            authz_bytes=authz_bytes,
+            approved_scope_sha256=hashlib.sha256(scope_bytes).hexdigest(),
+            approved_authz_sha256=hashlib.sha256(authz_bytes).hexdigest(),
+            expected_current_authz_etag="MISSING",
+            expected_current_authz_version_id="MISSING",
+            expected_current_scope_etag="MISSING",
+            expected_current_scope_version_id="MISSING",
+            expected_current_scope_sha256="MISSING",
+        )
+
+        self.assertEqual(
+            [call["key"] for call in s3.puts],
+            [bootstrap.SCOPE_KEY, bootstrap.AUTHZ_KEY],
+        )
+        self.assertTrue(all(call["ifNoneMatch"] == "*" for call in s3.puts))
+        self.assertTrue(all(call["ifMatch"] is None for call in s3.puts))
+        self.assertEqual(s3.objects[bootstrap.LEGACY_AUTHZ_KEY], legacy_body)
+        self.assertIsNone(result["previousAuthz"])
+        self.assertEqual(result["authz"]["versionId"], "version-2")
+
     def test_private_bundle_is_idempotent_for_identical_scope_and_rejects_scope_drift(self):
         scope_bytes = bootstrap.canonical_json_bytes({"version": 1, "scopes": []})
         authz_bytes = bootstrap.canonical_json_bytes([])

@@ -27,7 +27,7 @@ Parameters:
     Description: Log level for the Lambda.
   DeployAuthzConfigS3Key:
     Type: String
-    Default: system/deploy-authz.json
+    Default: system/deploy-authz-v2.json
     Description: Required private S3 key in ConfigPayloadsBucketName containing exact IAM role ARN authorization rules.
 
 Conditions:
