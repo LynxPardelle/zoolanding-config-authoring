@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "authProfileId": "staff",
+      "tenantId": "tenant-example",
+      "status": "active",
+      "provider": "cognito",
+      "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLE",
+      "hostedUiDomain": "https://auth.example.com",
+      "clientId": "public-client-id",
+      "audiences": ["public-client-id"],
+      "callbackUrls": ["https://example.com/auth/callback"],
+      "logoutUrls": ["https://example.com/auth/logout"],
+      "loginPath": "/login",
+      "logoutPath": "/auth/logout",
+      "socialIdpSecretRefs": {
+        "google": {
+          "clientSecret": "/zoolanding/auth/example/google"
+        }
+      }
+    }
+  ]
+}

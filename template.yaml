@@ -5,8 +5,7 @@ Description: Zoolanding Config Authoring Lambda - SAM Template
 Parameters:
   EnvironmentName:
     Type: String
-    Default: prod
-    AllowedValues: [test, prod, production]
+    AllowedValues: [test, production]
     Description: Deployment environment name used for tags and environment-specific stack configuration.
   ManageStorageResources:
     Type: String
@@ -188,6 +187,17 @@ Resources:
                 StringLike:
                   s3:prefix:
                     - sites/*
+            - Effect: Allow
+              Action:
+                - secretsmanager:DescribeSecret
+              Resource:
+                - Fn::Sub: arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/zoolanding/${EnvironmentName}/*/*/notifications/smtp/*-??????
+                - Fn::Sub: arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/zoolanding/${EnvironmentName}/*/*/notifications/recipients/*/*/*-??????
+              Condition:
+                StringEquals:
+                  aws:ResourceTag/zoolanding:environment:
+                    Ref: EnvironmentName
+                  aws:ResourceTag/zoolanding:enabled: 'true'
       Events:
         ConfigAuthoringPost:
           Type: Api
@@ -208,6 +218,10 @@ Outputs:
     Description: Deployed Lambda function name.
     Value:
       Ref: ConfigAuthoringFunction
+  FunctionArn:
+    Description: Deployed Lambda function ARN used for exact test-to-production artifact verification.
+    Value:
+      Fn::GetAtt: ConfigAuthoringFunction.Arn
   FunctionUrl:
     Description: IAM-protected Lambda Function URL for GitHub Actions deploys.
     Value:

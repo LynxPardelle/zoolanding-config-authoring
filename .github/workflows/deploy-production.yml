@@ -5,31 +5,116 @@ on:
     branches: [main]
 
 permissions:
-  id-token: write
   contents: read
+
+concurrency:
+  group: zoolanding-config-authoring-production
+  cancel-in-progress: false
 
 jobs:
   guard:
     runs-on: ubuntu-latest
+    outputs:
+      test_run_id: ${{ steps.exact_test_run.outputs.test_run_id }}
+      test_source_sha: ${{ steps.exact_test_run.outputs.test_source_sha }}
+    permissions:
+      contents: read
+      actions: read
+    env:
+      BEFORE_SHA: ${{ github.event.before }}
+      SOURCE_BRANCH: "test"
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Require test merge
+        id: exact_test_run
         run: |
           set -euo pipefail
-          git fetch origin test main
-          parent_count="$(git rev-list --parents -n 1 HEAD | awk '{print NF-1}')"
-          test "$parent_count" -ge 2
-          second_parent="$(git rev-list --parents -n 1 HEAD | awk '{print $3}')"
-          git merge-base --is-ancestor "$second_parent" origin/test
-  deploy:
+          git fetch --no-tags origin "refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          commit="$(git rev-parse HEAD)"
+          second_parent="$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")"
+          commit_tree="$(git rev-parse "${commit}^{tree}")"
+          source_tree="$(git rev-parse "${second_parent}^{tree}")"
+          parents_line="$(git rev-list --parents -n 1 HEAD)"
+          python tools/verify_promotion_provenance.py \
+            --commit "$commit" \
+            --before-sha "$BEFORE_SHA" \
+            --source-tip "$second_parent" \
+            --commit-tree "$commit_tree" \
+            --source-tree "$source_tree" \
+            --parents-line "$parents_line"
+          runs="$RUNNER_TEMP/exact-test-deploy-runs.json"
+          workflow="$RUNNER_TEMP/exact-test-workflow.json"
+          gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-test.yml" > "$workflow"
+          gh api \
+            --method GET \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/deploy-test.yml/runs" \
+            -f branch=test \
+            -f head_sha="$second_parent" \
+            -f status=success \
+            -f per_page=100 > "$runs"
+          python - "$runs" "$workflow" "$second_parent" "$GITHUB_REPOSITORY" "$GITHUB_OUTPUT" <<'PY'
+          import json
+          from pathlib import Path
+          import re
+          import sys
+
+          payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+          workflow = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+          expected_sha = sys.argv[3]
+          expected_repository = sys.argv[4]
+          output_path = Path(sys.argv[5])
+          workflow_id = workflow.get("id") if isinstance(workflow, dict) else None
+          if (
+              not isinstance(workflow_id, int)
+              or workflow_id < 1
+              or workflow.get("name") != "Deploy Test"
+              or workflow.get("path") != ".github/workflows/deploy-test.yml"
+              or workflow.get("state") != "active"
+          ):
+              raise SystemExit("exact Deploy Test workflow metadata is unavailable")
+          workflow_runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
+          if not isinstance(workflow_runs, list):
+              raise SystemExit("test workflow run evidence is unavailable")
+          matches = [
+              run for run in workflow_runs
+              if isinstance(run, dict)
+              and run.get("head_sha") == expected_sha
+              and run.get("head_branch") == "test"
+              and run.get("event") == "push"
+              and run.get("status") == "completed"
+              and run.get("conclusion") == "success"
+              and run.get("name") == "Deploy Test"
+              and run.get("path") == ".github/workflows/deploy-test.yml"
+              and run.get("workflow_id") == workflow_id
+              and isinstance(run.get("run_attempt"), int)
+              and run.get("run_attempt") >= 1
+              and isinstance(run.get("repository"), dict)
+              and run["repository"].get("full_name") == expected_repository
+              and isinstance(run.get("id"), int)
+              and run.get("id") >= 1
+          ]
+          if len(matches) != 1 or not re.fullmatch(r"[a-f0-9]{40}", expected_sha):
+              raise SystemExit("exact promoted test commit has no unique successful Deploy Test run")
+          output_path.write_text(
+              f"test_run_id={matches[0]['id']}\ntest_source_sha={expected_sha}\n",
+              encoding="utf-8",
+          )
+          PY
+
+  validate:
     runs-on: ubuntu-latest
     needs: guard
-    environment: production
+    permissions:
+      contents: read
+      actions: read
     env:
-      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
       SAM_CLI_TELEMETRY: 0
     steps:
       - uses: actions/checkout@v5
@@ -37,20 +122,245 @@ jobs:
         with:
           python-version: '3.13'
       - uses: aws-actions/setup-sam@v3
-      - name: Test and build deploy artifact
+      - name: Download exact successful test-run artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: config-authoring-test-${{ needs.guard.outputs.test_source_sha }}
+          path: .aws-sam/promoted-test
+          github-token: ${{ github.token }}
+          run-id: ${{ needs.guard.outputs.test_run_id }}
+      - name: Test and build exact artifact without AWS credentials
         shell: bash
         run: |
           set -euo pipefail
           python -m unittest discover -s tests -p "test_*.py"
           python tools/build_lambda_artifact.py
-          sam validate
+          sam validate --lint
           sam build --no-cached
           python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigAuthoringFunction
+          python tools/build_lambda_artifact.py \
+            --write-sam-manifest .aws-sam/build \
+            --source-commit "$GITHUB_SHA"
+          python tools/build_lambda_artifact.py \
+            --verify-sam-build .aws-sam/build \
+            --expected-source-commit "$GITHUB_SHA"
+          python tools/build_lambda_artifact.py \
+            --verify-sam-build .aws-sam/promoted-test \
+            --expected-source-commit "${{ needs.guard.outputs.test_source_sha }}"
+          cmp -s .aws-sam/build/template.yaml .aws-sam/promoted-test/template.yaml
+      - name: Upload exact validated artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-authoring-production-${{ github.sha }}
+          path: .aws-sam/promoted-test/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [guard, validate]
+    environment: production
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      SAM_CLI_TELEMETRY: 0
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: aws-actions/setup-sam@v3
+      - name: Download validated artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: config-authoring-production-${{ github.sha }}
+          path: .aws-sam/build
+      - name: Recheck exact validated artifact before credentials
+        run: |
+          set -euo pipefail
+          python tools/build_lambda_artifact.py --normalize-artifact .aws-sam/build/ConfigAuthoringFunction
+          python tools/build_lambda_artifact.py \
+            --verify-sam-build .aws-sam/build \
+            --expected-source-commit "${{ needs.guard.outputs.test_source_sha }}"
+          sam validate --lint --template-file .aws-sam/build/template.yaml
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-      - name: Deploy
+      - name: Bind current live test Lambda bytes to the exact promoted artifact
         run: |
           set -euo pipefail
-          sam deploy --config-env prod --no-confirm-changeset --no-fail-on-empty-changeset
+          test_function_arn="$(aws cloudformation describe-stacks \
+            --stack-name zoolanding-config-authoring-test \
+            --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue | [0]' \
+            --output text \
+            --no-cli-pager)"
+          [[ "$test_function_arn" == arn:aws:lambda:*:*:function:zoolanding-config-* ]]
+          deployed_zip="$RUNNER_TEMP/live-test-lambda.zip"
+          bound_code_sha="$RUNNER_TEMP/live-test-code-sha.txt"
+          trap 'rm -f "$deployed_zip"' EXIT
+          test_code_sha="$(aws lambda get-function-configuration \
+            --function-name "$test_function_arn" \
+            --query 'CodeSha256' \
+            --output text \
+            --no-cli-pager
+          )"
+          test -n "$test_code_sha"
+          test "$test_code_sha" != "None"
+          code_location="$(aws lambda get-function \
+            --function-name "$test_function_arn" \
+            --query 'Code.Location' \
+            --output text \
+            --no-cli-pager
+          )"
+          [[ "$code_location" == https://* ]]
+          curl --fail --silent --show-error --location "$code_location" --output "$deployed_zip"
+          unset code_location
+          python tools/build_lambda_artifact.py \
+            --verify-deployed-zip "$deployed_zip" \
+            --against-artifact .aws-sam/build/ConfigAuthoringFunction \
+            --expected-code-sha256 "$test_code_sha"
+          printf '%s\n' "$test_code_sha" > "$bound_code_sha"
+      - name: Create, review, and execute an exact nonreplacement change set
+        env:
+          STACK_NAME: zoolanding-config-authoring
+          CHANGE_SET_NAME: "zoolanding-${{ github.run_id }}-${{ github.run_attempt }}"
+          EXPECTED_ENVIRONMENT: production
+          EXPECTED_MANAGE_STORAGE: "false"
+          EXPECTED_TABLE: zoolanding-config-registry
+          EXPECTED_BUCKET: zoolanding-config-payloads
+        run: |
+          set -euo pipefail
+          packaged="$RUNNER_TEMP/packaged-template.json"
+          packaged_zip="$RUNNER_TEMP/packaged-production-lambda.zip"
+          description="$RUNNER_TEMP/reviewed-change-set.json"
+          package_prefix="system/deploy-artifacts/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}"
+          trap 'rm -f "$packaged_zip"' EXIT
+          sam package \
+            --template-file .aws-sam/build/template.yaml \
+            --s3-bucket "$EXPECTED_BUCKET" \
+            --s3-prefix "$package_prefix" \
+            --output-template-file "$packaged" \
+            --use-json \
+            --region "$AWS_REGION"
+          packaged_key="$(python tools/build_lambda_artifact.py \
+            --extract-packaged-code-key "$packaged" \
+            --expected-bucket "$EXPECTED_BUCKET" \
+            --expected-prefix "$package_prefix")"
+          aws s3api get-object \
+            --bucket "$EXPECTED_BUCKET" \
+            --key "$packaged_key" \
+            "$packaged_zip" \
+            --no-cli-pager > /dev/null
+          bound_test_code_sha="$(cat "$RUNNER_TEMP/live-test-code-sha.txt")"
+          python tools/build_lambda_artifact.py \
+            --verify-deployed-zip "$packaged_zip" \
+            --against-artifact .aws-sam/build/ConfigAuthoringFunction \
+            --expected-code-sha256 "$bound_test_code_sha"
+          change_set_arn="$(aws cloudformation create-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type UPDATE \
+            --client-token "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}" \
+            --description "GitHub ${GITHUB_REPOSITORY}@${GITHUB_SHA}" \
+            --template-body "file://$packaged" \
+            --capabilities CAPABILITY_IAM \
+            --parameters \
+              "ParameterKey=EnvironmentName,ParameterValue=$EXPECTED_ENVIRONMENT" \
+              "ParameterKey=ManageStorageResources,ParameterValue=$EXPECTED_MANAGE_STORAGE" \
+              "ParameterKey=ConfigTableName,ParameterValue=$EXPECTED_TABLE" \
+              "ParameterKey=ConfigPayloadsBucketName,ParameterValue=$EXPECTED_BUCKET" \
+              "ParameterKey=LogLevel,ParameterValue=INFO" \
+              "ParameterKey=DeployAuthzConfigS3Key,ParameterValue=system/deploy-authz.json" \
+            --query 'Id' \
+            --output text \
+            --no-cli-pager)"
+          set +e
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$change_set_arn"
+          wait_status=$?
+          set -e
+          aws cloudformation describe-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$change_set_arn" \
+            --include-property-values \
+            --output json \
+            --no-cli-pager > "$description"
+          decision="$(python tools/review_cloudformation_change_set.py "$description" \
+            --expected-stack-name "$STACK_NAME" \
+            --expected-change-set-name "$CHANGE_SET_NAME" \
+            --expected-change-set-arn "$change_set_arn" \
+            --expected-parameter "EnvironmentName=$EXPECTED_ENVIRONMENT" \
+            --expected-parameter "ManageStorageResources=$EXPECTED_MANAGE_STORAGE" \
+            --expected-parameter "ConfigTableName=$EXPECTED_TABLE" \
+            --expected-parameter "ConfigPayloadsBucketName=$EXPECTED_BUCKET" \
+            --expected-parameter "LogLevel=INFO" \
+            --expected-parameter "DeployAuthzConfigS3Key=system/deploy-authz.json")"
+          if [[ "$decision" == "noop" ]]; then
+            aws cloudformation delete-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$change_set_arn" \
+              --no-cli-pager
+            echo "No CloudFormation changes to execute."
+            exit 0
+          fi
+          test "$decision" = "execute"
+          test "$wait_status" -eq 0
+          current_test_code_sha="$(aws lambda get-function-configuration \
+            --function-name "$(aws cloudformation describe-stacks \
+              --stack-name zoolanding-config-authoring-test \
+              --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue | [0]' \
+              --output text \
+              --no-cli-pager)" \
+            --query 'CodeSha256' \
+            --output text \
+            --no-cli-pager)"
+          test "$current_test_code_sha" = "$bound_test_code_sha"
+          aws cloudformation execute-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$change_set_arn" \
+            --client-request-token "execute-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}" \
+            --no-cli-pager
+          aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
+          final_status="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].StackStatus' \
+            --output text \
+            --no-cli-pager)"
+          test "$final_status" = "UPDATE_COMPLETE"
+      - name: Require production Lambda bytes to equal the promoted test Lambda
+        run: |
+          set -euo pipefail
+          test_function_arn="$(aws cloudformation describe-stacks \
+            --stack-name zoolanding-config-authoring-test \
+            --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue | [0]' \
+            --output text \
+            --no-cli-pager)"
+          production_function_arn="$(aws cloudformation describe-stacks \
+            --stack-name zoolanding-config-authoring \
+            --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue | [0]' \
+            --output text \
+            --no-cli-pager)"
+          [[ "$test_function_arn" == arn:aws:lambda:*:*:function:zoolanding-config-* ]]
+          [[ "$production_function_arn" == arn:aws:lambda:*:*:function:zoolanding-config-* ]]
+          test "$production_function_arn" != "$test_function_arn"
+          test_code_sha="$(aws lambda get-function-configuration \
+            --function-name "$test_function_arn" \
+            --query 'CodeSha256' \
+            --output text \
+            --no-cli-pager)"
+          production_code_sha="$(aws lambda get-function-configuration \
+            --function-name "$production_function_arn" \
+            --query 'CodeSha256' \
+            --output text \
+            --no-cli-pager)"
+          test -n "$test_code_sha"
+          test "$test_code_sha" != "None"
+          test "$production_code_sha" = "$test_code_sha"

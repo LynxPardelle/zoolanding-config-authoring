@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "scope": {
+    "environment": "test",
+    "tenantId": "tenant-example",
+    "draftId": "draft-example",
+    "domain": "example.com"
+  },
+  "policies": [
+    {
+      "id": "billing-ops",
+      "status": "disabled",
+      "provider": "email.smtp",
+      "connectionId": "billing-mailbox",
+      "notificationTypes": ["payment-succeeded", "payment-failed"],
+      "templateIds": ["payment-succeeded-v1", "payment-failed-v1"],
+      "recipientSets": [
+        {
+          "id": "billing-operators",
+          "version": 1,
+          "members": [{ "id": "primary" }]
+        }
+      ],
+      "retryPolicy": {
+        "maxAttempts": 5
+      },
+      "acceptanceStatus": "accepted_by_smtp"
+    }
+  ]
+}

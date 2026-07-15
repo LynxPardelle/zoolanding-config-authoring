@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "scope": {
+    "environment": "test",
+    "tenantId": "tenant-example",
+    "draftId": "draft-example",
+    "domain": "example.com"
+  },
+  "bindings": [
+    {
+      "id": "stripe-primary",
+      "provider": "stripe",
+      "adapterVersion": "v1",
+      "connectionId": "stripe-primary",
+      "status": "active",
+      "mode": "test",
+      "capabilities": [
+        "connect-onboarding",
+        "checkout",
+        "one-time-payments",
+        "subscriptions",
+        "prices",
+        "coupons",
+        "customer-portal"
+      ],
+      "stripe": {
+        "accountModel": "merchant",
+        "chargeType": "direct",
+        "feePayer": "connected-account",
+        "taxMode": "unconfigured",
+        "platformFeeMode": "disabled",
+        "webhookIngress": "direct-integrations-api"
+      }
+    }
+  ]
+}
