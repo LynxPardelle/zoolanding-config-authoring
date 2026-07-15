@@ -27,21 +27,30 @@ jobs:
     runs-on: ubuntu-latest
     needs: guard
     environment: test
+    env:
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      SAM_CLI_TELEMETRY: 0
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: '3.13'
       - uses: aws-actions/setup-sam@v3
-      - uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-      - name: Test and deploy
+      - name: Test and build deploy artifact
         shell: bash
         run: |
           set -euo pipefail
           python -m unittest discover -s tests -p "test_*.py"
+          python tools/build_lambda_artifact.py
           sam validate
           sam build --no-cached
+          python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigAuthoringFunction
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Deploy
+        run: |
+          set -euo pipefail
           sam deploy --config-env test --no-confirm-changeset --no-fail-on-empty-changeset
