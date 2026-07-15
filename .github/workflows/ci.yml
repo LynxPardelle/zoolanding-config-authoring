@@ -10,7 +10,7 @@ jobs:
   guard:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
       - name: Enforce promotion graph
@@ -40,9 +40,9 @@ jobs:
       AWS_REGION: us-east-1
       SAM_CLI_TELEMETRY: 0
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: '3.13'
       - name: Run unit tests
@@ -59,11 +59,15 @@ jobs:
             echo "No requirements.txt found; skipping dependency audit."
           fi
       - name: Set up SAM
-        uses: aws-actions/setup-sam@v3
+        uses: aws-actions/setup-sam@89ddb14d60e682855e3fea4be85b3c56485de310 # v3
+        with:
+          version: 1.163.0
+          use-installer: true
+          token: ${{ github.token }}
       - name: Stage allowlisted Lambda artifact
         run: python tools/build_lambda_artifact.py
       - name: Validate SAM template
-        run: sam validate
+        run: sam validate --lint
       - name: Build and verify SAM artifact
         run: |
           sam build --no-cached
