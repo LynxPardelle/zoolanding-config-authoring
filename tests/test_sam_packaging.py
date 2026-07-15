@@ -1,9 +1,13 @@
 import ast
+import base64
 import hashlib
+import json
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import unittest
+import zipfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -11,8 +15,16 @@ BUILDER = ROOT / "tools" / "build_lambda_artifact.py"
 STAGED_ARTIFACT = ROOT / ".build" / "config-authoring"
 EXPECTED_RUNTIME_FILES = {
     "lambda_function.py",
+    "server_policy_validation.py",
+    "schemas/server-features/commerce.schema.json",
+    "schemas/server-features/data-spaces.schema.json",
+    "schemas/server-features/integration-bindings.schema.json",
+    "schemas/server-features/notification-policies.schema.json",
     "zoolanding_lambda_common.py",
 }
+sys.path.insert(0, str(ROOT))
+from tools import bootstrap_server_scopes
+from tools import build_lambda_artifact
 
 
 def artifact_inventory(root: Path) -> set[str]:
@@ -76,6 +88,7 @@ class SamPackagingTest(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(EXPECTED_RUNTIME_FILES, artifact_inventory(STAGED_ARTIFACT))
+        self.assertEqual(EXPECTED_RUNTIME_FILES, set(bootstrap_server_scopes.RUNTIME_ARTIFACT_FILES))
         for relative_path in EXPECTED_RUNTIME_FILES:
             self.assertEqual(
                 (ROOT / relative_path).read_bytes(),
@@ -103,6 +116,111 @@ class SamPackagingTest(unittest.TestCase):
 
         self.assertNotEqual(0, result.returncode)
         self.assertIn("unexpected artifact files: README.md", result.stderr)
+
+    def test_normalizer_restores_reproducible_timestamps_after_artifact_transport(self):
+        build = self.run_builder()
+        self.assertEqual(0, build.returncode, build.stderr)
+        transported = STAGED_ARTIFACT / "lambda_function.py"
+        transported.touch()
+        self.assertNotEqual(315532800, int(transported.stat().st_mtime))
+
+        result = self.run_builder("--normalize-artifact", str(STAGED_ARTIFACT))
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        for path in [STAGED_ARTIFACT, *STAGED_ARTIFACT.rglob("*")]:
+            self.assertEqual(315532800, int(path.stat().st_mtime), path)
+        self.assertEqual(EXPECTED_RUNTIME_FILES, artifact_inventory(STAGED_ARTIFACT))
+
+    def test_sam_manifest_binds_exact_source_commit_and_seven_file_bytes(self):
+        build = self.run_builder()
+        self.assertEqual(0, build.returncode, build.stderr)
+        source_commit = "a" * 40
+        with tempfile.TemporaryDirectory() as directory:
+            sam_root = Path(directory)
+            function_root = sam_root / "ConfigAuthoringFunction"
+            function_root.mkdir()
+            for relative_path in EXPECTED_RUNTIME_FILES:
+                destination = function_root / relative_path
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes((ROOT / relative_path).read_bytes())
+            (sam_root / "template.yaml").write_text("Resources: {}\n", encoding="utf-8")
+
+            build_lambda_artifact.write_sam_manifest(sam_root, source_commit)
+            build_lambda_artifact.verify_sam_build(sam_root, source_commit)
+            manifest = json.loads((sam_root / "config-authoring-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(source_commit, manifest["sourceCommit"])
+            self.assertEqual(EXPECTED_RUNTIME_FILES, {entry["path"] for entry in manifest["files"]})
+
+            (function_root / "lambda_function.py").write_bytes(b"tampered")
+            with self.assertRaises(build_lambda_artifact.ArtifactError):
+                build_lambda_artifact.verify_sam_build(sam_root, source_commit)
+
+    def test_deployed_zip_must_equal_manifest_bound_artifact_and_live_code_hash(self):
+        build = self.run_builder()
+        self.assertEqual(0, build.returncode, build.stderr)
+        with tempfile.TemporaryDirectory() as directory:
+            zip_path = Path(directory) / "deployed.zip"
+            with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for relative_path in sorted(EXPECTED_RUNTIME_FILES):
+                    archive.writestr(relative_path, (STAGED_ARTIFACT / relative_path).read_bytes())
+            code_sha = base64.b64encode(hashlib.sha256(zip_path.read_bytes()).digest()).decode("ascii")
+
+            build_lambda_artifact.verify_deployed_zip(STAGED_ARTIFACT, zip_path, code_sha)
+            with self.assertRaises(build_lambda_artifact.ArtifactError):
+                build_lambda_artifact.verify_deployed_zip(STAGED_ARTIFACT, zip_path, "wrong")
+
+            tampered_path = Path(directory) / "tampered.zip"
+            with zipfile.ZipFile(tampered_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+                for relative_path in sorted(EXPECTED_RUNTIME_FILES):
+                    body = (STAGED_ARTIFACT / relative_path).read_bytes()
+                    if relative_path == "lambda_function.py":
+                        body += b"tamper"
+                    archive.writestr(relative_path, body)
+            tampered_sha = base64.b64encode(hashlib.sha256(tampered_path.read_bytes()).digest()).decode("ascii")
+            with self.assertRaises(build_lambda_artifact.ArtifactError):
+                build_lambda_artifact.verify_deployed_zip(STAGED_ARTIFACT, tampered_path, tampered_sha)
+
+    def test_packaged_template_code_uri_is_exactly_scoped_to_the_current_run_prefix(self):
+        sha = "a" * 40
+        bucket = "zoolanding-config-payloads"
+        prefix = f"system/deploy-artifacts/{sha}/123/1"
+        with tempfile.TemporaryDirectory() as directory:
+            template_path = Path(directory) / "packaged-template.json"
+
+            def write(code_uri):
+                template_path.write_text(json.dumps({
+                    "Resources": {
+                        "ConfigAuthoringFunction": {
+                            "Properties": {"CodeUri": code_uri},
+                        },
+                    },
+                }), encoding="utf-8")
+
+            expected_key = f"{prefix}/{'b' * 32}"
+            write(f"s3://{bucket}/{expected_key}")
+            self.assertEqual(
+                expected_key,
+                build_lambda_artifact.packaged_lambda_s3_key(
+                    template_path,
+                    bucket,
+                    prefix,
+                ),
+            )
+
+            for unsafe_uri in (
+                f"s3://other-bucket/{expected_key}",
+                f"s3://{bucket}/system/deploy-artifacts/{sha}/other/1/{'b' * 32}",
+                f"s3://{bucket}/{expected_key}?signed=value",
+                {"Bucket": bucket, "Key": expected_key},
+            ):
+                with self.subTest(unsafe_uri=unsafe_uri):
+                    write(unsafe_uri)
+                    with self.assertRaises(build_lambda_artifact.ArtifactError):
+                        build_lambda_artifact.packaged_lambda_s3_key(
+                            template_path,
+                            bucket,
+                            prefix,
+                        )
 
 
 if __name__ == "__main__":

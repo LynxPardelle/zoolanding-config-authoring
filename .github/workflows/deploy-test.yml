@@ -5,12 +5,20 @@ on:
     branches: [test]
 
 permissions:
-  id-token: write
   contents: read
+
+concurrency:
+  group: zoolanding-config-authoring-test
+  cancel-in-progress: false
 
 jobs:
   guard:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      BEFORE_SHA: ${{ github.event.before }}
+      SOURCE_BRANCH: "dev"
     steps:
       - uses: actions/checkout@v5
         with:
@@ -18,18 +26,28 @@ jobs:
       - name: Require dev merge
         run: |
           set -euo pipefail
-          git fetch origin dev test
-          parent_count="$(git rev-list --parents -n 1 HEAD | awk '{print NF-1}')"
-          test "$parent_count" -ge 2
-          second_parent="$(git rev-list --parents -n 1 HEAD | awk '{print $3}')"
-          git merge-base --is-ancestor "$second_parent" origin/dev
-  deploy:
+          git fetch --no-tags origin "refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
+          commit="$(git rev-parse HEAD)"
+          source_tip="$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")"
+          commit_tree="$(git rev-parse "${commit}^{tree}")"
+          source_tree="$(git rev-parse "${source_tip}^{tree}")"
+          parents_line="$(git rev-list --parents -n 1 HEAD)"
+          python tools/verify_promotion_provenance.py \
+            --commit "$commit" \
+            --before-sha "$BEFORE_SHA" \
+            --source-tip "$source_tip" \
+            --commit-tree "$commit_tree" \
+            --source-tree "$source_tree" \
+            --parents-line "$parents_line"
+
+  validate:
     runs-on: ubuntu-latest
     needs: guard
-    environment: test
+    permissions:
+      contents: read
     env:
-      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
-      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_REGION: us-east-1
       SAM_CLI_TELEMETRY: 0
     steps:
       - uses: actions/checkout@v5
@@ -37,20 +55,143 @@ jobs:
         with:
           python-version: '3.13'
       - uses: aws-actions/setup-sam@v3
-      - name: Test and build deploy artifact
+      - name: Test and build exact artifact without AWS credentials
         shell: bash
         run: |
           set -euo pipefail
           python -m unittest discover -s tests -p "test_*.py"
           python tools/build_lambda_artifact.py
-          sam validate
+          sam validate --lint
           sam build --no-cached
           python tools/build_lambda_artifact.py --verify-artifact .aws-sam/build/ConfigAuthoringFunction
+          python tools/build_lambda_artifact.py \
+            --write-sam-manifest .aws-sam/build \
+            --source-commit "$GITHUB_SHA"
+          python tools/build_lambda_artifact.py \
+            --verify-sam-build .aws-sam/build \
+            --expected-source-commit "$GITHUB_SHA"
+      - name: Upload exact validated artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: config-authoring-test-${{ github.sha }}
+          path: .aws-sam/build/
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: validate
+    environment: test
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+      SAM_CLI_TELEMETRY: 0
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: aws-actions/setup-sam@v3
+      - name: Download validated artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: config-authoring-test-${{ github.sha }}
+          path: .aws-sam/build
+      - name: Recheck exact validated artifact before credentials
+        run: |
+          set -euo pipefail
+          python tools/build_lambda_artifact.py --normalize-artifact .aws-sam/build/ConfigAuthoringFunction
+          python tools/build_lambda_artifact.py \
+            --verify-sam-build .aws-sam/build \
+            --expected-source-commit "$GITHUB_SHA"
+          sam validate --lint --template-file .aws-sam/build/template.yaml
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
-      - name: Deploy
+      - name: Create, review, and execute an exact nonreplacement change set
+        env:
+          STACK_NAME: zoolanding-config-authoring-test
+          CHANGE_SET_NAME: "zoolanding-${{ github.run_id }}-${{ github.run_attempt }}"
+          EXPECTED_ENVIRONMENT: test
+          EXPECTED_MANAGE_STORAGE: "true"
+          EXPECTED_TABLE: zoolanding-config-registry-test
+          EXPECTED_BUCKET: zoolanding-config-payloads-test
         run: |
           set -euo pipefail
-          sam deploy --config-env test --no-confirm-changeset --no-fail-on-empty-changeset
+          packaged="$RUNNER_TEMP/packaged-template.yaml"
+          description="$RUNNER_TEMP/reviewed-change-set.json"
+          sam package \
+            --template-file .aws-sam/build/template.yaml \
+            --s3-bucket "$EXPECTED_BUCKET" \
+            --s3-prefix "system/deploy-artifacts/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" \
+            --output-template-file "$packaged" \
+            --region "$AWS_REGION"
+          change_set_arn="$(aws cloudformation create-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$CHANGE_SET_NAME" \
+            --change-set-type UPDATE \
+            --client-token "github-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}" \
+            --description "GitHub ${GITHUB_REPOSITORY}@${GITHUB_SHA}" \
+            --template-body "file://$packaged" \
+            --capabilities CAPABILITY_IAM \
+            --parameters \
+              "ParameterKey=EnvironmentName,ParameterValue=$EXPECTED_ENVIRONMENT" \
+              "ParameterKey=ManageStorageResources,ParameterValue=$EXPECTED_MANAGE_STORAGE" \
+              "ParameterKey=ConfigTableName,ParameterValue=$EXPECTED_TABLE" \
+              "ParameterKey=ConfigPayloadsBucketName,ParameterValue=$EXPECTED_BUCKET" \
+              "ParameterKey=LogLevel,ParameterValue=INFO" \
+              "ParameterKey=DeployAuthzConfigS3Key,ParameterValue=system/deploy-authz-v2.json" \
+            --query 'Id' \
+            --output text \
+            --no-cli-pager)"
+          set +e
+          aws cloudformation wait change-set-create-complete \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$change_set_arn"
+          wait_status=$?
+          set -e
+          aws cloudformation describe-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$change_set_arn" \
+            --include-property-values \
+            --output json \
+            --no-cli-pager > "$description"
+          decision="$(python tools/review_cloudformation_change_set.py "$description" \
+            --expected-stack-name "$STACK_NAME" \
+            --expected-change-set-name "$CHANGE_SET_NAME" \
+            --expected-change-set-arn "$change_set_arn" \
+            --expected-parameter "EnvironmentName=$EXPECTED_ENVIRONMENT" \
+            --expected-parameter "ManageStorageResources=$EXPECTED_MANAGE_STORAGE" \
+            --expected-parameter "ConfigTableName=$EXPECTED_TABLE" \
+            --expected-parameter "ConfigPayloadsBucketName=$EXPECTED_BUCKET" \
+            --expected-parameter "LogLevel=INFO" \
+            --expected-parameter "DeployAuthzConfigS3Key=system/deploy-authz-v2.json")"
+          if [[ "$decision" == "noop" ]]; then
+            aws cloudformation delete-change-set \
+              --stack-name "$STACK_NAME" \
+              --change-set-name "$change_set_arn" \
+              --no-cli-pager
+            echo "No CloudFormation changes to execute."
+            exit 0
+          fi
+          test "$decision" = "execute"
+          test "$wait_status" -eq 0
+          aws cloudformation execute-change-set \
+            --stack-name "$STACK_NAME" \
+            --change-set-name "$change_set_arn" \
+            --client-request-token "execute-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA}" \
+            --no-cli-pager
+          aws cloudformation wait stack-update-complete --stack-name "$STACK_NAME"
+          final_status="$(aws cloudformation describe-stacks \
+            --stack-name "$STACK_NAME" \
+            --query 'Stacks[0].StackStatus' \
+            --output text \
+            --no-cli-pager)"
+          test "$final_status" = "UPDATE_COMPLETE"

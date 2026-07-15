@@ -1,19 +1,5 @@
 version = 0.1
 
-[default.deploy.parameters]
-stack_name = "zoolanding-config-authoring"
-resolve_s3 = true
-s3_prefix = "zoolanding-config-authoring"
-region = "us-east-1"
-confirm_changeset = false
-capabilities = "CAPABILITY_IAM"
-parameter_overrides = [
-  "ConfigTableName=zoolanding-config-registry",
-  "ConfigPayloadsBucketName=zoolanding-config-payloads",
-  "LogLevel=INFO",
-  "DeployAuthzConfigS3Key=system/deploy-authz.json"
-]
-
 [test.deploy.parameters]
 stack_name = "zoolanding-config-authoring-test"
 resolve_s3 = true
@@ -27,7 +13,7 @@ parameter_overrides = [
   "ConfigTableName=zoolanding-config-registry-test",
   "ConfigPayloadsBucketName=zoolanding-config-payloads-test",
   "LogLevel=INFO",
-  "DeployAuthzConfigS3Key=system/deploy-authz.json"
+  "DeployAuthzConfigS3Key=system/deploy-authz-v2.json"
 ]
 
 [prod.deploy.parameters]
@@ -38,10 +24,10 @@ region = "us-east-1"
 confirm_changeset = false
 capabilities = "CAPABILITY_IAM"
 parameter_overrides = [
-  "EnvironmentName=prod",
+  "EnvironmentName=production",
   "ManageStorageResources=false",
   "ConfigTableName=zoolanding-config-registry",
   "ConfigPayloadsBucketName=zoolanding-config-payloads",
   "LogLevel=INFO",
-  "DeployAuthzConfigS3Key=system/deploy-authz.json"
+  "DeployAuthzConfigS3Key=system/deploy-authz-v2.json"
 ]

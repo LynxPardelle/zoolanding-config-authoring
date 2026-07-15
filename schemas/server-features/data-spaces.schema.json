@@ -1,0 +1,119 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ZoolandingDataSpacesPolicy",
+  "type": "object",
+  "required": ["version", "scope", "spaces"],
+  "properties": {
+    "version": { "const": 1 },
+    "scope": { "$ref": "#/definitions/scope" },
+    "spaces": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "#/definitions/space" }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 253,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "capability": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 96,
+      "enum": [
+        "data-space:record:read",
+        "data-space:record:write",
+        "data-space:schema:write",
+        "data-space:publish"
+      ]
+    },
+    "scope": {
+      "type": "object",
+      "required": ["environment", "tenantId", "draftId", "domain"],
+      "properties": {
+        "environment": { "enum": ["test", "production"] },
+        "tenantId": { "$ref": "#/definitions/safeId" },
+        "draftId": { "$ref": "#/definitions/safeId" },
+        "domain": { "$ref": "#/definitions/domain" }
+      },
+      "additionalProperties": false
+    },
+    "noAdminAccess": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": { "mode": { "const": "none" } },
+      "additionalProperties": false
+    },
+    "authProfileAccess": {
+      "type": "object",
+      "required": ["mode", "authProfileId", "capabilities"],
+      "properties": {
+        "mode": { "const": "auth-profile" },
+        "authProfileId": { "$ref": "#/definitions/safeId" },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 24,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/capability" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "publicRead": {
+      "type": "object",
+      "required": ["enabled", "maxPageSize"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxPageSize": { "type": "integer", "minimum": 1, "maximum": 100 }
+      },
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "required": ["maxCollections", "maxFieldsPerCollection", "maxRecordsPerCollection", "maxRecordBytes"],
+      "properties": {
+        "maxCollections": { "type": "integer", "minimum": 1, "maximum": 100 },
+        "maxFieldsPerCollection": { "type": "integer", "minimum": 1, "maximum": 200 },
+        "maxRecordsPerCollection": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "maxRecordBytes": { "type": "integer", "minimum": 1024, "maximum": 400000 }
+      },
+      "additionalProperties": false
+    },
+    "space": {
+      "type": "object",
+      "required": ["id", "status", "access", "publicRead", "allowedClassifications", "limits"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "status": { "enum": ["disabled", "active"] },
+        "access": {
+          "oneOf": [
+            { "$ref": "#/definitions/noAdminAccess" },
+            { "$ref": "#/definitions/authProfileAccess" }
+          ]
+        },
+        "publicRead": { "$ref": "#/definitions/publicRead" },
+        "allowedClassifications": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["public", "internal"] }
+        },
+        "limits": { "$ref": "#/definitions/limits" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ZoolandingIntegrationBindings",
+  "type": "object",
+  "required": ["version", "scope", "bindings"],
+  "properties": {
+    "version": { "const": 1 },
+    "scope": { "$ref": "#/definitions/scope" },
+    "bindings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 32,
+      "items": { "$ref": "#/definitions/binding" }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "safeId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,63}$"
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 4,
+      "maxLength": 253,
+      "pattern": "^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$"
+    },
+    "scope": {
+      "type": "object",
+      "required": ["environment", "tenantId", "draftId", "domain"],
+      "properties": {
+        "environment": { "enum": ["test", "production"] },
+        "tenantId": { "$ref": "#/definitions/safeId" },
+        "draftId": { "$ref": "#/definitions/safeId" },
+        "domain": { "$ref": "#/definitions/domain" }
+      },
+      "additionalProperties": false
+    },
+    "stripeSettings": {
+      "type": "object",
+      "required": ["accountModel", "chargeType", "feePayer", "taxMode", "platformFeeMode", "webhookIngress"],
+      "properties": {
+        "accountModel": { "const": "merchant" },
+        "chargeType": { "const": "direct" },
+        "feePayer": { "const": "connected-account" },
+        "taxMode": { "enum": ["unconfigured", "manual-rate", "stripe-tax"] },
+        "taxApprovalId": { "$ref": "#/definitions/safeId" },
+        "platformFeeMode": { "enum": ["disabled", "application-fee"] },
+        "webhookIngress": { "const": "direct-integrations-api" }
+      },
+      "additionalProperties": false
+    },
+    "binding": {
+      "type": "object",
+      "required": ["id", "provider", "adapterVersion", "connectionId", "status", "mode", "capabilities"],
+      "properties": {
+        "id": { "$ref": "#/definitions/safeId" },
+        "provider": { "$ref": "#/definitions/safeId" },
+        "adapterVersion": { "$ref": "#/definitions/safeId" },
+        "connectionId": { "$ref": "#/definitions/safeId" },
+        "status": { "enum": ["disabled", "active"] },
+        "mode": { "enum": ["test", "live"] },
+        "capabilities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": { "$ref": "#/definitions/safeId" }
+        },
+        "stripe": { "$ref": "#/definitions/stripeSettings" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

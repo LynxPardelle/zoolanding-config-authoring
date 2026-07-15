@@ -1,9 +1,11 @@
 import base64
 import json
+import math
 import os
 import re
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, Iterable, Optional
 
 try:
@@ -18,6 +20,15 @@ LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 DRY_RUN = os.getenv("DRY_RUN", "0").strip().lower() in {"1", "true", "yes", "on"}
 _S3_CLIENT = None
 _DYNAMODB_RESOURCE = None
+_SECRETSMANAGER_CLIENT = None
+
+
+class RevisionConflictError(Exception):
+    pass
+
+
+class ObjectAlreadyExistsError(Exception):
+    pass
 
 
 def should_log(level: str) -> bool:
@@ -33,7 +44,20 @@ def log(level: str, message: str, **fields: Any) -> None:
     try:
         print(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
     except Exception:
-        print({"level": level, "message": message, "fields": str(fields)})
+        print(json.dumps({
+            "level": level,
+            "message": message,
+            "serializationError": True,
+            "fieldKeys": sorted(str(key) for key in fields),
+        }, ensure_ascii=False, separators=(",", ":")))
+
+
+def _json_response_default(value: Any) -> int:
+    if isinstance(value, Decimal):
+        if not value.is_finite() or value != value.to_integral_value():
+            raise TypeError("Only finite integral Decimal values are supported in JSON responses")
+        return int(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def json_response(status_code: int, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -45,7 +69,12 @@ def json_response(status_code: int, payload: Dict[str, Any]) -> Dict[str, Any]:
             "Access-Control-Allow-Headers": "Content-Type,Authorization",
             "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
         },
-        "body": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        "body": json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=_json_response_default,
+        ),
     }
 
 
@@ -80,6 +109,40 @@ def get_request_id(context: Any) -> str:
     return f"local-{uuid.uuid4().hex[:12]}"
 
 
+def _reject_non_json_constant(_value: str) -> None:
+    raise ValueError("Body contains a non-JSON numeric constant")
+
+
+def _assert_json_compatible(value: Any, ancestors: Optional[set[int]] = None, depth: int = 0) -> None:
+    if depth > 64:
+        raise ValueError("Body exceeds the JSON nesting limit")
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("Body contains a non-finite number")
+        return
+    if not isinstance(value, (dict, list)):
+        raise ValueError("Body contains a value that JSON cannot represent")
+
+    ancestors = ancestors if ancestors is not None else set()
+    identity = id(value)
+    if identity in ancestors:
+        raise ValueError("Body contains a cyclic value")
+    ancestors.add(identity)
+    try:
+        if isinstance(value, dict):
+            if any(not isinstance(key, str) for key in value):
+                raise ValueError("Body contains a non-string object key")
+            children = value.values()
+        else:
+            children = value
+        for child in children:
+            _assert_json_compatible(child, ancestors, depth + 1)
+    finally:
+        ancestors.remove(identity)
+
+
 def parse_json_body(event: Dict[str, Any]) -> Dict[str, Any]:
     body = event.get("body")
     if body is None or body == "":
@@ -88,13 +151,16 @@ def parse_json_body(event: Dict[str, Any]) -> Dict[str, Any]:
     if event.get("isBase64Encoded"):
         if not isinstance(body, str):
             raise ValueError("Body is base64Encoded but not a string")
-        body = base64.b64decode(body).decode("utf-8")
+        try:
+            body = base64.b64decode(body, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            raise ValueError("Body is not valid base64-encoded UTF-8") from None
 
     if isinstance(body, (bytes, bytearray)):
         body = body.decode("utf-8")
 
     if isinstance(body, str):
-        parsed = json.loads(body)
+        parsed = json.loads(body, parse_constant=_reject_non_json_constant)
     elif isinstance(body, dict):
         parsed = body
     else:
@@ -102,6 +168,8 @@ def parse_json_body(event: Dict[str, Any]) -> Dict[str, Any]:
 
     if not isinstance(parsed, dict):
         raise ValueError("Body must decode into a JSON object")
+
+    _assert_json_compatible(parsed)
 
     return parsed
 
@@ -173,6 +241,20 @@ def get_dynamodb_resource():
     return _DYNAMODB_RESOURCE
 
 
+def get_secretsmanager_client():
+    global _SECRETSMANAGER_CLIENT
+    if _SECRETSMANAGER_CLIENT is not None:
+        return _SECRETSMANAGER_CLIENT
+    if boto3 is None:
+        raise RuntimeError("boto3 is not available")
+    _SECRETSMANAGER_CLIENT = boto3.client("secretsmanager")
+    return _SECRETSMANAGER_CLIENT
+
+
+def describe_secret(secret_id: str) -> Dict[str, Any]:
+    return get_secretsmanager_client().describe_secret(SecretId=secret_id)
+
+
 def get_table(table_name: str):
     return get_dynamodb_resource().Table(table_name)
 
@@ -188,10 +270,12 @@ def load_json_from_s3(bucket: str, key: str) -> Optional[Dict[str, Any]]:
         raise
 
     raw = response["Body"].read().decode("utf-8")
-    return json.loads(raw) if raw.strip() else {}
+    parsed = json.loads(raw, parse_constant=_reject_non_json_constant) if raw.strip() else {}
+    _assert_json_compatible(parsed)
+    return parsed
 
 
-def list_json_keys(bucket: str, prefix: str) -> list[str]:
+def list_object_keys(bucket: str, prefix: str) -> list[str]:
     s3 = get_s3_client()
     keys: list[str] = []
     continuation_token: Optional[str] = None
@@ -203,7 +287,7 @@ def list_json_keys(bucket: str, prefix: str) -> list[str]:
         response = s3.list_objects_v2(**kwargs)
         for entry in response.get("Contents", []):
             key = str(entry.get("Key") or "")
-            if key.endswith(".json"):
+            if key:
                 keys.append(key)
 
         if not response.get("IsTruncated"):
@@ -211,6 +295,10 @@ def list_json_keys(bucket: str, prefix: str) -> list[str]:
         continuation_token = response.get("NextContinuationToken")
 
     return keys
+
+
+def list_json_keys(bucket: str, prefix: str) -> list[str]:
+    return [key for key in list_object_keys(bucket, prefix) if key.endswith(".json")]
 
 
 def put_json_to_s3(bucket: str, key: str, payload: Dict[str, Any]) -> None:
@@ -226,6 +314,27 @@ def put_json_to_s3(bucket: str, key: str, payload: Dict[str, Any]) -> None:
         ContentType="application/json",
         CacheControl="no-cache",
     )
+
+
+def put_json_to_s3_if_absent(bucket: str, key: str, payload: Dict[str, Any]) -> None:
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if DRY_RUN:
+        log("INFO", "Dry run: skipping immutable S3 JSON upload", size=len(encoded))
+        return
+    try:
+        get_s3_client().put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=encoded,
+            ContentType="application/json",
+            CacheControl="no-cache",
+            IfNoneMatch="*",
+        )
+    except ClientError as exc:  # type: ignore[misc]
+        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code"))
+        if code in {"PreconditionFailed", "ConditionalRequestConflict", "409", "412"}:
+            raise ObjectAlreadyExistsError() from None
+        raise
 
 
 def put_bytes_to_s3(bucket: str, key: str, payload: bytes, content_type: str) -> None:
@@ -255,6 +364,27 @@ def put_item(table_name: str, item: Dict[str, Any]) -> None:
     get_table(table_name).put_item(Item=item)
 
 
+def put_item_if_revision(table_name: str, item: Dict[str, Any], expected_revision: int) -> None:
+    if DRY_RUN:
+        log("INFO", "Dry run: skipping conditional DynamoDB put_item", table=table_name)
+        return
+    condition = "#revision = :expected_revision"
+    if expected_revision == 0:
+        condition = "attribute_not_exists(#revision) OR #revision = :expected_revision"
+    try:
+        get_table(table_name).put_item(
+            Item=item,
+            ConditionExpression=condition,
+            ExpressionAttributeNames={"#revision": "revision"},
+            ExpressionAttributeValues={":expected_revision": expected_revision},
+        )
+    except ClientError as exc:  # type: ignore[misc]
+        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code"))
+        if code == "ConditionalCheckFailedException":
+            raise RevisionConflictError() from None
+        raise
+
+
 def site_pk(domain: str) -> str:
     return f"SITE#{normalize_domain(domain)}"
 
@@ -265,8 +395,7 @@ def alias_pk(domain: str) -> str:
 
 def default_version_prefix(domain: str, version_id: str) -> str:
     normalized_domain = sanitize_key_segment(normalize_domain(domain), fallback="site")
-    normalized_version = sanitize_key_segment(version_id, fallback="version")
-    return f"sites/{normalized_domain}/versions/{normalized_version}"
+    return f"sites/{normalized_domain}/versions/{version_id}/"
 
 
 def join_s3_key(*parts: Iterable[str] | str) -> str:
