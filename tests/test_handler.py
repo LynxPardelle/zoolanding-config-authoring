@@ -7,6 +7,7 @@ import io
 import json
 import os
 import unittest
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -1172,6 +1173,74 @@ class AuthoringHandlerTest(unittest.TestCase):
         metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
         self.assertEqual(metadata["publishedEnvironments"]["test"]["versionId"], "v1")
         self.assertEqual(self.objects, objects_before_publish)
+
+    def test_publish_returns_success_after_loading_dynamodb_decimal_metadata(self):
+        self.upsert(version_id="decimal-v1")
+        key = ("SITE#pamelabetancourt.com", "METADATA")
+        self.items[key]["revision"] = Decimal("1")
+        self.items[key]["draft"]["manifestVersion"] = Decimal("1")
+        cas_calls = []
+        original_put_item_if_revision = self.handler.put_item_if_revision
+
+        def counting_put_item_if_revision(table, item, expected_revision):
+            cas_calls.append((table, expected_revision))
+            original_put_item_if_revision(table, item, expected_revision)
+
+        self.handler.put_item_if_revision = counting_put_item_if_revision
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "decimal-v1",
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 200)
+        body = parse(response)
+        self.assertEqual(body["draft"]["manifestVersion"], 1)
+        self.assertIs(type(body["draft"]["manifestVersion"]), int)
+        self.assertEqual(len(cas_calls), 1)
+        self.assertEqual(cas_calls[0][1], 1)
+        metadata = self.items[key]
+        self.assertEqual(metadata["publishedEnvironments"]["test"]["versionId"], "decimal-v1")
+        self.assertNotIn("published", metadata)
+
+    def test_publish_does_not_commit_when_response_metadata_is_not_json_safe(self):
+        self.upsert(version_id="invalid-decimal-v1")
+        key = ("SITE#pamelabetancourt.com", "METADATA")
+        self.items[key]["draft"]["manifestVersion"] = Decimal("1.5")
+        before = copy.deepcopy(self.items)
+        cas_calls = []
+        original_put_item_if_revision = self.handler.put_item_if_revision
+
+        def counting_put_item_if_revision(table, item, expected_revision):
+            cas_calls.append((table, expected_revision))
+            original_put_item_if_revision(table, item, expected_revision)
+
+        self.handler.put_item_if_revision = counting_put_item_if_revision
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "invalid-decimal-v1",
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(len(cas_calls), 0)
+        self.assertEqual(self.items, before)
+        self.assertNotIn("publishedEnvironments", self.items[key])
+
+    def test_upsert_does_not_store_files_when_historical_response_metadata_is_not_json_safe(self):
+        self.upsert(version_id="safe-v1")
+        key = ("SITE#pamelabetancourt.com", "METADATA")
+        self.items[key]["published"] = {"manifestVersion": Decimal("1.5")}
+        items_before = copy.deepcopy(self.items)
+        objects_before = copy.deepcopy(self.objects)
+
+        response = self.upsert(version_id="unsafe-response-v2")
+
+        self.assertEqual(response["statusCode"], 500)
+        self.assertEqual(self.items, items_before)
+        self.assertEqual(self.objects, objects_before)
 
     def test_publish_pointer_uses_expected_revision_cas(self):
         self.upsert(version_id="v1")
