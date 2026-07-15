@@ -797,7 +797,7 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     raw_version_id = payload["versionId"] if "versionId" in payload else build_version_id(request_id)
     version_id = _strict_version_id(raw_version_id)
     derived = _derive_site_fields(domain, files)
-    prefix = _store_files(domain, version_id, environment, files)
+    prefix = default_version_prefix(domain, version_id)
     updated_at = now_iso()
     updated_by = _updated_by(payload, request_id)
 
@@ -825,13 +825,15 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
     metadata["updatedBy"] = updated_by
     metadata["revision"] = expected_revision + 1
 
-    _save_registry_conditionally(metadata, expected_revision)
-    return ok({
+    response = ok({
         "domain": domain,
         "draft": metadata.get("draft"),
         "published": metadata.get("published"),
         "lifecycle": metadata.get("lifecycle"),
     })
+    _store_files(domain, version_id, environment, files)
+    _save_registry_conditionally(metadata, expected_revision)
+    return response
 
 
 def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -932,14 +934,15 @@ def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = _updated_by(payload, request_id)
     metadata["revision"] = expected_revision + 1
-    _save_registry_conditionally(metadata, expected_revision)
-    return ok({
+    response = ok({
         "domain": domain,
         "environment": environment,
         "published": published_pointer,
         "draft": metadata.get("draft"),
         "lifecycle": metadata.get("lifecycle"),
     })
+    _save_registry_conditionally(metadata, expected_revision)
+    return response
 
 
 def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
@@ -973,8 +976,9 @@ def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = _updated_by(payload, request_id)
     metadata["revision"] = expected_revision + 1
+    response = ok({"domain": domain, "lifecycle": lifecycle})
     _save_registry_conditionally(metadata, expected_revision)
-    return ok({"domain": domain, "lifecycle": lifecycle})
+    return response
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

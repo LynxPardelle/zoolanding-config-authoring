@@ -1,11 +1,33 @@
 import contextlib
 import io
+import json
 import unittest
+from decimal import Decimal
 
 import zoolanding_lambda_common as common
 
 
 class StoragePrimitiveTest(unittest.TestCase):
+    def test_json_response_serializes_nested_integral_decimals_as_json_numbers(self):
+        response = common.ok({
+            "registry": {
+                "revision": Decimal("2"),
+                "draft": {"manifestVersion": Decimal("1")},
+            }
+        })
+
+        body = json.loads(response["body"])
+        self.assertEqual(body["registry"]["revision"], 2)
+        self.assertIs(type(body["registry"]["revision"]), int)
+        self.assertEqual(body["registry"]["draft"]["manifestVersion"], 1)
+        self.assertIs(type(body["registry"]["draft"]["manifestVersion"]), int)
+
+    def test_json_response_rejects_unsupported_and_non_integral_values(self):
+        for value in (Decimal("1.5"), Decimal("NaN"), object()):
+            with self.subTest(value_type=type(value).__name__):
+                with self.assertRaises(TypeError):
+                    common.ok({"value": value})
+
     def test_immutable_json_put_uses_s3_if_none_match(self):
         self.assertTrue(hasattr(common, "put_json_to_s3_if_absent"))
         calls = []

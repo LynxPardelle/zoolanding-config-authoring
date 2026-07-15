@@ -5,6 +5,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Dict, Iterable, Optional
 
 try:
@@ -51,6 +52,14 @@ def log(level: str, message: str, **fields: Any) -> None:
         }, ensure_ascii=False, separators=(",", ":")))
 
 
+def _json_response_default(value: Any) -> int:
+    if isinstance(value, Decimal):
+        if not value.is_finite() or value != value.to_integral_value():
+            raise TypeError("Only finite integral Decimal values are supported in JSON responses")
+        return int(value)
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
 def json_response(status_code: int, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "statusCode": status_code,
@@ -60,7 +69,12 @@ def json_response(status_code: int, payload: Dict[str, Any]) -> Dict[str, Any]:
             "Access-Control-Allow-Headers": "Content-Type,Authorization",
             "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
         },
-        "body": json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        "body": json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            default=_json_response_default,
+        ),
     }
 
 
