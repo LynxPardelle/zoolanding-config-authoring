@@ -134,7 +134,7 @@ Resources:
   ConfigAuthoringFunction:
     Type: AWS::Serverless::Function
     Properties:
-      CodeUri: .
+      CodeUri: .build/config-authoring
       Handler: lambda_function.lambda_handler
       Description: Creates, reads, updates, publishes, and changes lifecycle state for site draft packages.
       FunctionUrlConfig:
