@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "scope": {
+    "environment": "test",
+    "tenantId": "tenant-example",
+    "draftId": "draft-example",
+    "domain": "example.com"
+  },
+  "commerce": {
+    "status": "active",
+    "adminAccess": {
+      "mode": "auth-profile",
+      "authProfileId": "staff",
+      "capabilities": [
+        "commerce:catalog:read",
+        "commerce:catalog:write",
+        "commerce:inventory:write",
+        "commerce:subscription:manage"
+      ]
+    },
+    "sellableTypes": ["physical", "service", "subscription", "add_on"],
+    "payments": {
+      "bindingId": "stripe-primary",
+      "oneTime": true,
+      "subscriptions": true,
+      "editablePrices": true,
+      "coupons": true,
+      "operatorPauses": true,
+      "proration": "operator-selectable"
+    },
+    "inventory": {
+      "enabled": true,
+      "tracked": true,
+      "backorders": false,
+      "locationId": "primary"
+    },
+    "shipping": {
+      "enabled": true,
+      "methods": ["fixed", "free", "pickup"]
+    },
+    "fiscal": {
+      "enabled": false
+    },
+    "checkout": {
+      "successPath": "/pago/resultado",
+      "cancelPath": "/planes",
+      "termsPath": "/terminos",
+      "privacyPath": "/privacidad",
+      "refundPolicyPath": "/terminos#reembolsos",
+      "supportPath": "/contacto"
+    }
+  }
+}

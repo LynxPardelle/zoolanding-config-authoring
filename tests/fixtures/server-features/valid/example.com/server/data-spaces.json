@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "scope": {
+    "environment": "test",
+    "tenantId": "tenant-example",
+    "draftId": "draft-example",
+    "domain": "example.com"
+  },
+  "spaces": [
+    {
+      "id": "catalog-content",
+      "status": "active",
+      "access": {
+        "mode": "auth-profile",
+        "authProfileId": "staff",
+        "capabilities": [
+          "data-space:record:read",
+          "data-space:record:write",
+          "data-space:schema:write",
+          "data-space:publish"
+        ]
+      },
+      "publicRead": {
+        "enabled": true,
+        "maxPageSize": 50
+      },
+      "allowedClassifications": ["public", "internal"],
+      "limits": {
+        "maxCollections": 20,
+        "maxFieldsPerCollection": 50,
+        "maxRecordsPerCollection": 10000,
+        "maxRecordBytes": 65536
+      }
+    }
+  ]
+}

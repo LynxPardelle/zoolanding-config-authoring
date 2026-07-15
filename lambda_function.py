@@ -1,26 +1,34 @@
+import copy
+import hashlib
 import json
 import os
 import re
 import unicodedata
 from typing import Any, Dict, Optional
+from urllib.parse import unquote
 
+from server_policy_validation import PolicyValidationError, validate_notification_secrets, validate_server_policy_files
 from zoolanding_lambda_common import (
     bad_request,
     build_version_id,
     conflict,
     default_version_prefix,
+    describe_secret,
     get_request_id,
     join_s3_key,
     list_json_keys,
+    list_object_keys,
     load_item,
     load_json_from_s3,
     log,
     not_found,
     now_iso,
+    ObjectAlreadyExistsError,
     ok,
     parse_json_body,
-    put_item,
-    put_json_to_s3,
+    put_item_if_revision,
+    put_json_to_s3_if_absent,
+    RevisionConflictError,
     server_error,
     site_pk,
     unauthorized,
@@ -30,11 +38,16 @@ from zoolanding_lambda_common import (
 CONFIG_TABLE_NAME = os.getenv("CONFIG_TABLE_NAME", "zoolanding-config-registry")
 CONFIG_PAYLOADS_BUCKET_NAME = os.getenv("CONFIG_PAYLOADS_BUCKET_NAME", "zoolanding-config-payloads")
 DEPLOY_AUTHZ_CONFIG_S3_KEY = os.getenv("DEPLOY_AUTHZ_CONFIG_S3_KEY", "").strip()
+ENVIRONMENT_NAME = os.getenv("ENVIRONMENT_NAME", "test").strip().lower()
 
 WRITE_ACTIONS = {"createSite", "upsertDraft", "publishDraft", "setSiteStatus"}
 ALL_ACTIONS = WRITE_ACTIONS | {"getSite"}
-ENVIRONMENTS = {"production", "test", "dev"}
+ENVIRONMENTS = {"production", "test"}
 SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,78}[a-z0-9]$")
+SERVER_SCOPE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+DEPLOY_ROLE_ARN_PATTERN = re.compile(
+    r"^arn:(?:aws|aws-us-gov|aws-cn):iam::\d{12}:role/[A-Za-z0-9+=,.@_/-]+$"
+)
 DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 VERSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 WINDOWS_INVALID_PATH_CHARACTER_PATTERN = re.compile(r'[<>:"|?*]')
@@ -42,9 +55,41 @@ WINDOWS_RESERVED_PATH_BASENAME_PATTERN = re.compile(
     r"^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$",
     re.IGNORECASE,
 )
-LOCAL_DRAFT_CONTEXT_FOLDERS = {"ai_notes", "findings", "errors-reports"}
+LOCAL_DRAFT_CONTEXT_FOLDERS = {
+    ".git", ".github", "_repos", "ai_notes", "findings", "errors-reports",
+    "cvs_n_photos", "node_modules", "output", "reports", "logs", "devonly",
+    ".superpowers", ".agent-coordination", "tools",
+}
 LOCAL_DRAFT_CONTEXT_FILES = {"draft-repo.config.json"}
 SERVER_ONLY_KEY_PATTERN = re.compile(r"(secret|token|credential|password|privatekey|authorization)", re.IGNORECASE)
+MANIFEST_FILE_NAME = "_manifest.json"
+DEPLOY_AUTHZ_RULE_KEYS = {
+    "roleArn", "tenantId", "draftId", "domains", "environments", "actions"
+}
+
+
+class VersionAlreadyExistsError(Exception):
+    pass
+
+
+class StoredPackageError(ValueError):
+    def __init__(self):
+        super().__init__("stored_package_invalid")
+
+
+SAFE_VALIDATION_CODES = {
+    "duplicate_path",
+    "environment_invalid",
+    "environment_mismatch",
+    "invalid_server_path",
+    "kind_mismatch",
+    "unknown_server_descriptor",
+}
+
+
+def _safe_validation_code(error: ValueError) -> str:
+    code = error.args[0] if len(error.args) == 1 and isinstance(error.args[0], str) else ""
+    return code if code in SAFE_VALIDATION_CODES else "invalid_request"
 
 
 def _initial_lifecycle(updated_at: str, updated_by: str) -> Dict[str, Any]:
@@ -66,16 +111,21 @@ def _read_site_file(files: list[Dict[str, Any]], suffix: str) -> Optional[Dict[s
 
 
 def _normalize_environment(value: Any) -> str:
-    environment = str(value or "production").strip().lower()
-    if environment in {"prod", "live", "main"}:
-        return "production"
-    if environment in {"development", "local"}:
-        return "dev"
-    if environment in {"testing", "stage", "staging"}:
-        return "test"
+    environment = str(value or "").strip().lower()
     if environment in ENVIRONMENTS:
         return environment
-    raise ValueError("environment must be 'production', 'test', or 'dev'")
+    raise ValueError("environment_invalid")
+
+
+def _stack_environment() -> str:
+    return _normalize_environment(ENVIRONMENT_NAME)
+
+
+def _assert_stack_environment(payload: Dict[str, Any]) -> str:
+    environment = _normalize_environment(payload.get("environment") or payload.get("stageEnvironment"))
+    if environment != _stack_environment():
+        raise ValueError("environment_mismatch")
+    return environment
 
 
 def _is_windows_reserved_path_segment(segment: str) -> bool:
@@ -85,6 +135,25 @@ def _is_windows_reserved_path_segment(segment: str) -> bool:
 
 def _has_unsafe_unicode_path_character(value: str) -> bool:
     return any(unicodedata.category(character) in {"Cc", "Cf"} for character in value)
+
+
+def _decode_draft_path_segment(value: str) -> str:
+    if re.search(r"%(?![0-9A-Fa-f]{2})", value):
+        raise ValueError("invalid_draft_path")
+    try:
+        decoded = unquote(value, errors="strict")
+    except (UnicodeDecodeError, ValueError):
+        raise ValueError("invalid_draft_path") from None
+    if (
+        not decoded
+        or decoded != value
+        or re.search(r"%[0-9A-Fa-f]{2}", decoded)
+        or "/" in decoded
+        or "\\" in decoded
+        or _has_unsafe_unicode_path_character(decoded)
+    ):
+        raise ValueError("invalid_draft_path")
+    return decoded
 
 
 def _strict_domain(value: Any, field_name: str = "domain") -> str:
@@ -236,7 +305,57 @@ def _load_deploy_authz_config() -> list[Dict[str, Any]]:
     if not isinstance(parsed, list):
         log("ERROR", "Deploy authorization config S3 object must be an array")
         return []
-    return [entry for entry in parsed if isinstance(entry, dict)]
+    if not parsed:
+        log("ERROR", "Deploy authorization config S3 object must not be empty")
+        return []
+
+    environment = _stack_environment()
+    role_arns: set[str] = set()
+    domains: set[str] = set()
+    draft_ids: set[str] = set()
+    validated: list[Dict[str, Any]] = []
+    try:
+        for entry in parsed:
+            if not isinstance(entry, dict) or set(entry) != DEPLOY_AUTHZ_RULE_KEYS:
+                raise ValueError("authorization rule shape is invalid")
+            role_arn = entry.get("roleArn")
+            tenant_id = entry.get("tenantId")
+            draft_id = entry.get("draftId")
+            rule_domains = entry.get("domains")
+            rule_environments = entry.get("environments")
+            actions = entry.get("actions")
+            if (
+                not isinstance(role_arn, str)
+                or not DEPLOY_ROLE_ARN_PATTERN.fullmatch(role_arn)
+                or not isinstance(tenant_id, str)
+                or not SERVER_SCOPE_ID_PATTERN.fullmatch(tenant_id)
+                or not isinstance(draft_id, str)
+                or not SERVER_SCOPE_ID_PATTERN.fullmatch(draft_id)
+                or not isinstance(rule_domains, list)
+                or len(rule_domains) != 1
+                or not isinstance(rule_environments, list)
+                or rule_environments != [environment]
+                or not isinstance(actions, list)
+                or not actions
+                or any(not isinstance(action, str) or action not in ALL_ACTIONS for action in actions)
+                or len(actions) != len(set(actions))
+            ):
+                raise ValueError("authorization rule values are invalid")
+            domain = _strict_domain(rule_domains[0], "authorization domain")
+            if (
+                role_arn in role_arns
+                or domain in domains
+                or draft_id in draft_ids
+            ):
+                raise ValueError("authorization rule ownership is ambiguous")
+            role_arns.add(role_arn)
+            domains.add(domain)
+            draft_ids.add(draft_id)
+            validated.append(entry)
+    except ValueError:
+        log("ERROR", "Deploy authorization config S3 object is not exact")
+        return []
+    return validated
 
 
 def _extract_nested(mapping: Any, path: list[str]) -> Any:
@@ -287,54 +406,69 @@ def _role_arn_matches(rule_arn: str, caller_arn: str) -> bool:
     )
 
 
-def _string_list(value: Any) -> list[str]:
-    if isinstance(value, list):
-        return [str(item).strip() for item in value if str(item).strip()]
-    if isinstance(value, str) and value.strip():
-        return [value.strip()]
-    return []
+def _authorized_server_scope(rule: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    tenant_id = rule.get("tenantId")
+    draft_id = rule.get("draftId")
+    if not isinstance(tenant_id, str) or not SERVER_SCOPE_ID_PATTERN.fullmatch(tenant_id):
+        return None
+    if not isinstance(draft_id, str) or not SERVER_SCOPE_ID_PATTERN.fullmatch(draft_id):
+        return None
+    return {"tenantId": tenant_id, "draftId": draft_id}
 
 
 def _rule_allows(rule: Dict[str, Any], caller_arn: str, action: str, domain: str, environment: str) -> bool:
-    role_arns = _string_list(rule.get("roleArn")) + _string_list(rule.get("roleArns"))
-    actions = set(_string_list(rule.get("actions")))
-    domain_values = _string_list(rule.get("domains"))
-    environment_values = _string_list(rule.get("environments"))
-    if not role_arns or not actions or not domain_values or not environment_values:
+    role_arn = rule.get("roleArn")
+    actions = rule.get("actions")
+    domain_values = rule.get("domains")
+    environment_values = rule.get("environments")
+    if (
+        not isinstance(role_arn, str)
+        or not isinstance(actions, list)
+        or not isinstance(domain_values, list)
+        or not isinstance(environment_values, list)
+        or _authorized_server_scope(rule) is None
+    ):
         return False
-    if not any(_role_arn_matches(role_arn, caller_arn) for role_arn in role_arns):
+    if not _role_arn_matches(role_arn, caller_arn):
         return False
-
-    if action not in actions and "*" not in actions:
+    if action not in actions:
         return False
-
-    try:
-        domains = {"*" if item == "*" else _strict_domain(item, "authorization domain") for item in domain_values}
-        environments = {"*" if item == "*" else _normalize_environment(item) for item in environment_values}
-    except ValueError:
+    if domain_values != [domain]:
         return False
-    if domain not in domains and "*" not in domains:
+    if environment_values != [environment]:
         return False
-
-    if environment not in environments and "*" not in environments:
-        return False
-
     return True
 
 
-def _authorize_request(event: Dict[str, Any], payload: Dict[str, Any], action: str) -> tuple[bool, str]:
+def _authorize_request(
+    event: Dict[str, Any],
+    payload: Dict[str, Any],
+    action: str,
+) -> tuple[bool, str, Optional[Dict[str, str]]]:
     domain = _strict_domain(payload.get("domain"))
     environment = _normalize_environment(payload.get("environment") or payload.get("stageEnvironment"))
 
     caller_arn = _caller_arn(event)
     if not caller_arn:
-        return False, "Missing signed deploy identity"
+        return False, "Missing signed deploy identity", None
 
-    for rule in _load_deploy_authz_config():
-        if _rule_allows(rule, caller_arn, action, domain, environment):
-            return True, caller_arn
+    matching_scopes = [
+        _authorized_server_scope(rule)
+        for rule in _load_deploy_authz_config()
+        if _rule_allows(rule, caller_arn, action, domain, environment)
+    ]
+    unique_scopes = {
+        (scope["tenantId"], scope["draftId"])
+        for scope in matching_scopes
+        if scope is not None
+    }
+    if len(unique_scopes) == 1:
+        tenant_id, draft_id = next(iter(unique_scopes))
+        return True, caller_arn, {"tenantId": tenant_id, "draftId": draft_id}
+    if len(unique_scopes) > 1:
+        return False, "Deploy identity has ambiguous server scope authorization", None
 
-    return False, "Deploy identity is not authorized for this action, domain, and environment"
+    return False, "Deploy identity is not authorized for this action, domain, environment, and server scope", None
 
 
 def _updated_by(payload: Dict[str, Any], request_id: str) -> str:
@@ -342,11 +476,41 @@ def _updated_by(payload: Dict[str, Any], request_id: str) -> str:
     return trusted_identity or request_id
 
 
-def _normalize_files(domain: str, files: Any) -> list[Dict[str, Any]]:
+def _request_server_scope(payload: Dict[str, Any]) -> Dict[str, str]:
+    scope = payload.get("_authorizedServerScope")
+    if not isinstance(scope, dict) or set(scope) != {"tenantId", "draftId"}:
+        raise PolicyValidationError("scope_binding_mismatch")
+    tenant_id = scope.get("tenantId")
+    draft_id = scope.get("draftId")
+    if (
+        not isinstance(tenant_id, str)
+        or not SERVER_SCOPE_ID_PATTERN.fullmatch(tenant_id)
+        or not isinstance(draft_id, str)
+        or not SERVER_SCOPE_ID_PATTERN.fullmatch(draft_id)
+    ):
+        raise PolicyValidationError("scope_binding_mismatch")
+    return {"tenantId": tenant_id, "draftId": draft_id}
+
+
+def _assert_metadata_server_scope(metadata: Dict[str, Any], expected_scope: Dict[str, str]) -> None:
+    pinned_scope = metadata.get("serverScope")
+    if pinned_scope is None:
+        return
+    if not isinstance(pinned_scope, dict) or pinned_scope != expected_scope:
+        raise PolicyValidationError("scope_binding_mismatch")
+
+
+def _normalize_files(
+    domain: str,
+    environment: str,
+    files: Any,
+    expected_scope: Optional[Dict[str, str]] = None,
+) -> list[Dict[str, Any]]:
     if not isinstance(files, list) or not files:
         raise ValueError("files must be a non-empty array")
 
     normalized: list[Dict[str, Any]] = []
+    seen_paths: set[str] = set()
     for entry in files:
         if not isinstance(entry, dict):
             raise ValueError("Each file entry must be an object")
@@ -355,22 +519,34 @@ def _normalize_files(domain: str, files: Any) -> list[Dict[str, Any]]:
         if not isinstance(raw_path, str) or not raw_path or raw_path != raw_path.strip():
             raise ValueError("Each file entry requires a path")
         path = raw_path
+        if path in seen_paths:
+            raise ValueError("duplicate_path")
+        seen_paths.add(path)
         parts = path.split("/")
+        try:
+            decoded_parts = [_decode_draft_path_segment(part) for part in parts]
+        except ValueError:
+            raise ValueError("Each file entry path must be a strict JSON path below the requested domain") from None
+        server_segments = [index for index, part in enumerate(decoded_parts) if part.casefold() == "server"]
+        if server_segments and (len(parts) != 3 or parts[1] != "server"):
+            raise ValueError("invalid_server_path")
         if (
             path != unicodedata.normalize("NFC", path)
             or "\\" in path
             or WINDOWS_INVALID_PATH_CHARACTER_PATTERN.search(path)
             or path.startswith("/")
             or _has_unsafe_unicode_path_character(path)
+            or any(part != unicodedata.normalize("NFC", part) for part in decoded_parts)
             or len(parts) < 2
             or parts[0] != domain
             or any(not part or part in {".", ".."} for part in parts)
-            or any(part.endswith((".", " ")) for part in parts)
-            or any(_is_windows_reserved_path_segment(part) for part in parts)
+            or any(part in {".", ".."} for part in decoded_parts)
+            or any(part.endswith((".", " ")) for part in decoded_parts)
+            or any(_is_windows_reserved_path_segment(part) for part in decoded_parts)
             or any(
                 part.casefold() in LOCAL_DRAFT_CONTEXT_FOLDERS
                 or part.casefold() in LOCAL_DRAFT_CONTEXT_FILES
-                for part in parts[1:]
+                for part in decoded_parts[1:]
             )
             or not path.endswith(".json")
         ):
@@ -380,30 +556,133 @@ def _normalize_files(domain: str, files: Any) -> list[Dict[str, Any]]:
             raise ValueError("Each file entry content must be a JSON object")
         _content_hub_file_info(domain, path)
 
+        inferred_kind = _infer_kind(path)
+        supplied_kind = entry.get("kind")
+        if supplied_kind not in {None, ""} and supplied_kind != inferred_kind:
+            raise ValueError("kind_mismatch")
+
         normalized.append({
             "path": path,
-            "kind": entry.get("kind"),
+            "kind": inferred_kind,
             "pageId": entry.get("pageId"),
             "lang": entry.get("lang"),
             "content": content,
         })
 
+    validate_server_policy_files(domain, environment, normalized, expected_scope=expected_scope)
     return normalized
 
 
-def _store_files(domain: str, version_id: str, files: list[Dict[str, Any]]) -> str:
+def _json_payload_bytes(payload: Dict[str, Any]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def _store_files(domain: str, version_id: str, environment: str, files: list[Dict[str, Any]]) -> str:
     prefix = default_version_prefix(domain, version_id)
-    for entry in files:
-        key = join_s3_key(prefix, entry["path"])
-        put_json_to_s3(CONFIG_PAYLOADS_BUCKET_NAME, key, entry["content"])
+    if list_object_keys(CONFIG_PAYLOADS_BUCKET_NAME, prefix):
+        raise VersionAlreadyExistsError()
+
+    manifest_files = []
+    for entry in sorted(files, key=lambda item: item["path"]):
+        manifest_files.append({
+            "path": entry["path"],
+            "kind": entry["kind"],
+            "sha256": hashlib.sha256(_json_payload_bytes(entry["content"])).hexdigest(),
+        })
+    try:
+        put_json_to_s3_if_absent(CONFIG_PAYLOADS_BUCKET_NAME, join_s3_key(prefix, MANIFEST_FILE_NAME), {
+            "version": 1,
+            "domain": domain,
+            "environment": environment,
+            "versionId": version_id,
+            "files": manifest_files,
+        })
+        for entry in sorted(files, key=lambda item: item["path"]):
+            put_json_to_s3_if_absent(
+                CONFIG_PAYLOADS_BUCKET_NAME,
+                join_s3_key(prefix, entry["path"]),
+                entry["content"],
+            )
+    except ObjectAlreadyExistsError:
+        raise VersionAlreadyExistsError() from None
     return prefix
 
 
+def _load_integrity_checked_stored_files(
+    domain: str,
+    environment: str,
+    version_id: str,
+) -> tuple[str, list[Dict[str, Any]]]:
+    prefix = default_version_prefix(domain, version_id)
+    manifest_key = join_s3_key(prefix, MANIFEST_FILE_NAME)
+    manifest = load_json_from_s3(CONFIG_PAYLOADS_BUCKET_NAME, manifest_key)
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"version", "domain", "environment", "versionId", "files"}
+        or manifest.get("version") != 1
+        or manifest.get("domain") != domain
+        or manifest.get("environment") != environment
+        or manifest.get("versionId") != version_id
+        or not isinstance(manifest.get("files"), list)
+        or not manifest["files"]
+    ):
+        raise StoredPackageError()
+
+    raw_files: list[Dict[str, Any]] = []
+    expected_keys = {manifest_key}
+    seen_paths: set[str] = set()
+    for manifest_entry in manifest["files"]:
+        if (
+            not isinstance(manifest_entry, dict)
+            or set(manifest_entry) != {"path", "kind", "sha256"}
+            or not isinstance(manifest_entry.get("path"), str)
+            or not isinstance(manifest_entry.get("kind"), str)
+            or not isinstance(manifest_entry.get("sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", manifest_entry["sha256"])
+            or manifest_entry["path"] in seen_paths
+        ):
+            raise StoredPackageError()
+        seen_paths.add(manifest_entry["path"])
+        key = join_s3_key(prefix, manifest_entry["path"])
+        expected_keys.add(key)
+        content = load_json_from_s3(CONFIG_PAYLOADS_BUCKET_NAME, key)
+        if not isinstance(content, dict):
+            raise StoredPackageError()
+        if hashlib.sha256(_json_payload_bytes(content)).hexdigest() != manifest_entry["sha256"]:
+            raise StoredPackageError()
+        raw_files.append({
+            "path": manifest_entry["path"],
+            "kind": manifest_entry["kind"],
+            "content": content,
+        })
+
+    if set(list_object_keys(CONFIG_PAYLOADS_BUCKET_NAME, prefix)) != expected_keys:
+        raise StoredPackageError()
+    return prefix, raw_files
+
+
+def _load_validated_stored_files(
+    domain: str,
+    environment: str,
+    version_id: str,
+    expected_scope: Optional[Dict[str, str]] = None,
+) -> tuple[str, list[Dict[str, Any]]]:
+    prefix, raw_files = _load_integrity_checked_stored_files(domain, environment, version_id)
+    try:
+        normalized = _normalize_files(domain, environment, raw_files, expected_scope=expected_scope)
+    except (PolicyValidationError, ValueError):
+        raise StoredPackageError() from None
+    return prefix, normalized
+
+
 def _load_package(domain: str, stage: str, version_id: str, prefix: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    prefix = default_version_prefix(domain, version_id)
     keys = list_json_keys(CONFIG_PAYLOADS_BUCKET_NAME, prefix)
     files: list[Dict[str, Any]] = []
     for key in keys:
         relative_key = key[len(prefix):].lstrip('/')
+        if relative_key == MANIFEST_FILE_NAME:
+            continue
         content = load_json_from_s3(CONFIG_PAYLOADS_BUCKET_NAME, key)
         if content is None:
             continue
@@ -434,6 +713,19 @@ def _load_package(domain: str, stage: str, version_id: str, prefix: str, metadat
 
 
 def _infer_kind(relative_path: str) -> str:
+    server_kinds = {
+        "server/auth-profile-registry.json": "server-auth-profile-registry",
+        "server/integrations.json": "server-integrations",
+        "server/data-spaces.json": "server-data-spaces",
+        "server/commerce.json": "server-commerce",
+        "server/integration-bindings.json": "server-integration-bindings",
+        "server/notification-policies.json": "server-notification-policies",
+    }
+    package_path = relative_path.split("/", 1)[1] if "/" in relative_path else relative_path
+    if package_path.startswith("server/"):
+        if package_path not in server_kinds:
+            raise ValueError("unknown_server_descriptor")
+        return server_kinds[package_path]
     if relative_path.endswith("site-config.json"):
         return "site-config"
     if relative_path.endswith("/components.json") and relative_path.count("/") == 1:
@@ -463,7 +755,7 @@ def _infer_page_id(domain: str, relative_path: str) -> Optional[str]:
         return None
     if parts[0] != domain:
         return None
-    if len(parts) >= 3 and parts[1] != 'i18n':
+    if len(parts) >= 3 and parts[1] not in {'i18n', 'server'}:
         return parts[1]
     return None
 
@@ -479,28 +771,38 @@ def _load_registry(domain: str) -> Optional[Dict[str, Any]]:
     return load_item(CONFIG_TABLE_NAME, site_pk(domain))
 
 
-def _save_registry(metadata: Dict[str, Any]) -> None:
-    put_item(CONFIG_TABLE_NAME, metadata)
+def _save_registry_conditionally(metadata: Dict[str, Any], expected_revision: int) -> None:
+    put_item_if_revision(CONFIG_TABLE_NAME, metadata, expected_revision)
 
 
 def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     domain = _strict_domain(payload.get("domain"))
+    environment = _normalize_environment(payload.get("environment"))
+    authorized_scope = _request_server_scope(payload)
     if "publishOnCreate" in payload:
         return bad_request("publishOnCreate is not supported; use the separately authorized publishDraft action")
 
-    files = _normalize_files(domain, payload.get("files"))
-    existing = _load_registry(domain)
-    if payload.get("action") == "createSite" and existing and not payload.get("allowOverwrite"):
+    files = _normalize_files(
+        domain,
+        environment,
+        payload.get("files"),
+        expected_scope=authorized_scope,
+    )
+    loaded_existing = _load_registry(domain)
+    if loaded_existing:
+        _assert_metadata_server_scope(loaded_existing, authorized_scope)
+    if payload.get("action") == "createSite" and loaded_existing and not payload.get("allowOverwrite"):
         return conflict("Site already exists", domain=domain)
 
     raw_version_id = payload["versionId"] if "versionId" in payload else build_version_id(request_id)
     version_id = _strict_version_id(raw_version_id)
     derived = _derive_site_fields(domain, files)
-    prefix = _store_files(domain, version_id, files)
+    prefix = _store_files(domain, version_id, environment, files)
     updated_at = now_iso()
     updated_by = _updated_by(payload, request_id)
 
-    metadata = existing or {
+    expected_revision = int((loaded_existing or {}).get("revision") or 0)
+    metadata = copy.deepcopy(loaded_existing) if loaded_existing else {
         "pk": site_pk(domain),
         "sk": "METADATA",
         "type": "site-metadata",
@@ -509,18 +811,21 @@ def _create_or_replace_draft(payload: Dict[str, Any], request_id: str) -> Dict[s
         "lifecycle": _initial_lifecycle(updated_at, updated_by),
     }
     metadata["defaultPageId"] = derived["defaultPageId"]
+    metadata["serverScope"] = authorized_scope
     metadata["routes"] = derived["routes"]
     metadata["contentHubs"] = derived["contentHubs"]
     metadata["draft"] = {
         "versionId": version_id,
         "prefix": prefix,
+        "manifestVersion": 1,
         "updatedAt": updated_at,
         "updatedBy": updated_by,
     }
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = updated_by
+    metadata["revision"] = expected_revision + 1
 
-    _save_registry(metadata)
+    _save_registry_conditionally(metadata, expected_revision)
     return ok({
         "domain": domain,
         "draft": metadata.get("draft"),
@@ -539,6 +844,7 @@ def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
     metadata = _load_registry(domain)
     if not metadata:
         return not_found("Site metadata not found", domain=domain)
+    _assert_metadata_server_scope(metadata, _request_server_scope(payload))
 
     pointer = metadata.get(stage)
     if stage == "published":
@@ -552,7 +858,35 @@ def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     version_id = str(pointer.get("versionId") or "").strip()
     prefix = str(pointer.get("prefix") or default_version_prefix(domain, version_id)).strip()
-    package = _load_package(domain, stage, version_id, prefix, metadata)
+    manifest_key = join_s3_key(default_version_prefix(domain, version_id), MANIFEST_FILE_NAME)
+    manifest = load_json_from_s3(CONFIG_PAYLOADS_BUCKET_NAME, manifest_key)
+    if manifest is None and pointer.get("manifestVersion") != 1:
+        package = _load_package(domain, stage, version_id, prefix, metadata)
+    else:
+        _verified_prefix, verified_files = _load_integrity_checked_stored_files(domain, environment, version_id)
+        package = {
+            "version": 1,
+            "domain": domain,
+            "stage": stage,
+            "versionId": version_id,
+            "files": [
+                {
+                    **entry,
+                    "pageId": _infer_page_id(domain, entry["path"]),
+                    "lang": _infer_lang(entry["path"]),
+                }
+                for entry in verified_files
+            ],
+            "metadata": {
+                "registry": {
+                    "aliases": metadata.get("aliases", []),
+                    "environmentAliases": metadata.get("environmentAliases", {}),
+                    "defaultPageId": metadata.get("defaultPageId"),
+                    "routes": metadata.get("routes", []),
+                    "lifecycle": metadata.get("lifecycle", {}),
+                },
+            },
+        }
     package["environment"] = environment
     return ok(package)
 
@@ -560,32 +894,45 @@ def _get_site(payload: Dict[str, Any]) -> Dict[str, Any]:
 def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     domain = _strict_domain(payload.get("domain"))
     environment = _normalize_environment(payload.get("environment"))
-    metadata = _load_registry(domain)
-    if not metadata:
+    loaded_metadata = _load_registry(domain)
+    if not loaded_metadata:
         return not_found("Site metadata not found", domain=domain)
+    authorized_scope = _request_server_scope(payload)
+    _assert_metadata_server_scope(loaded_metadata, authorized_scope)
 
-    draft_pointer = metadata.get("draft")
+    draft_pointer = loaded_metadata.get("draft")
     if not isinstance(draft_pointer, dict):
         return not_found("Draft package not found", domain=domain)
 
-    requested_version_id = str(payload.get("versionId") or draft_pointer.get("versionId") or "").strip()
-    if requested_version_id and requested_version_id != str(draft_pointer.get("versionId") or ""):
-        return bad_request("Only the current draft version can be published in this initial implementation")
+    requested_version_id = _strict_version_id(payload.get("versionId") or draft_pointer.get("versionId"))
+    prefix, stored_files = _load_validated_stored_files(
+        domain,
+        environment,
+        requested_version_id,
+        expected_scope=authorized_scope,
+    )
+    validate_notification_secrets(stored_files, environment, describe_secret)
 
+    expected_revision = int(loaded_metadata.get("revision") or 0)
+    metadata = copy.deepcopy(loaded_metadata)
     updated_at = now_iso()
     published_pointer = {
-        **draft_pointer,
+        "versionId": requested_version_id,
+        "prefix": prefix,
+        "manifestVersion": 1,
         "updatedAt": updated_at,
         "updatedBy": _updated_by(payload, request_id),
     }
     published_environments = metadata.get("publishedEnvironments") if isinstance(metadata.get("publishedEnvironments"), dict) else {}
     published_environments[environment] = published_pointer
     metadata["publishedEnvironments"] = published_environments
+    metadata["serverScope"] = authorized_scope
     if environment == "production":
         metadata["published"] = published_pointer
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = _updated_by(payload, request_id)
-    _save_registry(metadata)
+    metadata["revision"] = expected_revision + 1
+    _save_registry_conditionally(metadata, expected_revision)
     return ok({
         "domain": domain,
         "environment": environment,
@@ -601,10 +948,14 @@ def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]
     if status not in {"active", "maintenance", "suspended"}:
         return bad_request("status must be one of: active, maintenance, suspended")
 
-    metadata = _load_registry(domain)
-    if not metadata:
+    loaded_metadata = _load_registry(domain)
+    if not loaded_metadata:
         return not_found("Site metadata not found", domain=domain)
+    authorized_scope = _request_server_scope(payload)
+    _assert_metadata_server_scope(loaded_metadata, authorized_scope)
 
+    expected_revision = int(loaded_metadata.get("revision") or 0)
+    metadata = copy.deepcopy(loaded_metadata)
     updated_at = now_iso()
     lifecycle = metadata.get("lifecycle") if isinstance(metadata.get("lifecycle"), dict) else {}
     lifecycle.update({
@@ -618,9 +969,11 @@ def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]
         "updatedBy": _updated_by(payload, request_id),
     })
     metadata["lifecycle"] = lifecycle
+    metadata["serverScope"] = authorized_scope
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = _updated_by(payload, request_id)
-    _save_registry(metadata)
+    metadata["revision"] = expected_revision + 1
+    _save_registry_conditionally(metadata, expected_revision)
     return ok({"domain": domain, "lifecycle": lifecycle})
 
 
@@ -628,10 +981,10 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     request_id = get_request_id(context)
     try:
         payload = parse_json_body(event)
-    except ValueError as exc:
-        return bad_request(str(exc))
-    except Exception as exc:
-        log("ERROR", "Invalid authoring request body", requestId=request_id, error=str(exc))
+    except ValueError:
+        return bad_request("invalid_request_body")
+    except Exception:
+        log("ERROR", "Invalid authoring request body", requestId=request_id, errorCode="invalid_request_body")
         return bad_request("Body is not valid JSON")
 
     action = str(payload.get("action") or "").strip()
@@ -639,10 +992,12 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         return bad_request("Unsupported action")
 
     try:
-        authorized, auth_message = _authorize_request(event, payload, action)
+        _assert_stack_environment(payload)
+        authorized, auth_message, authorized_scope = _authorize_request(event, payload, action)
         if not authorized:
             return unauthorized(auth_message)
         payload["_authorizedUpdatedBy"] = _role_name_from_arn(auth_message) or auth_message
+        payload["_authorizedServerScope"] = authorized_scope
 
         if action in {"createSite", "upsertDraft"}:
             return _create_or_replace_draft(payload, request_id)
@@ -651,8 +1006,16 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         if action == "publishDraft":
             return _publish_draft(payload, request_id)
         return _set_site_status(payload, request_id)
+    except VersionAlreadyExistsError:
+        return conflict("version_already_exists")
+    except RevisionConflictError:
+        return conflict("registry_revision_conflict")
+    except PolicyValidationError as exc:
+        return bad_request(exc.public_code)
+    except StoredPackageError:
+        return bad_request("stored_package_invalid")
     except ValueError as exc:
-        return bad_request(str(exc))
-    except Exception as exc:
-        log("ERROR", "Config authoring lambda failed", requestId=request_id, action=action, error=str(exc))
+        return bad_request(_safe_validation_code(exc))
+    except Exception:
+        log("ERROR", "Config authoring lambda failed", requestId=request_id, action=action, errorCode="authoring_internal_error")
         return server_error()
