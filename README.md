@@ -51,6 +51,8 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 
 ## Deploy
 
+`ConfigAuthoringFunction` uses the generated `.build/config-authoring` `CodeUri`. Run `python tools/build_lambda_artifact.py` before `sam validate` or `sam build`; the builder copies only the two runtime Python modules. CI and both deploy workflows verify the exact built inventory before AWS credentials are configured. `.aws-samignore` is defense in depth, not artifact evidence.
+
 For repeatable deployments from this repository:
 
 ```bash
