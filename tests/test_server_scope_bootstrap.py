@@ -342,6 +342,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             bootstrap.require_stable_scope_bytes(b"test", b"production")
 
     def test_test_green_evidence_is_machine_verified_and_hash_approved(self):
+        owner = "LynxPardelle"
         canary_repo = "draft-pokeapi-demo-zoolandingpage-com-mx"
         scope_bytes = bootstrap.canonical_json_bytes({"version": 1, "scopes": [{
             "domain": "pokeapi-demo.zoolandingpage.com.mx",
@@ -363,7 +364,11 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             }
 
         commit = "a" * 40
-        api_url = "https://example.execute-api.us-east-1.amazonaws.com/Prod/config-authoring"
+        canary_commit = "b" * 40
+        canary_base_commit = "d" * 40
+        canary_dev_commit = "e" * 40
+        canary_tree = "f" * 40
+        authoring_endpoint = "https://example.lambda-url.us-east-1.on.aws/"
         scope_head = head(scope_bytes, '"scope"', "scope-version")
         authz_head = head(authz_bytes, '"authz"', "authz-version")
         snapshot = {
@@ -376,6 +381,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             },
             "run": {
                 "databaseId": 123,
+                "runAttempt": 1,
                 "status": "completed",
                 "conclusion": "success",
                 "headSha": commit,
@@ -386,7 +392,38 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                 "path": ".github/workflows/deploy-test.yml",
                 "updatedAt": "2026-07-14T20:00:00Z",
             },
-            "canaryRef": {"object": {"sha": "b" * 40, "type": "commit"}},
+            "canaryRef": {"object": {"sha": canary_commit, "type": "commit"}},
+            "canaryCommit": {
+                "sha": canary_commit,
+                "tree": {"sha": canary_tree},
+                "parents": [
+                    {"sha": canary_base_commit},
+                    {"sha": canary_dev_commit},
+                ],
+            },
+            "canaryDevRef": {
+                "object": {"sha": canary_dev_commit, "type": "commit"},
+            },
+            "canaryDevCommit": {
+                "sha": canary_dev_commit,
+                "tree": {"sha": canary_tree},
+            },
+            "canaryPulls": [{
+                "number": 8,
+                "state": "closed",
+                "merged_at": "2026-07-14T20:03:00Z",
+                "merge_commit_sha": canary_commit,
+                "base": {
+                    "ref": "test",
+                    "sha": canary_base_commit,
+                    "repo": {"full_name": f"{owner}/{canary_repo}"},
+                },
+                "head": {
+                    "ref": "dev",
+                    "sha": canary_dev_commit,
+                    "repo": {"full_name": f"{owner}/{canary_repo}"},
+                },
+            }],
             "canaryWorkflow": {
                 "id": 222,
                 "name": "Deploy test draft",
@@ -395,9 +432,10 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             },
             "canaryRun": {
                 "databaseId": 456,
+                "runAttempt": 1,
                 "status": "completed",
                 "conclusion": "success",
-                "headSha": "b" * 40,
+                "headSha": canary_commit,
                 "headBranch": "test",
                 "event": "workflow_dispatch",
                 "workflowName": "Deploy test draft",
@@ -407,7 +445,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             },
             "canaryAuthoringEndpoint": {
                 "name": "AUTHORING_ENDPOINT",
-                "value": api_url,
+                "value": authoring_endpoint,
                 "updatedAt": "2026-07-14T20:04:00Z",
             },
             "canaryBinding": {
@@ -426,7 +464,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                     {"ParameterKey": "LogLevel", "ParameterValue": "INFO"},
                     {"ParameterKey": "DeployAuthzConfigS3Key", "ParameterValue": bootstrap.AUTHZ_KEY},
                 ],
-                "Outputs": [{"OutputKey": "ApiUrl", "OutputValue": api_url}],
+                "Outputs": [{"OutputKey": "FunctionUrl", "OutputValue": authoring_endpoint}],
             }]},
             "stackResource": {"StackResourceDetail": {
                 "PhysicalResourceId": "zoolanding-config-authoring-test-function",
@@ -434,6 +472,10 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             }},
             "function": {
                 "FunctionName": "zoolanding-config-authoring-test-function",
+                "FunctionArn": (
+                    "arn:aws:lambda:us-east-1:123456789012:"
+                    "function:zoolanding-config-authoring-test-function"
+                ),
                 "Runtime": "python3.13",
                 "State": "Active",
                 "LastUpdateStatus": "Successful",
@@ -446,6 +488,15 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                     "LOG_LEVEL": "INFO",
                     "DEPLOY_AUTHZ_CONFIG_S3_KEY": bootstrap.AUTHZ_KEY,
                 }},
+            },
+            "functionUrlConfig": {
+                "FunctionUrl": authoring_endpoint,
+                "FunctionArn": (
+                    "arn:aws:lambda:us-east-1:123456789012:"
+                    "function:zoolanding-config-authoring-test-function"
+                ),
+                "AuthType": "AWS_IAM",
+                "InvokeMode": "BUFFERED",
             },
             "artifactEvidence": {
                 "sourceCommit": commit,
@@ -465,9 +516,36 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             "authzVersioned": authz_bytes,
             "unsignedApiStatus": 403,
         }
+        snapshot["finalState"] = {
+            key: copy.deepcopy(snapshot[key])
+            for key in (
+                "remoteRef",
+                "authoringWorkflow",
+                "run",
+                "canaryRef",
+                "canaryWorkflow",
+                "canaryRun",
+                "canaryCommit",
+                "canaryDevRef",
+                "canaryDevCommit",
+                "canaryPulls",
+                "canaryAuthoringEndpoint",
+                "stack",
+                "stackResource",
+                "function",
+                "functionUrlConfig",
+                "bucketState",
+                "scopeHead",
+                "authzHead",
+                "scopeCurrent",
+                "authzCurrent",
+                "unsignedApiStatus",
+            )
+        }
 
         evidence = bootstrap.validate_test_green_snapshot(
             snapshot,
+            owner=owner,
             test_commit=commit,
             test_run_id=123,
             canary_repo=canary_repo,
@@ -482,18 +560,29 @@ class ServerScopeBootstrapTests(unittest.TestCase):
 
         for path, bad_value in (
             (("run", "conclusion"), "failure"),
+            (("run", "runAttempt"), 2),
             (("run", "headBranch"), "dev"),
             (("run", "path"), ".github/workflows/no-op.yml"),
+            (("run", "updatedAt"), "2026-07-14T20:05:00Z"),
             (("canaryRun", "conclusion"), "failure"),
+            (("canaryRun", "runAttempt"), 2),
+            (("canaryRun", "event"), "push"),
             (("canaryRun", "path"), ".github/workflows/no-op.yml"),
-            (("canaryAuthoringEndpoint", "value"), "https://other.execute-api.us-east-1.amazonaws.com/Prod/config-authoring"),
+            (("canaryAuthoringEndpoint", "value"), "https://other.lambda-url.us-east-1.on.aws/"),
             (("canaryAuthoringEndpoint", "updatedAt"), "2026-07-14T20:05:00Z"),
             (("canaryAuthoringEndpoint", "updatedAt"), "2026-07-14T20:06:00Z"),
             (("canaryBinding", "scopeVersionId"), "stale-scope-version"),
             (("canaryBinding", "authzSha256"), "0" * 64),
+            (("stack", "Stacks", 0, "Outputs", 0, "OutputKey"), "ApiUrl"),
+            (("scopeHead", "lastModified"), "2026-07-14T20:05:00+00:00"),
             (("scopeHead", "lastModified"), "2026-07-14T20:06:00+00:00"),
+            (("authzHead", "lastModified"), "2026-07-14T20:05:00+00:00"),
             (("function", "LastUpdateStatus"), "Failed"),
             (("function", "CodeSha256"), "manually-drifted-code"),
+            (("functionUrlConfig", "AuthType"), "NONE"),
+            (("functionUrlConfig", "FunctionArn"), "arn:aws:lambda:us-east-1:123456789012:function:other"),
+            (("functionUrlConfig", "FunctionUrl"), "https://other.lambda-url.us-east-1.on.aws/"),
+            (("functionUrlConfig", "InvokeMode"), "RESPONSE_STREAM"),
             (("bucketState", "versioning"), "Suspended"),
             (("unsignedApiStatus",), 200),
         ):
@@ -506,6 +595,69 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                 with self.assertRaises(bootstrap.BootstrapError):
                     bootstrap.validate_test_green_snapshot(
                         broken,
+                        owner=owner,
+                        test_commit=commit,
+                        test_run_id=123,
+                        canary_repo=canary_repo,
+                        canary_run_id=456,
+                        expected_scope_bytes=scope_bytes,
+                        expected_authz_bytes=authz_bytes,
+                    )
+
+        for path, bad_value in (
+            (("remoteRef", "object", "sha"), "9" * 40),
+            (("run", "status"), "in_progress"),
+            (("canaryRef", "object", "sha"), "8" * 40),
+            (("canaryRun", "runAttempt"), 2),
+            (("canaryDevRef", "object", "sha"), "7" * 40),
+            (("canaryAuthoringEndpoint", "updatedAt"), "2026-07-14T20:04:30Z"),
+            (("stack", "Stacks", 0, "Outputs", 0, "OutputValue"), "https://other.lambda-url.us-east-1.on.aws/"),
+            (("function", "CodeSha256"), "concurrently-drifted-code"),
+            (("functionUrlConfig", "AuthType"), "NONE"),
+            (("scopeHead", "versionId"), "later-scope-version"),
+            (("authzCurrent",), b"later-authorization"),
+            (("unsignedApiStatus",), 200),
+        ):
+            with self.subTest(final_state_path=path, bad_value=bad_value):
+                broken = copy.deepcopy(snapshot)
+                target = broken["finalState"]
+                for part in path[:-1]:
+                    target = target[part]
+                target[path[-1]] = bad_value
+                with self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap.validate_test_green_snapshot(
+                        broken,
+                        owner=owner,
+                        test_commit=commit,
+                        test_run_id=123,
+                        canary_repo=canary_repo,
+                        canary_run_id=456,
+                        expected_scope_bytes=scope_bytes,
+                        expected_authz_bytes=authz_bytes,
+                    )
+
+        for path, bad_value in (
+            (("canaryCommit", "parents"), [{"sha": canary_base_commit}]),
+            (("canaryDevRef", "object", "sha"), "9" * 40),
+            (("canaryDevCommit", "tree", "sha"), "8" * 40),
+            (("canaryPulls", 0, "state"), "open"),
+            (("canaryPulls", 0, "base", "ref"), "main"),
+            (("canaryPulls", 0, "base", "sha"), "7" * 40),
+            (("canaryPulls", 0, "head", "sha"), "6" * 40),
+            (("canaryPulls", 0, "head", "repo", "full_name"), f"other/{canary_repo}"),
+            (("canaryPulls", 0, "merged_at"), "2026-07-14T20:06:00Z"),
+            (("canaryPulls",), []),
+        ):
+            with self.subTest(provenance_path=path, bad_value=bad_value):
+                broken = copy.deepcopy(snapshot)
+                target = broken
+                for part in path[:-1]:
+                    target = target[part]
+                target[path[-1]] = bad_value
+                with self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap.validate_test_green_snapshot(
+                        broken,
+                        owner=owner,
                         test_commit=commit,
                         test_run_id=123,
                         canary_repo=canary_repo,
