@@ -29,7 +29,8 @@ import zipfile
 from zoneinfo import ZoneInfo
 
 
-AUTHZ_KEY = "system/deploy-authz.json"
+LEGACY_AUTHZ_KEY = "system/deploy-authz.json"
+AUTHZ_KEY = "system/deploy-authz-v2.json"
 SCOPE_KEY = "system/server-scopes.json"
 ENVIRONMENTS = ("test", "production")
 ENVIRONMENT_BUCKETS = {
@@ -1278,12 +1279,19 @@ def apply_private_bundle(
         raise BootstrapError("all S3 public access block controls must be enabled")
 
     current_authz = s3.head_object(bucket, AUTHZ_KEY, expected_owner)
-    if (
-        not current_authz
-        or current_authz.get("etag") != expected_current_authz_etag
-        or current_authz.get("versionId") != expected_current_authz_version_id
-    ):
-        raise BootstrapError("authorization object changed after review")
+    previous_authz: Optional[dict[str, str]] = None
+    if current_authz is None:
+        if (
+            expected_current_authz_etag != "MISSING"
+            or expected_current_authz_version_id != "MISSING"
+        ):
+            raise BootstrapError("authorization object presence changed after review")
+    else:
+        if (
+            current_authz.get("etag") != expected_current_authz_etag
+            or current_authz.get("versionId") != expected_current_authz_version_id
+        ):
+            raise BootstrapError("authorization object changed after review")
     scope_head = s3.head_object(bucket, SCOPE_KEY, expected_owner)
     scope_result: dict[str, str]
     scope_written = False
@@ -1355,19 +1363,26 @@ def apply_private_bundle(
                 result=scope_result,
             )
 
-    previous_authz_body = _read_stable_versioned_object(
-        s3,
-        bucket=bucket,
-        key=AUTHZ_KEY,
-        expected_owner=expected_owner,
-        head=current_authz,
-    )
+    if current_authz is not None:
+        previous_authz_body = _read_stable_versioned_object(
+            s3,
+            bucket=bucket,
+            key=AUTHZ_KEY,
+            expected_owner=expected_owner,
+            head=current_authz,
+        )
+        previous_authz = {
+            "etag": expected_current_authz_etag,
+            "versionId": expected_current_authz_version_id,
+            "sha256": sha256_hex(previous_authz_body),
+        }
     authz_result = s3.put_object(
         bucket,
         AUTHZ_KEY,
         authz_bytes,
         expected_owner,
-        if_match=expected_current_authz_etag,
+        if_match=(expected_current_authz_etag if current_authz is not None else None),
+        if_none_match=("*" if current_authz is None else None),
     )
     _verify_readback(
         s3,
@@ -1390,11 +1405,7 @@ def apply_private_bundle(
         "scope": {**scope_result, "sha256": sha256_hex(scope_bytes), "written": scope_written},
         "authz": {**authz_result, "sha256": sha256_hex(authz_bytes), "written": True},
         "previousScope": previous_scope,
-        "previousAuthz": {
-            "etag": expected_current_authz_etag,
-            "versionId": expected_current_authz_version_id,
-            "sha256": sha256_hex(previous_authz_body),
-        },
+        "previousAuthz": previous_authz,
     }
 
 
@@ -1646,15 +1657,17 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
         s3 = AwsCliS3(profile=args.profile, region=args.region, runner=runner)
         current_authz = s3.head_object(bucket, AUTHZ_KEY, account_id)
         current_scope = s3.head_object(bucket, SCOPE_KEY, account_id)
-        if current_authz is None:
-            raise BootstrapError("current authorization object is missing")
-        current_authz_body = _read_stable_versioned_object(
-            s3,
-            bucket=bucket,
-            key=AUTHZ_KEY,
-            expected_owner=account_id,
-            head=current_authz,
-        )
+        current_authz_sha256: Optional[str] = None
+        if current_authz is not None:
+            current_authz_body = _read_stable_versioned_object(
+                s3,
+                bucket=bucket,
+                key=AUTHZ_KEY,
+                expected_owner=account_id,
+                head=current_authz,
+            )
+            _require_exact_object_metadata(current_authz, current_authz_body)
+            current_authz_sha256 = sha256_hex(current_authz_body)
         current_scope_sha256: Optional[str] = None
         scope_update_mode = "create"
         if current_scope is not None:
@@ -1683,7 +1696,7 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "currentScopeSha256": current_scope_sha256,
             "scopeUpdateMode": scope_update_mode,
             "currentAuthz": _safe_head(current_authz),
-            "currentAuthzSha256": sha256_hex(current_authz_body),
+            "currentAuthzSha256": current_authz_sha256,
         }
     require_stable_scope_bytes(bundles["test"][0], bundles["production"][0])
     return {

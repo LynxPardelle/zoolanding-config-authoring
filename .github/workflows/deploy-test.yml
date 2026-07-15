@@ -147,7 +147,7 @@ jobs:
               "ParameterKey=ConfigTableName,ParameterValue=$EXPECTED_TABLE" \
               "ParameterKey=ConfigPayloadsBucketName,ParameterValue=$EXPECTED_BUCKET" \
               "ParameterKey=LogLevel,ParameterValue=INFO" \
-              "ParameterKey=DeployAuthzConfigS3Key,ParameterValue=system/deploy-authz.json" \
+              "ParameterKey=DeployAuthzConfigS3Key,ParameterValue=system/deploy-authz-v2.json" \
             --query 'Id' \
             --output text \
             --no-cli-pager)"
@@ -172,7 +172,7 @@ jobs:
             --expected-parameter "ConfigTableName=$EXPECTED_TABLE" \
             --expected-parameter "ConfigPayloadsBucketName=$EXPECTED_BUCKET" \
             --expected-parameter "LogLevel=INFO" \
-            --expected-parameter "DeployAuthzConfigS3Key=system/deploy-authz.json")"
+            --expected-parameter "DeployAuthzConfigS3Key=system/deploy-authz-v2.json")"
           if [[ "$decision" == "noop" ]]; then
             aws cloudformation delete-change-set \
               --stack-name "$STACK_NAME" \

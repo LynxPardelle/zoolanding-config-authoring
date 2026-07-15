@@ -87,6 +87,27 @@ class RepositoryHygieneTest(unittest.TestCase):
             self.assertNotIn("sam deploy --template-file .aws-sam/build/template.yaml --config-env test --no-confirm-changeset", workflow)
             self.assertNotIn("sam deploy --template-file .aws-sam/build/template.yaml --config-env prod --no-confirm-changeset", workflow)
 
+    def test_parallel_v2_authorization_key_is_exact_across_deploy_surfaces(self):
+        v2_key = "system/deploy-authz-v2.json"
+        legacy_key = "system/deploy-authz.json"
+        template = (ROOT / "template.yaml").read_text(encoding="utf-8")
+        samconfig = (ROOT / "samconfig.toml").read_text(encoding="utf-8")
+        bootstrap = (ROOT / "tools" / "bootstrap_server_scopes.py").read_text(encoding="utf-8")
+        self.assertIn(f"Default: {v2_key}", template)
+        self.assertEqual(samconfig.count(f"DeployAuthzConfigS3Key={v2_key}"), 2)
+        self.assertIn(f'LEGACY_AUTHZ_KEY = "{legacy_key}"', bootstrap)
+        self.assertIn(f'AUTHZ_KEY = "{v2_key}"', bootstrap)
+        for workflow_name in ("deploy-test.yml", "deploy-production.yml"):
+            workflow = (ROOT / ".github" / "workflows" / workflow_name).read_text(encoding="utf-8")
+            self.assertEqual(
+                workflow.count(
+                    f"ParameterKey=DeployAuthzConfigS3Key,ParameterValue={v2_key}"
+                ),
+                1,
+            )
+            self.assertEqual(workflow.count(f"DeployAuthzConfigS3Key={v2_key}"), 1)
+            self.assertNotIn(f"DeployAuthzConfigS3Key={legacy_key}", workflow)
+
     def test_production_guard_requires_successful_test_deployment_run(self):
         workflow = (ROOT / ".github" / "workflows" / "deploy-production.yml").read_text(encoding="utf-8")
         self.assertIn("actions: read", workflow)

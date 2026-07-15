@@ -13,7 +13,7 @@ parameter_overrides = [
   "ConfigTableName=zoolanding-config-registry-test",
   "ConfigPayloadsBucketName=zoolanding-config-payloads-test",
   "LogLevel=INFO",
-  "DeployAuthzConfigS3Key=system/deploy-authz.json"
+  "DeployAuthzConfigS3Key=system/deploy-authz-v2.json"
 ]
 
 [prod.deploy.parameters]
@@ -29,5 +29,5 @@ parameter_overrides = [
   "ConfigTableName=zoolanding-config-registry",
   "ConfigPayloadsBucketName=zoolanding-config-payloads",
   "LogLevel=INFO",
-  "DeployAuthzConfigS3Key=system/deploy-authz.json"
+  "DeployAuthzConfigS3Key=system/deploy-authz-v2.json"
 ]

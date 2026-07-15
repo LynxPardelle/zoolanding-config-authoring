@@ -43,7 +43,7 @@ def parse(response):
 class AuthoringHandlerTest(unittest.TestCase):
     def setUp(self):
         os.environ.pop("DEPLOY_AUTHZ_CONFIG_JSON", None)
-        os.environ["DEPLOY_AUTHZ_CONFIG_S3_KEY"] = "system/deploy-authz.json"
+        os.environ["DEPLOY_AUTHZ_CONFIG_S3_KEY"] = "system/deploy-authz-v2.json"
         os.environ["ENVIRONMENT_NAME"] = "test"
         self.test_authz_rule = {
             "roleArn": role_arn("draft-pamela-test-deploy"),
@@ -82,7 +82,7 @@ class AuthoringHandlerTest(unittest.TestCase):
             return sorted(key for key in self.objects if key.startswith(prefix))
 
         def load_json(_bucket, key):
-            if key == "system/deploy-authz.json":
+            if key == "system/deploy-authz-v2.json":
                 return self.authz_rules
             return self.objects.get(key)
 
@@ -199,7 +199,7 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(rules, [])
 
     def test_accepts_s3_authorization_config(self):
-        os.environ["DEPLOY_AUTHZ_CONFIG_S3_KEY"] = "system/deploy-authz.json"
+        os.environ["DEPLOY_AUTHZ_CONFIG_S3_KEY"] = "system/deploy-authz-v2.json"
         self.handler = importlib.reload(self.handler)
         self.handler.load_json_from_s3 = lambda _bucket, _key: [
             {
@@ -1374,7 +1374,12 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertNotIn("DeployAuthzConfigJson", deploy_surface)
         self.assertNotIn("DEPLOY_AUTHZ_CONFIG_JSON_BASE64", deploy_surface)
         self.assertNotIn("DEPLOY_AUTHZ_CONFIG_JSON", deploy_surface)
-        self.assertIn("DeployAuthzConfigS3Key=system/deploy-authz.json", (root / "samconfig.toml").read_text(encoding="utf-8"))
+        self.assertEqual(
+            (root / "samconfig.toml").read_text(encoding="utf-8").count(
+                "DeployAuthzConfigS3Key=system/deploy-authz-v2.json"
+            ),
+            2,
+        )
         put_block_start = template.index("- s3:PutObject")
         put_block_end = template.find("- Effect: Allow", put_block_start + 1)
         put_block = template[put_block_start:put_block_end]

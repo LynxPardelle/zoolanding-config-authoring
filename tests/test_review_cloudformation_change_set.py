@@ -13,7 +13,7 @@ EXPECTED_PARAMETERS = {
     "ConfigTableName": "zoolanding-config-registry-test",
     "ConfigPayloadsBucketName": "zoolanding-config-payloads-test",
     "LogLevel": "INFO",
-    "DeployAuthzConfigS3Key": "system/deploy-authz.json",
+    "DeployAuthzConfigS3Key": "system/deploy-authz-v2.json",
 }
 CHANGE_SET_NAME = "zoolanding-123-1"
 CHANGE_SET_ARN = (
