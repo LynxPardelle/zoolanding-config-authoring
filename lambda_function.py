@@ -62,6 +62,7 @@ LOCAL_DRAFT_CONTEXT_FOLDERS = {
 }
 LOCAL_DRAFT_CONTEXT_FILES = {"draft-repo.config.json"}
 SERVER_ONLY_KEY_PATTERN = re.compile(r"(secret|token|credential|password|privatekey|authorization)", re.IGNORECASE)
+MAX_RUNTIME_CONTENT_HUBS = 4
 MANIFEST_FILE_NAME = "_manifest.json"
 DEPLOY_AUTHZ_RULE_KEYS = {
     "roleArn", "tenantId", "draftId", "domains", "environments", "actions"
@@ -83,6 +84,7 @@ SAFE_VALIDATION_CODES = {
     "environment_mismatch",
     "invalid_server_path",
     "kind_mismatch",
+    "runtime_content_hub_limit_exceeded",
     "unknown_server_descriptor",
 }
 
@@ -198,6 +200,13 @@ def _reject_server_only_content(value: Any, path: str = "content") -> None:
     elif isinstance(value, list):
         for index, child in enumerate(value):
             _reject_server_only_content(child, f"{path}[{index}]")
+
+
+def _validate_site_config_runtime_limits(content: Dict[str, Any]) -> None:
+    runtime = content.get("runtime")
+    content_hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if isinstance(content_hubs, list) and len(content_hubs) > MAX_RUNTIME_CONTENT_HUBS:
+        raise ValueError("runtime_content_hub_limit_exceeded")
 
 
 def _content_hub_file_info(domain: str, path: str) -> Optional[tuple[str, Optional[str]]]:
@@ -554,6 +563,8 @@ def _normalize_files(
         content = entry.get("content")
         if not isinstance(content, dict):
             raise ValueError("Each file entry content must be a JSON object")
+        if path == f"{domain}/site-config.json":
+            _validate_site_config_runtime_limits(content)
         _content_hub_file_info(domain, path)
 
         inferred_kind = _infer_kind(path)
