@@ -128,6 +128,22 @@ class AuthoringHandlerTest(unittest.TestCase):
             },
         ]
 
+    def runtime_content_hubs(self, count):
+        return [
+            {
+                "hubId": f"hub-{index}",
+                "ownerDraftDomain": "pamelabetancourt.com",
+                "source": "primary",
+                "routeBasePath": f"/blog-{index}",
+                "listPath": f"/blog-{index}",
+                "articlePathPattern": f"/blog-{index}/:categorySlug/:articleSlug",
+                "defaultLocale": "es",
+                "locales": ["es"],
+                "canonicalMode": "owner-canonical",
+            }
+            for index in range(count)
+        ]
+
     def active_notification_files(self):
         fixture_path = (
             Path(__file__).resolve().parent
@@ -1564,6 +1580,63 @@ class AuthoringHandlerTest(unittest.TestCase):
         metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
         self.assertEqual(metadata["contentHubs"][0]["hubId"], "main")
         self.assertEqual(metadata["contentHubs"][0]["articleIds"], ["primer-post"])
+
+    def test_runtime_content_hub_limit_fails_before_storing_draft(self):
+        files = self.draft_files()
+        files[0]["content"]["runtime"] = {
+            "contentHubs": self.runtime_content_hubs(5),
+        }
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "test-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "runtime_content_hub_limit_exceeded")
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_publish_rejects_stored_package_above_runtime_content_hub_limit(self):
+        files = self.draft_files()
+        files[0]["content"]["runtime"] = {
+            "contentHubs": self.runtime_content_hubs(4),
+        }
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "historical-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+        self.assertEqual(response["statusCode"], 200)
+
+        prefix = "sites/pamelabetancourt.com/versions/historical-v1/"
+        site_config_path = "pamelabetancourt.com/site-config.json"
+        site_config = self.objects[f"{prefix}{site_config_path}"]
+        site_config["runtime"]["contentHubs"].append(self.runtime_content_hubs(5)[-1])
+        manifest = self.objects[f"{prefix}_manifest.json"]
+        manifest_entry = next(entry for entry in manifest["files"] if entry["path"] == site_config_path)
+        manifest_entry["sha256"] = hashlib.sha256(
+            json.dumps(site_config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        metadata_before = copy.deepcopy(self.items[("SITE#pamelabetancourt.com", "METADATA")])
+
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "historical-v1",
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "stored_package_invalid")
+        metadata_after = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        self.assertEqual(metadata_after, metadata_before)
+        self.assertNotIn("publishedEnvironments", metadata_after)
 
     def test_content_hub_files_reject_server_only_fields(self):
         files = self.draft_files() + [

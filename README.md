@@ -168,6 +168,8 @@ Content hub files are optional and live inside the normal draft package:
 {domain}/content-hubs/{hubId}/articles/{articleId}/metadata.json
 ```
 
+Public `site-config.json.runtime.contentHubs` accepts at most four entries. Draft upsert rejects a fifth hub before any S3 or DynamoDB write, and publication revalidates the stored package through the same guard before moving a published pointer.
+
 `hubId` and `articleId` must be lowercase safe ids. Content hub JSON is rejected when it contains credential-like or server-only field names such as `secret`, `token`, `credential`, `password`, `privateKey`, or `authorization`.
 
 The Lambda stores a compact `contentHubs` index in site metadata so runtime readers can expose safe public hub metadata without scanning S3.
