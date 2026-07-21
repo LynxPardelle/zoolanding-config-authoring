@@ -21,6 +21,7 @@
     "sellableTypes": ["physical", "service", "subscription", "add_on"],
     "payments": {
       "bindingId": "stripe-primary",
+      "supportedCurrencies": ["MXN"],
       "oneTime": true,
       "subscriptions": true,
       "editablePrices": true,
