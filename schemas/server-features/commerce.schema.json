@@ -31,6 +31,7 @@
         "commerce:catalog:write",
         "commerce:inventory:write",
         "commerce:subscription:manage",
+        "subscription:migration:execute",
         "commerce:fiscal:manage"
       ]
     },
@@ -125,6 +126,15 @@
         { "$ref": "#/definitions/pausePolicyEnabled" }
       ]
     },
+    "migrationPolicy": {
+      "type": "object",
+      "required": ["canarySize", "accountConcurrency"],
+      "properties": {
+        "canarySize": { "type": "integer", "minimum": 1, "maximum": 25 },
+        "accountConcurrency": { "type": "integer", "minimum": 1, "maximum": 5 }
+      },
+      "additionalProperties": false
+    },
     "payments": {
       "type": "object",
       "required": ["bindingId", "supportedCurrencies", "oneTime", "subscriptions", "editablePrices", "coupons", "planChangePolicy", "pausePolicy"],
@@ -142,6 +152,7 @@
         "editablePrices": { "type": "boolean" },
         "coupons": { "type": "boolean" },
         "planChangePolicy": { "$ref": "#/definitions/planChangePolicy" },
+        "migrationPolicy": { "$ref": "#/definitions/migrationPolicy" },
         "pausePolicy": { "$ref": "#/definitions/pausePolicy" }
       },
       "additionalProperties": false

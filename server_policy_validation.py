@@ -58,6 +58,7 @@ COMMERCE_CAPABILITIES = {
     "commerce:catalog:write",
     "commerce:inventory:write",
     "commerce:subscription:manage",
+    "subscription:migration:execute",
     "commerce:fiscal:manage",
 }
 INTEGRATION_ADMIN_CAPABILITIES = {

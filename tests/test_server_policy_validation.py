@@ -757,6 +757,39 @@ class ServerPolicyValidationTest(unittest.TestCase):
 
         self.validator.validate_server_policy_files("example.com", "test", files)
 
+    def test_bulk_subscription_migration_capability_is_exact_code_owned_and_publishable(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        capability = "subscription:migration:execute"
+        near_miss = "commerce:subscription:migration:execute"
+        schema = load_json(SCHEMA_DIR / "commerce.schema.json")
+        self.assertIn(capability, self.validator.COMMERCE_CAPABILITIES)
+        self.assertIn(capability, schema["definitions"]["capability"]["enum"])
+        self.assertNotIn(near_miss, self.validator.COMMERCE_CAPABILITIES)
+        self.assertNotIn(near_miss, schema["definitions"]["capability"]["enum"])
+
+        def files_with(selected_capability):
+            files = [
+                {
+                    "path": f"example.com/server/{fixture_path.name}",
+                    "content": load_json(fixture_path),
+                }
+                for fixture_path in sorted(FIXTURE_DIR.glob("*.json"))
+            ]
+            commerce = next(
+                file for file in files if file["path"].endswith("commerce.json")
+            )["content"]["commerce"]
+            commerce["adminAccess"]["capabilities"] = [selected_capability]
+            return files
+
+        self.validator.validate_server_policy_files(
+            "example.com", "test", files_with(capability)
+        )
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files(
+                "example.com", "test", files_with(near_miss)
+            )
+        self.assertEqual(raised.exception.code, "commerce_capability_not_supported")
+
     def test_fiscal_enablement_requires_auth_profile_with_fiscal_admin_capability(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
 
@@ -895,6 +928,23 @@ class ServerPolicyValidationTest(unittest.TestCase):
             {"$ref": "#/definitions/pausePolicy"},
         )
         self.assertEqual(
+            payments["properties"]["migrationPolicy"],
+            {"$ref": "#/definitions/migrationPolicy"},
+        )
+        self.assertNotIn("migrationPolicy", payments["required"])
+        self.assertEqual(
+            schema["definitions"]["migrationPolicy"],
+            {
+                "type": "object",
+                "required": ["canarySize", "accountConcurrency"],
+                "properties": {
+                    "canarySize": {"type": "integer", "minimum": 1, "maximum": 25},
+                    "accountConcurrency": {"type": "integer", "minimum": 1, "maximum": 5},
+                },
+                "additionalProperties": False,
+            },
+        )
+        self.assertEqual(
             schema["definitions"]["planChangePolicy"]["properties"]["mode"]["enum"],
             ["disabled", "next-renewal", "immediate-prorated"],
         )
@@ -953,6 +1003,9 @@ class ServerPolicyValidationTest(unittest.TestCase):
             lambda value: value["commerce"]["payments"]["pausePolicy"].update({"billingBehavior": "void"}),
             lambda value: value["commerce"]["payments"]["pausePolicy"].update({"resumeAt": "https://attacker.invalid"}),
             lambda value: value["commerce"]["payments"]["pausePolicy"].update({"stripeSubscriptionId": "sub_synthetic"}),
+            lambda value: value["commerce"]["payments"]["migrationPolicy"].update({"canarySize": 26}),
+            lambda value: value["commerce"]["payments"]["migrationPolicy"].update({"accountConcurrency": 0}),
+            lambda value: value["commerce"]["payments"]["migrationPolicy"].update({"providerAccountId": "acct_synthetic"}),
         )
         for mutate in scenarios:
             with self.subTest(mutate=mutate):
@@ -963,7 +1016,12 @@ class ServerPolicyValidationTest(unittest.TestCase):
                     for error in self.validator.validate_schema(schema, candidate)
                 }
                 self.assertTrue(
-                    {"property_not_allowed", "one_of"}.intersection(codes),
+                    {
+                        "property_not_allowed",
+                        "one_of",
+                        "number_minimum",
+                        "number_maximum",
+                    }.intersection(codes),
                     codes,
                 )
 
