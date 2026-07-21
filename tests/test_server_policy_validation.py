@@ -370,6 +370,7 @@ class ServerPolicyValidationTest(unittest.TestCase):
         self.assertEqual(raised.exception.code, "unknown_fiscal_disclosure")
 
         commerce["fiscal"]["disclosureId"] = "manual-invoice-v1"
+        commerce["adminAccess"]["capabilities"].append("commerce:fiscal:manage")
         self.validator.validate_server_policy_files("example.com", "test", files)
 
     def test_phase_one_capability_and_notification_allowlists_are_code_owned(self):
@@ -423,6 +424,131 @@ class ServerPolicyValidationTest(unittest.TestCase):
                 with self.assertRaises(self.validator.PolicyValidationError) as raised:
                     self.validator.validate_server_policy_files("example.com", "test", files)
                 self.assertEqual(raised.exception.code, expected_code)
+
+    def test_fiscal_admin_capability_is_code_owned_and_publishable(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        files = [
+            {
+                "path": f"example.com/server/{fixture_path.name}",
+                "content": load_json(fixture_path),
+            }
+            for fixture_path in sorted(FIXTURE_DIR.glob("*.json"))
+        ]
+        commerce = next(file for file in files if file["path"].endswith("commerce.json"))["content"]["commerce"]
+        commerce["adminAccess"]["capabilities"] = ["commerce:fiscal:manage"]
+
+        self.validator.validate_server_policy_files("example.com", "test", files)
+
+    def test_fiscal_enablement_requires_auth_profile_with_fiscal_admin_capability(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+
+        def files_with(admin_access, enabled=True):
+            files = [
+                {
+                    "path": f"example.com/server/{fixture_path.name}",
+                    "content": load_json(fixture_path),
+                }
+                for fixture_path in sorted(FIXTURE_DIR.glob("*.json"))
+            ]
+            commerce = next(
+                file for file in files if file["path"].endswith("commerce.json")
+            )["content"]["commerce"]
+            commerce["adminAccess"] = admin_access
+            if enabled:
+                commerce["fiscal"] = {
+                    "enabled": True,
+                    "manual": True,
+                    "disclosureId": "manual-invoice-v1",
+                    "taxBehavior": "exclusive",
+                    "retentionDays": 90,
+                    "requestWindowHours": 24,
+                }
+            return files
+
+        for admin_access in (
+            {"mode": "none"},
+            {
+                "mode": "auth-profile",
+                "authProfileId": "staff",
+                "capabilities": ["commerce:catalog:read"],
+            },
+        ):
+            with self.subTest(admin_access=admin_access):
+                candidate = files_with(admin_access)
+                descriptor = next(
+                    file for file in candidate if file["path"].endswith("commerce.json")
+                )["content"]
+                self.assertTrue(
+                    self.validator.validate_schema(
+                        load_json(SCHEMA_DIR / "commerce.schema.json"), descriptor
+                    )
+                )
+                with self.assertRaises(self.validator.PolicyValidationError) as raised:
+                    self.validator.validate_server_policy_files(
+                        "example.com", "test", candidate
+                    )
+                self.assertEqual(raised.exception.code, "fiscal_admin_access_required")
+
+        disabled = files_with({"mode": "none"}, enabled=False)
+        descriptor = next(
+            file for file in disabled if file["path"].endswith("commerce.json")
+        )["content"]
+        self.assertEqual(
+            self.validator.validate_schema(
+                load_json(SCHEMA_DIR / "commerce.schema.json"), descriptor
+            ),
+            [],
+        )
+        self.validator.validate_server_policy_files("example.com", "test", disabled)
+
+    def test_commerce_currency_allowlist_and_notification_cardinality_match_runtime_contract(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "commerce.schema.json")
+        fixture = load_json(FIXTURE_DIR / "commerce.json")
+        payments = schema["definitions"]["payments"]
+        self.assertIn("supportedCurrencies", payments["required"])
+        self.assertEqual(payments["properties"]["supportedCurrencies"], {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 16,
+            "uniqueItems": True,
+            "items": {"type": "string", "pattern": "^[A-Z]{3}$"},
+        })
+        self.assertEqual(
+            schema["definitions"]["commerce"]["properties"]
+            ["notificationPolicyIds"]["maxItems"],
+            1,
+        )
+
+        scenarios = (
+            (lambda commerce: commerce["payments"].pop("supportedCurrencies"), "required"),
+            (lambda commerce: commerce["payments"].update({"supportedCurrencies": []}), "array_min_items"),
+            (
+                lambda commerce: commerce["payments"].update(
+                    {"supportedCurrencies": ["MXN", "MXN"]}
+                ),
+                "array_unique",
+            ),
+            (
+                lambda commerce: commerce["payments"].update({"supportedCurrencies": ["mxn"]}),
+                "string_pattern",
+            ),
+            (
+                lambda commerce: commerce.update(
+                    {"notificationPolicyIds": ["billing-ops", "backup-ops"]}
+                ),
+                "array_max_items",
+            ),
+        )
+        for mutate, expected_code in scenarios:
+            with self.subTest(expected_code=expected_code):
+                candidate = copy.deepcopy(fixture)
+                mutate(candidate["commerce"])
+                codes = {
+                    error["code"]
+                    for error in self.validator.validate_schema(schema, candidate)
+                }
+                self.assertIn(expected_code, codes)
 
     def test_protected_features_require_an_active_auth_profile_in_the_same_scope(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")

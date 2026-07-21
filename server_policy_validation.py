@@ -58,6 +58,7 @@ COMMERCE_CAPABILITIES = {
     "commerce:catalog:write",
     "commerce:inventory:write",
     "commerce:subscription:manage",
+    "commerce:fiscal:manage",
 }
 NOTIFICATION_TEMPLATES_BY_TYPE = {
     "payment-succeeded": "payment-succeeded-v1",
@@ -692,6 +693,12 @@ def _validate_code_owned_descriptor_values(name: str, content: Dict[str, Any]) -
         fiscal = commerce.get("fiscal")
         if _is_object(fiscal) and fiscal.get("enabled") is True and fiscal.get("disclosureId") not in FISCAL_DISCLOSURES:
             raise PolicyValidationError("unknown_fiscal_disclosure")
+        if _is_object(fiscal) and fiscal.get("enabled") is True and (
+            not _is_object(admin_access)
+            or admin_access.get("mode") != "auth-profile"
+            or "commerce:fiscal:manage" not in (admin_access.get("capabilities") or [])
+        ):
+            raise PolicyValidationError("fiscal_admin_access_required")
         return
     if name == "notification-policies.json":
         for policy in content.get("policies") or []:
@@ -890,6 +897,12 @@ def validate_server_policy_files(
         fiscal = commerce.get("fiscal")
         if _is_object(fiscal) and fiscal.get("enabled") is True and fiscal.get("disclosureId") not in FISCAL_DISCLOSURES:
             raise PolicyValidationError("unknown_fiscal_disclosure")
+        if _is_object(fiscal) and fiscal.get("enabled") is True and (
+            not _is_object(admin_access)
+            or admin_access.get("mode") != "auth-profile"
+            or "commerce:fiscal:manage" not in (admin_access.get("capabilities") or [])
+        ):
+            raise PolicyValidationError("fiscal_admin_access_required")
 
     auth_registry = legacy_descriptors.get("auth-profile-registry.json")
     profiles_by_id = (

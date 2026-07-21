@@ -30,7 +30,8 @@
         "commerce:catalog:read",
         "commerce:catalog:write",
         "commerce:inventory:write",
-        "commerce:subscription:manage"
+        "commerce:subscription:manage",
+        "commerce:fiscal:manage"
       ]
     },
     "sameOriginPath": {
@@ -74,9 +75,16 @@
     },
     "payments": {
       "type": "object",
-      "required": ["bindingId", "oneTime", "subscriptions", "editablePrices", "coupons", "operatorPauses", "proration"],
+      "required": ["bindingId", "supportedCurrencies", "oneTime", "subscriptions", "editablePrices", "coupons", "operatorPauses", "proration"],
       "properties": {
         "bindingId": { "$ref": "#/definitions/safeId" },
+        "supportedCurrencies": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z]{3}$" }
+        },
         "oneTime": { "type": "boolean" },
         "subscriptions": { "type": "boolean" },
         "editablePrices": { "type": "boolean" },
@@ -148,6 +156,37 @@
     "commerce": {
       "type": "object",
       "required": ["status", "adminAccess", "sellableTypes", "payments", "inventory", "shipping", "fiscal", "checkout"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "fiscal": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["fiscal"]
+          },
+          "then": {
+            "properties": {
+              "adminAccess": {
+                "allOf": [
+                  { "$ref": "#/definitions/authProfileAccess" },
+                  {
+                    "properties": {
+                      "capabilities": {
+                        "not": {
+                          "items": { "not": { "const": "commerce:fiscal:manage" } }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "status": { "enum": ["disabled", "active"] },
         "adminAccess": {
@@ -175,7 +214,7 @@
         "checkout": { "$ref": "#/definitions/checkout" },
         "notificationPolicyIds": {
           "type": "array",
-          "maxItems": 16,
+          "maxItems": 1,
           "uniqueItems": true,
           "items": { "$ref": "#/definitions/safeId" }
         }
