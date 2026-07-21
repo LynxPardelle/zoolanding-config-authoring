@@ -49,6 +49,16 @@ class ServerPolicyValidationTest(unittest.TestCase):
 
     def test_versioned_schemas_and_golden_corpus_validate(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        notification_schema = load_json(SCHEMA_DIR / "notification-policies.schema.json")
+        self.assertEqual(
+            notification_schema["definitions"]["policy"]["properties"]["recipientSets"],
+            {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {"$ref": "#/definitions/recipientSet"},
+            },
+        )
         files = []
         for schema_name in SCHEMA_NAMES:
             schema_path = SCHEMA_DIR / schema_name
@@ -1100,18 +1110,17 @@ class ServerPolicyValidationTest(unittest.TestCase):
         notification = load_json(FIXTURE_DIR / "notification-policies.json")
         base_policy = notification["policies"][0]
         base_policy["status"] = "active"
-        base_policy["recipientSets"] = [
-            {"id": f"recipients-{index}", "version": 1, "members": [{"id": "primary"}]}
-            for index in range(10)
-        ]
-        second = copy.deepcopy(base_policy)
-        second["id"] = "billing-ops-secondary"
-        second["connectionId"] = "billing-mailbox-secondary"
-        second["recipientSets"] = [
-            {"id": f"secondary-{index}", "version": 1, "members": [{"id": "primary"}]}
-            for index in range(10)
-        ]
-        notification["policies"].append(second)
+        notification["policies"] = []
+        for index in range(11):
+            policy = copy.deepcopy(base_policy)
+            policy["id"] = f"billing-ops-{index}"
+            policy["connectionId"] = f"billing-mailbox-{index}"
+            policy["recipientSets"] = [{
+                "id": f"recipients-{index}",
+                "version": 1,
+                "members": [{"id": "primary"}],
+            }]
+            notification["policies"].append(policy)
         described = []
 
         with self.assertRaises(self.validator.PolicyValidationError) as raised:

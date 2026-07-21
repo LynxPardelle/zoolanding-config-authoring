@@ -1002,27 +1002,30 @@ class AuthoringHandlerTest(unittest.TestCase):
             file["content"] for file in files if file["path"].endswith("integration-bindings.json")
         )
         first = notification["policies"][0]
-        first["recipientSets"] = [
-            {"id": f"primary-{index}", "version": 1, "members": [{"id": "member"}]}
-            for index in range(10)
+        notification["policies"] = []
+        bindings["bindings"] = [
+            binding for binding in bindings["bindings"]
+            if binding["provider"] != "email.smtp"
         ]
-        second = copy.deepcopy(first)
-        second["id"] = "billing-ops-secondary"
-        second["connectionId"] = "billing-mailbox-secondary"
-        second["recipientSets"] = [
-            {"id": f"secondary-{index}", "version": 1, "members": [{"id": "member"}]}
-            for index in range(10)
-        ]
-        notification["policies"].append(second)
-        bindings["bindings"].append({
-            "id": "smtp-secondary",
-            "provider": "email.smtp",
-            "adapterVersion": "v1",
-            "connectionId": "billing-mailbox-secondary",
-            "status": "active",
-            "mode": "test",
-            "capabilities": ["send"],
-        })
+        for index in range(11):
+            policy = copy.deepcopy(first)
+            policy["id"] = f"billing-ops-{index}"
+            policy["connectionId"] = f"billing-mailbox-{index}"
+            policy["recipientSets"] = [{
+                "id": f"recipients-{index}",
+                "version": 1,
+                "members": [{"id": "member"}],
+            }]
+            notification["policies"].append(policy)
+            bindings["bindings"].append({
+                "id": f"smtp-{index}",
+                "provider": "email.smtp",
+                "adapterVersion": "v1",
+                "connectionId": f"billing-mailbox-{index}",
+                "status": "active",
+                "mode": "test",
+                "capabilities": ["send"],
+            })
         described = []
         self.handler.describe_secret = lambda secret_id: described.append(secret_id) or {}
 
