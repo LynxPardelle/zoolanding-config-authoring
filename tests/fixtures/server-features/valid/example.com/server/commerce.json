@@ -26,8 +26,22 @@
       "subscriptions": true,
       "editablePrices": true,
       "coupons": true,
-      "operatorPauses": true,
-      "proration": "operator-selectable"
+      "planChangePolicy": {
+        "mode": "immediate-prorated"
+      },
+      "pausePolicy": {
+        "enabled": true,
+        "newInvoiceBehavior": "void",
+        "existingInvoiceBehavior": "unchanged",
+        "accessBehavior": "suspend",
+        "resume": {
+          "mode": "manual"
+        },
+        "onResume": {
+          "collection": "restore",
+          "access": "restore-if-suspended"
+        }
+      }
     },
     "inventory": {
       "enabled": true,

@@ -73,9 +73,61 @@
       },
       "additionalProperties": false
     },
+    "planChangePolicy": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["disabled", "next-renewal", "immediate-prorated"] }
+      },
+      "additionalProperties": false
+    },
+    "pausePolicyDisabled": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "pauseResumePolicy": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "const": "manual" }
+      },
+      "additionalProperties": false
+    },
+    "pauseOnResumePolicy": {
+      "type": "object",
+      "required": ["collection", "access"],
+      "properties": {
+        "collection": { "const": "restore" },
+        "access": { "const": "restore-if-suspended" }
+      },
+      "additionalProperties": false
+    },
+    "pausePolicyEnabled": {
+      "type": "object",
+      "required": ["enabled", "newInvoiceBehavior", "existingInvoiceBehavior", "accessBehavior", "resume", "onResume"],
+      "properties": {
+        "enabled": { "const": true },
+        "newInvoiceBehavior": { "enum": ["void", "keep-as-draft", "mark-uncollectible"] },
+        "existingInvoiceBehavior": { "const": "unchanged" },
+        "accessBehavior": { "enum": ["retain", "suspend"] },
+        "resume": { "$ref": "#/definitions/pauseResumePolicy" },
+        "onResume": { "$ref": "#/definitions/pauseOnResumePolicy" }
+      },
+      "additionalProperties": false
+    },
+    "pausePolicy": {
+      "oneOf": [
+        { "$ref": "#/definitions/pausePolicyDisabled" },
+        { "$ref": "#/definitions/pausePolicyEnabled" }
+      ]
+    },
     "payments": {
       "type": "object",
-      "required": ["bindingId", "supportedCurrencies", "oneTime", "subscriptions", "editablePrices", "coupons", "operatorPauses", "proration"],
+      "required": ["bindingId", "supportedCurrencies", "oneTime", "subscriptions", "editablePrices", "coupons", "planChangePolicy", "pausePolicy"],
       "properties": {
         "bindingId": { "$ref": "#/definitions/safeId" },
         "supportedCurrencies": {
@@ -89,8 +141,8 @@
         "subscriptions": { "type": "boolean" },
         "editablePrices": { "type": "boolean" },
         "coupons": { "type": "boolean" },
-        "operatorPauses": { "type": "boolean" },
-        "proration": { "enum": ["disabled", "operator-selectable"] }
+        "planChangePolicy": { "$ref": "#/definitions/planChangePolicy" },
+        "pausePolicy": { "$ref": "#/definitions/pausePolicy" }
       },
       "additionalProperties": false
     },

@@ -769,6 +769,105 @@ class ServerPolicyValidationTest(unittest.TestCase):
                 }
                 self.assertIn(expected_code, codes)
 
+    def test_commerce_subscription_policies_match_runtime_and_reject_browser_authority(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "commerce.schema.json")
+        fixture = load_json(FIXTURE_DIR / "commerce.json")
+        payments = schema["definitions"]["payments"]
+        self.assertEqual(
+            payments["required"],
+            [
+                "bindingId",
+                "supportedCurrencies",
+                "oneTime",
+                "subscriptions",
+                "editablePrices",
+                "coupons",
+                "planChangePolicy",
+                "pausePolicy",
+            ],
+        )
+        self.assertEqual(
+            payments["properties"]["planChangePolicy"],
+            {"$ref": "#/definitions/planChangePolicy"},
+        )
+        self.assertEqual(
+            payments["properties"]["pausePolicy"],
+            {"$ref": "#/definitions/pausePolicy"},
+        )
+        self.assertEqual(
+            schema["definitions"]["planChangePolicy"]["properties"]["mode"]["enum"],
+            ["disabled", "next-renewal", "immediate-prorated"],
+        )
+        self.assertEqual(
+            schema["definitions"]["pausePolicy"]["oneOf"],
+            [
+                {"$ref": "#/definitions/pausePolicyDisabled"},
+                {"$ref": "#/definitions/pausePolicyEnabled"},
+            ],
+        )
+        enabled = schema["definitions"]["pausePolicyEnabled"]
+        self.assertEqual(
+            enabled["required"],
+            [
+                "enabled",
+                "newInvoiceBehavior",
+                "existingInvoiceBehavior",
+                "accessBehavior",
+                "resume",
+                "onResume",
+            ],
+        )
+        self.assertEqual(
+            enabled["properties"]["newInvoiceBehavior"]["enum"],
+            ["void", "keep-as-draft", "mark-uncollectible"],
+        )
+        self.assertEqual(enabled["properties"]["existingInvoiceBehavior"], {"const": "unchanged"})
+        self.assertEqual(enabled["properties"]["accessBehavior"]["enum"], ["retain", "suspend"])
+        self.assertEqual(
+            schema["definitions"]["pauseResumePolicy"],
+            {
+                "type": "object",
+                "required": ["mode"],
+                "properties": {"mode": {"const": "manual"}},
+                "additionalProperties": False,
+            },
+        )
+        self.assertEqual(
+            schema["definitions"]["pauseOnResumePolicy"],
+            {
+                "type": "object",
+                "required": ["collection", "access"],
+                "properties": {
+                    "collection": {"const": "restore"},
+                    "access": {"const": "restore-if-suspended"},
+                },
+                "additionalProperties": False,
+            },
+        )
+
+        scenarios = (
+            lambda value: value["commerce"]["payments"].update({"operatorPauses": True}),
+            lambda value: value["commerce"]["payments"].update({"proration": "operator-selectable"}),
+            lambda value: value["commerce"]["payments"]["planChangePolicy"].update({"previewTimestamp": 1}),
+            lambda value: value["commerce"]["payments"]["planChangePolicy"].update({"stripePriceId": "price_synthetic"}),
+            lambda value: value["commerce"]["payments"]["pausePolicy"].update({"billingBehavior": "void"}),
+            lambda value: value["commerce"]["payments"]["pausePolicy"].update({"resumeAt": "https://attacker.invalid"}),
+            lambda value: value["commerce"]["payments"]["pausePolicy"].update({"stripeSubscriptionId": "sub_synthetic"}),
+        )
+        for mutate in scenarios:
+            with self.subTest(mutate=mutate):
+                candidate = copy.deepcopy(fixture)
+                mutate(candidate)
+                codes = {
+                    error["code"]
+                    for error in self.validator.validate_schema(schema, candidate)
+                }
+                self.assertTrue(
+                    {"property_not_allowed", "one_of"}.intersection(codes),
+                    codes,
+                )
+
     def test_protected_features_require_an_active_auth_profile_in_the_same_scope(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
 
