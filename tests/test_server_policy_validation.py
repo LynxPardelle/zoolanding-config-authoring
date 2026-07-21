@@ -286,6 +286,225 @@ class ServerPolicyValidationTest(unittest.TestCase):
             }])
         self.assertEqual(raised.exception.code, "provider_capability_not_supported")
 
+    def test_integration_admin_access_is_required_closed_and_separate_from_provider_capabilities(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "integration-bindings.schema.json")
+        fixture = load_json(FIXTURE_DIR / "integration-bindings.json")
+        self.assertEqual(self.validator.validate_schema(schema, fixture), [])
+
+        missing = copy.deepcopy(fixture)
+        missing.pop("adminAccess")
+        codes = {error["code"] for error in self.validator.validate_schema(schema, missing)}
+        self.assertIn("required", codes)
+
+        unknown = copy.deepcopy(fixture)
+        unknown["adminAccess"]["capabilities"].append("integration:delegate")
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files("example.com", "test", [{
+                "path": "example.com/server/integration-bindings.json",
+                "content": unknown,
+            }])
+        self.assertEqual(raised.exception.code, "integration_capability_not_supported")
+
+        provider_capability = copy.deepcopy(fixture)
+        provider_capability["adminAccess"]["capabilities"] = ["checkout"]
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files("example.com", "test", [{
+                "path": "example.com/server/integration-bindings.json",
+                "content": provider_capability,
+            }])
+        self.assertEqual(raised.exception.code, "integration_capability_not_supported")
+
+        internal_only = copy.deepcopy(fixture)
+        internal_only["adminAccess"] = {"mode": "none"}
+        internal_only["bindings"][0]["capabilities"].remove("connect-onboarding")
+        internal_only["bindings"][0]["stripe"].pop("onboardingRoutes")
+        self.validator.validate_server_policy_files("example.com", "test", [{
+            "path": "example.com/server/integration-bindings.json",
+            "content": internal_only,
+        }])
+
+        read_only = copy.deepcopy(fixture)
+        read_only["adminAccess"]["capabilities"] = ["integration:read"]
+        read_only["bindings"][0]["capabilities"].remove("connect-onboarding")
+        read_only["bindings"][0]["stripe"].pop("onboardingRoutes")
+        self.validator.validate_server_policy_files("example.com", "test", [
+            {
+                "path": "example.com/server/integration-bindings.json",
+                "content": read_only,
+            },
+            {
+                "path": "example.com/server/auth-profile-registry.json",
+                "content": load_json(FIXTURE_DIR / "auth-profile-registry.json"),
+            },
+        ])
+
+    def test_connect_onboarding_requires_manage_and_same_origin_routes(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        fixture = load_json(FIXTURE_DIR / "integration-bindings.json")
+
+        no_admin = copy.deepcopy(fixture)
+        no_admin["adminAccess"] = {"mode": "none"}
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files("example.com", "test", [{
+                "path": "example.com/server/integration-bindings.json",
+                "content": no_admin,
+            }])
+        self.assertEqual(raised.exception.code, "integration_admin_access_required")
+
+        read_only = copy.deepcopy(fixture)
+        read_only["adminAccess"]["capabilities"] = ["integration:read"]
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files("example.com", "test", [{
+                "path": "example.com/server/integration-bindings.json",
+                "content": read_only,
+            }])
+        self.assertEqual(raised.exception.code, "integration_admin_access_required")
+
+        missing_routes = copy.deepcopy(fixture)
+        missing_routes["bindings"][0]["stripe"].pop("onboardingRoutes")
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files("example.com", "test", [{
+                "path": "example.com/server/integration-bindings.json",
+                "content": missing_routes,
+            }])
+        self.assertEqual(raised.exception.code, "integration_onboarding_routes_required")
+
+        schema = load_json(SCHEMA_DIR / "integration-bindings.schema.json")
+        for field in ("returnPath", "refreshPath"):
+            with self.subTest(field=field):
+                absolute_url = copy.deepcopy(fixture)
+                absolute_url["bindings"][0]["stripe"]["onboardingRoutes"][field] = (
+                    "https://evil.example/stripe"
+                )
+                codes = {
+                    error["code"]
+                    for error in self.validator.validate_schema(schema, absolute_url)
+                }
+                self.assertIn("string_pattern", codes)
+
+        extra_origin = copy.deepcopy(fixture)
+        extra_origin["bindings"][0]["stripe"]["onboardingRoutes"]["origin"] = (
+            "https://example.com"
+        )
+        codes = {
+            error["code"]
+            for error in self.validator.validate_schema(schema, extra_origin)
+        }
+        self.assertIn("property_not_allowed", codes)
+
+    def test_integration_admin_profile_requires_active_matching_group_policy(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+
+        def integration_files():
+            return [
+                {
+                    "path": "example.com/server/integration-bindings.json",
+                    "content": load_json(FIXTURE_DIR / "integration-bindings.json"),
+                },
+                {
+                    "path": "example.com/server/auth-profile-registry.json",
+                    "content": load_json(FIXTURE_DIR / "auth-profile-registry.json"),
+                },
+            ]
+
+        files = integration_files()
+        files.pop()
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files("example.com", "test", files)
+        self.assertEqual(raised.exception.code, "auth_profile_registry_required")
+
+        scenarios = (
+            (
+                "auth_profile_not_found",
+                lambda files: files[0]["content"]["adminAccess"].update(
+                    {"authProfileId": "missing-profile"}
+                ),
+            ),
+            (
+                "auth_profile_inactive",
+                lambda files: files[1]["content"]["profiles"][0].update(
+                    {"status": "suspended"}
+                ),
+            ),
+            (
+                "auth_profile_scope_mismatch",
+                lambda files: files[1]["content"]["profiles"][0].update(
+                    {"tenantId": "other-tenant"}
+                ),
+            ),
+            (
+                "auth_profile_scope_mismatch",
+                lambda files: files[1]["content"]["profiles"][0].update(
+                    {"domain": "other.example.com"}
+                ),
+            ),
+            (
+                "auth_profile_group_policy_invalid",
+                lambda files: files[1]["content"]["profiles"][0].update(
+                    {"allowedGroups": []}
+                ),
+            ),
+            (
+                "auth_profile_group_policy_invalid",
+                lambda files: files[1]["content"]["profiles"][0].update(
+                    {"adminGroups": []}
+                ),
+            ),
+            (
+                "auth_profile_group_policy_invalid",
+                lambda files: files[1]["content"]["profiles"][0].update(
+                    {"adminGroups": ["not-allowed"]}
+                ),
+            ),
+        )
+        for expected_code, mutate in scenarios:
+            with self.subTest(expected_code=expected_code):
+                files = integration_files()
+                mutate(files)
+                registry = files[1]["content"]
+                registry_hash = hashlib.sha256(
+                    self.validator._canonical_json(registry).encode("utf-8")
+                ).hexdigest()
+                self.validator.LEGACY_DESCRIPTOR_GRANDFATHER_HASHES.setdefault(
+                    ("example.com", "auth-profile-registry.json"), set()
+                ).add(registry_hash)
+                with self.assertRaises(self.validator.PolicyValidationError) as raised:
+                    self.validator.validate_server_policy_files("example.com", "test", files)
+                self.assertEqual(raised.exception.code, expected_code)
+
+        files = integration_files()
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files(
+                "example.com",
+                "test",
+                files,
+                expected_scope={"tenantId": "tenant-example", "draftId": "other-draft"},
+            )
+        self.assertEqual(raised.exception.code, "scope_binding_mismatch")
+
+    def test_integration_onboarding_routes_reject_secrets_provider_ids_and_urls(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        fixture = load_json(FIXTURE_DIR / "integration-bindings.json")
+
+        cases = (
+            ("/stripe/return?token=sk_test_example", "secret_value_forbidden"),
+            ("acct_example", "provider_resource_id_forbidden"),
+            ("/stripe/accounts/acct_example/return", "provider_resource_id_forbidden"),
+            ("https://evil.example/return", "schema_invalid"),
+            ("/stripe/return?next=https://evil.example", "schema_invalid"),
+        )
+        for value, expected_code in cases:
+            with self.subTest(expected_code=expected_code):
+                candidate = copy.deepcopy(fixture)
+                candidate["bindings"][0]["stripe"]["onboardingRoutes"]["returnPath"] = value
+                with self.assertRaises(self.validator.PolicyValidationError) as raised:
+                    self.validator.validate_server_policy_files("example.com", "test", [{
+                        "path": "example.com/server/integration-bindings.json",
+                        "content": candidate,
+                    }])
+                self.assertEqual(raised.exception.code, expected_code)
+
     def test_stripe_settings_and_active_commerce_capabilities_are_required(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
         integration = load_json(FIXTURE_DIR / "integration-bindings.json")

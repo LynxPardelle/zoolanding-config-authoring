@@ -60,6 +60,10 @@ COMMERCE_CAPABILITIES = {
     "commerce:subscription:manage",
     "commerce:fiscal:manage",
 }
+INTEGRATION_ADMIN_CAPABILITIES = {
+    "integration:read",
+    "integration:manage",
+}
 NOTIFICATION_TEMPLATES_BY_TYPE = {
     "payment-succeeded": "payment-succeeded-v1",
     "payment-failed": "payment-failed-v1",
@@ -110,7 +114,7 @@ PII_FIELD_NAME_PATTERN = re.compile(
     re.IGNORECASE,
 )
 PROVIDER_RESOURCE_ID_PATTERN = re.compile(
-    r"^(?:acct|cus|price|prod|sub|si|cs|pi|pm|src|ch|in|evt|seti|sess)_[A-Za-z0-9]",
+    r"(?<![A-Za-z0-9])(?:acct|cus|price|prod|sub|si|cs|pi|pm|src|ch|in|evt|seti|sess)_[A-Za-z0-9]",
     re.IGNORECASE,
 )
 LEGACY_SECRET_REF_SEGMENT = r"[A-Za-z0-9_.+=@-]+"
@@ -659,6 +663,19 @@ def _load_schemas() -> Dict[str, Dict[str, Any]]:
 
 
 def _validate_code_owned_descriptor_values(name: str, content: Dict[str, Any]) -> None:
+    if name == "integration-bindings.json":
+        admin_access = content.get("adminAccess")
+        if (
+            _is_object(admin_access)
+            and admin_access.get("mode") == "auth-profile"
+            and isinstance(admin_access.get("capabilities"), list)
+            and any(
+                capability not in INTEGRATION_ADMIN_CAPABILITIES
+                for capability in admin_access["capabilities"]
+            )
+        ):
+            raise PolicyValidationError("integration_capability_not_supported")
+        return
     if name == "data-spaces.json":
         for space in content.get("spaces") or []:
             access = space.get("access") if _is_object(space) else None
@@ -787,7 +804,8 @@ def validate_server_policy_files(
         descriptors[name] = content
 
     data_spaces = descriptors.get("data-spaces.json", {})
-    bindings = descriptors.get("integration-bindings.json", {}).get("bindings", [])
+    integration_descriptor = descriptors.get("integration-bindings.json", {})
+    bindings = integration_descriptor.get("bindings", [])
     notifications = descriptors.get("notification-policies.json", {}).get("policies", [])
     expected_mode = "live" if environment == "production" else "test"
     for binding in bindings:
@@ -807,6 +825,22 @@ def validate_server_policy_files(
             raise PolicyValidationError("stripe_settings_required")
         if provider != "stripe" and binding.get("stripe") is not None:
             raise PolicyValidationError("stripe_settings_not_allowed")
+        if "connect-onboarding" in (binding.get("capabilities") or []):
+            integration_admin_access = integration_descriptor.get("adminAccess")
+            if (
+                not _is_object(integration_admin_access)
+                or integration_admin_access.get("mode") != "auth-profile"
+                or "integration:manage" not in (
+                    integration_admin_access.get("capabilities") or []
+                )
+            ):
+                raise PolicyValidationError("integration_admin_access_required")
+            stripe_settings = binding.get("stripe")
+            if (
+                not _is_object(stripe_settings)
+                or not _is_object(stripe_settings.get("onboardingRoutes"))
+            ):
+                raise PolicyValidationError("integration_onboarding_routes_required")
     if any(policy.get("provider") not in NOTIFICATION_PROVIDERS for policy in notifications if _is_object(policy)):
         raise PolicyValidationError("unknown_provider")
     if _duplicate_ids(data_spaces.get("spaces")) or _duplicate_ids(bindings) or _duplicate_ids(notifications):
@@ -910,21 +944,36 @@ def validate_server_policy_files(
         if _is_object(auth_registry)
         else {}
     )
-    auth_profile_references: list[tuple[Any, Any]] = []
+    auth_profile_references: list[tuple[Any, Any, bool]] = []
     for space in data_spaces.get("spaces") or []:
         access = space.get("access") if _is_object(space) else None
         if _is_object(access) and access.get("mode") == "auth-profile":
-            auth_profile_references.append((access.get("authProfileId"), data_spaces.get("scope")))
+            auth_profile_references.append((
+                access.get("authProfileId"),
+                data_spaces.get("scope"),
+                False,
+            ))
     admin_access = commerce.get("adminAccess") if commerce else None
     if _is_object(admin_access) and admin_access.get("mode") == "auth-profile":
         auth_profile_references.append((
             admin_access.get("authProfileId"),
             descriptors.get("commerce.json", {}).get("scope"),
+            False,
+        ))
+    integration_admin_access = integration_descriptor.get("adminAccess")
+    if (
+        _is_object(integration_admin_access)
+        and integration_admin_access.get("mode") == "auth-profile"
+    ):
+        auth_profile_references.append((
+            integration_admin_access.get("authProfileId"),
+            integration_descriptor.get("scope"),
+            True,
         ))
     if auth_profile_references:
         if not _is_object(auth_registry):
             raise PolicyValidationError("auth_profile_registry_required")
-        for auth_profile_id, reference_scope in auth_profile_references:
+        for auth_profile_id, reference_scope, require_group_policy in auth_profile_references:
             profile = profiles_by_id.get(auth_profile_id)
             if not _is_object(profile):
                 raise PolicyValidationError("auth_profile_not_found")
@@ -936,6 +985,24 @@ def validate_server_policy_files(
                 or (profile.get("domain") is not None and profile.get("domain") != reference_scope.get("domain"))
             ):
                 raise PolicyValidationError("auth_profile_scope_mismatch")
+            if require_group_policy:
+                allowed_groups = profile.get("allowedGroups")
+                admin_groups = profile.get("adminGroups")
+                if (
+                    not isinstance(allowed_groups, list)
+                    or not allowed_groups
+                    or not isinstance(admin_groups, list)
+                    or not admin_groups
+                    or any(
+                        not isinstance(group, str)
+                        or not LEGACY_PROVIDER_ID_PATTERN.fullmatch(group)
+                        for group in allowed_groups + admin_groups
+                    )
+                    or len(allowed_groups) != len(set(allowed_groups))
+                    or len(admin_groups) != len(set(admin_groups))
+                    or not set(admin_groups).issubset(set(allowed_groups))
+                ):
+                    raise PolicyValidationError("auth_profile_group_policy_invalid")
 
     if environment == "production":
         for binding in bindings:

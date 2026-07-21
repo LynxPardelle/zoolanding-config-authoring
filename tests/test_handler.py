@@ -158,6 +158,9 @@ class AuthoringHandlerTest(unittest.TestCase):
         )
         bindings = json.loads(binding_path.read_text(encoding="utf-8"))
         bindings["scope"]["domain"] = "pamelabetancourt.com"
+        bindings["adminAccess"] = {"mode": "none"}
+        bindings["bindings"][0]["capabilities"].remove("connect-onboarding")
+        bindings["bindings"][0]["stripe"].pop("onboardingRoutes")
         bindings["bindings"].append({
             "id": "smtp-primary",
             "provider": "email.smtp",

@@ -4,6 +4,7 @@
     {
       "authProfileId": "staff",
       "tenantId": "tenant-example",
+      "domain": "example.com",
       "status": "active",
       "provider": "cognito",
       "issuer": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_EXAMPLE",
@@ -14,6 +15,8 @@
       "logoutUrls": ["https://example.com/auth/logout"],
       "loginPath": "/login",
       "logoutPath": "/auth/logout",
+      "allowedGroups": ["staff", "administrators"],
+      "adminGroups": ["administrators"],
       "socialIdpSecretRefs": {
         "google": {
           "clientSecret": "/zoolanding/auth/example/google"
