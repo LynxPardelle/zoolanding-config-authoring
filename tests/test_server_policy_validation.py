@@ -431,6 +431,67 @@ class ServerPolicyValidationTest(unittest.TestCase):
         }
         self.assertIn("property_not_allowed", codes)
 
+    def test_customer_portal_capability_requires_only_a_safe_same_origin_return_path(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "integration-bindings.schema.json")
+        fixture = load_json(FIXTURE_DIR / "integration-bindings.json")
+        binding = fixture["bindings"][0]
+
+        self.assertEqual(
+            binding["stripe"].get("customerPortalReturnPath"),
+            "/admin/suscripcion",
+        )
+        self.assertEqual(self.validator.validate_schema(schema, fixture), [])
+
+        missing = copy.deepcopy(fixture)
+        missing["bindings"][0]["stripe"].pop("customerPortalReturnPath")
+        self.assertIn(
+            "required",
+            {error["code"] for error in self.validator.validate_schema(schema, missing)},
+        )
+
+        unused = copy.deepcopy(fixture)
+        unused_binding = unused["bindings"][0]
+        unused_binding["capabilities"].remove("customer-portal")
+        self.assertIn(
+            "not_allowed",
+            {error["code"] for error in self.validator.validate_schema(schema, unused)},
+        )
+        unused_binding["stripe"].pop("customerPortalReturnPath")
+        self.assertEqual(self.validator.validate_schema(schema, unused), [])
+
+        for value in (
+            "https://evil.example/portal",
+            "//evil.example/portal",
+            "/portal?next=/admin",
+            "/portal#account",
+        ):
+            with self.subTest(value=value):
+                candidate = copy.deepcopy(fixture)
+                candidate["bindings"][0]["stripe"]["customerPortalReturnPath"] = value
+                self.assertIn(
+                    "string_pattern",
+                    {
+                        error["code"]
+                        for error in self.validator.validate_schema(schema, candidate)
+                    },
+                )
+
+        provider_id = copy.deepcopy(fixture)
+        provider_id["bindings"][0]["stripe"]["customerPortalReturnPath"] = (
+            "/portal/accounts/acct_synthetic"
+        )
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files(
+                "example.com",
+                "test",
+                [{
+                    "path": "example.com/server/integration-bindings.json",
+                    "content": provider_id,
+                }],
+            )
+        self.assertEqual(raised.exception.code, "provider_resource_id_forbidden")
+
     def test_integration_admin_profile_requires_active_matching_group_policy(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
 

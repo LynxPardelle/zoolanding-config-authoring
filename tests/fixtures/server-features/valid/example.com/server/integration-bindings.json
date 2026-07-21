@@ -39,6 +39,7 @@
         "taxMode": "unconfigured",
         "platformFeeMode": "disabled",
         "webhookIngress": "direct-integrations-api",
+        "customerPortalReturnPath": "/admin/suscripcion",
         "onboardingRoutes": {
           "returnPath": "/admin/integrations/stripe/return",
           "refreshPath": "/admin/integrations/stripe/refresh"

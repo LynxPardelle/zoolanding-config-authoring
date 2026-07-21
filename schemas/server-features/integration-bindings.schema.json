@@ -101,13 +101,40 @@
         "taxApprovalId": { "$ref": "#/definitions/safeId" },
         "platformFeeMode": { "enum": ["disabled", "application-fee"] },
         "webhookIngress": { "const": "direct-integrations-api" },
-        "onboardingRoutes": { "$ref": "#/definitions/onboardingRoutes" }
+        "onboardingRoutes": { "$ref": "#/definitions/onboardingRoutes" },
+        "customerPortalReturnPath": { "$ref": "#/definitions/sameOriginPath" }
       },
       "additionalProperties": false
     },
     "binding": {
       "type": "object",
       "required": ["id", "provider", "adapterVersion", "connectionId", "status", "mode", "capabilities"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "capabilities": {
+                "not": {
+                  "items": { "not": { "const": "customer-portal" } }
+                }
+              }
+            },
+            "required": ["capabilities"]
+          },
+          "then": {
+            "properties": {
+              "stripe": { "required": ["customerPortalReturnPath"] }
+            }
+          },
+          "else": {
+            "properties": {
+              "stripe": {
+                "not": { "required": ["customerPortalReturnPath"] }
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "id": { "$ref": "#/definitions/safeId" },
         "provider": { "$ref": "#/definitions/safeId" },
