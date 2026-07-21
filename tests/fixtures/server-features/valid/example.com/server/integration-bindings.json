@@ -32,6 +32,7 @@
         "customer-portal"
       ],
       "stripe": {
+        "accountStrategy": "oauth-standard-v1",
         "accountModel": "merchant",
         "chargeType": "direct",
         "feePayer": "connected-account",

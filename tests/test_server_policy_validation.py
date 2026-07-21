@@ -339,6 +339,44 @@ class ServerPolicyValidationTest(unittest.TestCase):
             },
         ])
 
+    def test_stripe_account_strategy_is_required_and_closed_to_accounts_v1(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "integration-bindings.schema.json")
+        fixture = load_json(FIXTURE_DIR / "integration-bindings.json")
+        stripe_schema = schema["definitions"]["stripeSettings"]
+
+        self.assertIn("accountStrategy", stripe_schema["required"])
+        self.assertEqual(
+            stripe_schema["properties"]["accountStrategy"]["enum"],
+            ["oauth-standard-v1", "controller-account-link-v1"],
+        )
+        self.assertEqual(
+            fixture["bindings"][0]["stripe"]["accountStrategy"],
+            "oauth-standard-v1",
+        )
+
+        missing = copy.deepcopy(fixture)
+        missing["bindings"][0]["stripe"].pop("accountStrategy")
+        codes = {
+            error["code"]
+            for error in self.validator.validate_schema(schema, missing)
+        }
+        self.assertIn("required", codes)
+
+        for strategy in ("oauth-standard-v1", "controller-account-link-v1"):
+            with self.subTest(strategy=strategy):
+                candidate = copy.deepcopy(fixture)
+                candidate["bindings"][0]["stripe"]["accountStrategy"] = strategy
+                self.assertEqual(self.validator.validate_schema(schema, candidate), [])
+
+        unknown = copy.deepcopy(fixture)
+        unknown["bindings"][0]["stripe"]["accountStrategy"] = "accounts-v2"
+        codes = {
+            error["code"]
+            for error in self.validator.validate_schema(schema, unknown)
+        }
+        self.assertIn("enum_mismatch", codes)
+
     def test_connect_onboarding_requires_manage_and_same_origin_routes(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
         fixture = load_json(FIXTURE_DIR / "integration-bindings.json")

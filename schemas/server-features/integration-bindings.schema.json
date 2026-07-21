@@ -91,8 +91,9 @@
     },
     "stripeSettings": {
       "type": "object",
-      "required": ["accountModel", "chargeType", "feePayer", "taxMode", "platformFeeMode", "webhookIngress"],
+      "required": ["accountStrategy", "accountModel", "chargeType", "feePayer", "taxMode", "platformFeeMode", "webhookIngress"],
       "properties": {
+        "accountStrategy": { "enum": ["oauth-standard-v1", "controller-account-link-v1"] },
         "accountModel": { "const": "merchant" },
         "chargeType": { "const": "direct" },
         "feePayer": { "const": "connected-account" },
