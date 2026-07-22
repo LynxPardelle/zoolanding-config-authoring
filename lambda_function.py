@@ -7,7 +7,12 @@ import unicodedata
 from typing import Any, Dict, Optional
 from urllib.parse import unquote
 
-from server_policy_validation import PolicyValidationError, validate_notification_secrets, validate_server_policy_files
+from server_policy_validation import (
+    PolicyValidationError,
+    validate_notification_secrets,
+    validate_server_feature_runtime_config,
+    validate_server_policy_files,
+)
 from zoolanding_lambda_common import (
     bad_request,
     build_version_id,
@@ -85,6 +90,7 @@ SAFE_VALIDATION_CODES = {
     "invalid_server_path",
     "kind_mismatch",
     "runtime_content_hub_limit_exceeded",
+    "server_feature_runtime_invalid",
     "unknown_server_descriptor",
 }
 
@@ -580,6 +586,16 @@ def _normalize_files(
             "content": content,
         })
 
+    site_config = next(
+        (
+            entry["content"]
+            for entry in normalized
+            if entry["path"] == f"{domain}/site-config.json"
+        ),
+        None,
+    )
+    if isinstance(site_config, dict):
+        validate_server_feature_runtime_config(domain, site_config, normalized)
     validate_server_policy_files(domain, environment, normalized, expected_scope=expected_scope)
     return normalized
 

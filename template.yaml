@@ -112,6 +112,40 @@ Resources:
           Value:
             Ref: EnvironmentName
 
+  ConfigRegistryTableNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: /zoolanding/${EnvironmentName}/config/registry-table-name
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: ConfigTableName
+      Description: Environment-scoped Config Registry table identifier for Zoolanding services.
+      Tags:
+        Project: Zoolandingpage
+        Component: ConfigAuthoring
+        ManagedBy: SAM
+        Environment:
+          Ref: EnvironmentName
+
+  ConfigPayloadsBucketNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name:
+        Fn::Sub: /zoolanding/${EnvironmentName}/config/payload-bucket-name
+      Type: String
+      Tier: Standard
+      Value:
+        Ref: ConfigPayloadsBucketName
+      Description: Environment-scoped Config payload bucket identifier for Zoolanding services.
+      Tags:
+        Project: Zoolandingpage
+        Component: ConfigAuthoring
+        ManagedBy: SAM
+        Environment:
+          Ref: EnvironmentName
+
   AuthoringApi:
     Type: AWS::Serverless::Api
     Properties:

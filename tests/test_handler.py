@@ -1644,6 +1644,96 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(metadata_after, metadata_before)
         self.assertNotIn("publishedEnvironments", metadata_after)
 
+    def test_new_server_feature_runtime_contract_fails_before_any_storage_write(self):
+        files = self.draft_files()
+        files[0]["content"]["runtime"] = {
+            "apiActions": [
+                {
+                    "id": "duplicate-action",
+                    "proxyActionId": "legacy-action",
+                },
+                {
+                    "id": "duplicate-action",
+                    "kind": "data-space",
+                    "dataSpace": {
+                        "action": "createRecord",
+                        "spaceId": "primary-content",
+                    },
+                    "inputFields": ["collectionId", "recordId", "data"],
+                },
+            ],
+        }
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "invalid-runtime-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "server_feature_runtime_invalid")
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_publish_revalidates_stored_server_feature_runtime_contract(self):
+        files = self.draft_files()
+        files[0]["content"].update({
+            "routes": [{
+                "path": "/integraciones/stripe/retorno",
+                "pageId": "stripe-return",
+                "auth": {"required": True},
+            }],
+            "runtime": {
+                "apiActions": [{
+                    "id": "stripe-return",
+                    "kind": "integrations",
+                    "integrations": {
+                        "action": "stripeOnboardingReturn",
+                        "bindingId": "stripe-main",
+                    },
+                    "trigger": "route-load",
+                    "pageIds": ["stripe-return"],
+                }],
+            },
+        })
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "runtime-guard-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+        self.assertEqual(response["statusCode"], 200)
+
+        prefix = "sites/pamelabetancourt.com/versions/runtime-guard-v1/"
+        site_config_path = "pamelabetancourt.com/site-config.json"
+        site_config = self.objects[f"{prefix}{site_config_path}"]
+        site_config["routes"][0]["auth"]["required"] = False
+        manifest = self.objects[f"{prefix}_manifest.json"]
+        manifest_entry = next(entry for entry in manifest["files"] if entry["path"] == site_config_path)
+        manifest_entry["sha256"] = hashlib.sha256(
+            json.dumps(site_config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        metadata_before = copy.deepcopy(self.items[("SITE#pamelabetancourt.com", "METADATA")])
+
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "runtime-guard-v1",
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "stored_package_invalid")
+        self.assertEqual(
+            self.items[("SITE#pamelabetancourt.com", "METADATA")],
+            metadata_before,
+        )
+        self.assertNotIn("publishedEnvironments", metadata_before)
+
     def test_content_hub_files_reject_server_only_fields(self):
         files = self.draft_files() + [
             {

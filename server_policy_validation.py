@@ -5,6 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from urllib.parse import unquote, urlsplit
 
 
 MAX_DESCRIPTOR_BYTES = 256 * 1024
@@ -70,6 +71,87 @@ NOTIFICATION_TEMPLATES_BY_TYPE = {
     "payment-failed": "payment-failed-v1",
 }
 MAX_NOTIFICATION_SECRET_CHECKS = 20
+SERVER_FEATURE_RUNTIME_KINDS = {"data-space", "commerce", "integrations"}
+SERVER_FEATURE_SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+SERVER_FEATURE_RUNTIME_MISSING = object()
+SERVER_FEATURE_BINDING_KEYS = {
+    "authAdminSource", "contentHub", "comboCatalog", "dataSpace", "commerce", "integrations",
+}
+DATA_SPACE_RUNTIME_READS = {"collectionList", "collectionSchema", "recordList", "recordDetail"}
+DATA_SPACE_PUBLIC_RUNTIME_READS = {"recordList", "recordDetail"}
+DATA_SPACE_RUNTIME_ACTIONS = {
+    "createCollection", "updateCollection", "createRecord", "updateRecord", "publishRecord", "unpublishRecord",
+}
+COMMERCE_RUNTIME_READS = {"itemList", "itemDetail", "offerList", "offerDetail", "discountList", "discountDetail"}
+COMMERCE_PUBLIC_RUNTIME_READS = {"offerList", "offerDetail"}
+COMMERCE_RUNTIME_ACTIONS = {
+    "createItem", "createOfferVersion", "createDiscountVersion", "advanceOfferLifecycle",
+    "updateOfferPresentation", "advanceDiscountLifecycle", "updateDiscountPresentation", "adjustStock",
+    "changePlan", "applyDiscount", "removeDiscount", "pause", "resume", "openPortal",
+    "migrationPreview", "migrationExecute", "migrationPause", "migrationResume", "migrationCancel",
+    "migrationStatus", "admitCheckout",
+}
+INTEGRATION_RUNTIME_READS = {"connectionList"}
+INTEGRATION_RUNTIME_ACTIONS = {
+    "disable", "requestReconnect", "stripeOnboardingStart", "stripeOnboardingReturn", "stripeOnboardingDeauthorize",
+}
+USER_GESTURE_RUNTIME_ACTIONS = {
+    "openPortal", "admitCheckout", "stripeOnboardingStart", "stripeOnboardingDeauthorize",
+}
+DATA_SPACE_RUNTIME_READ_INPUTS = {
+    "collectionList": (set(), {"limit", "cursor"}),
+    "collectionSchema": ({"collectionId"}, {"collectionId"}),
+    "recordList": ({"collectionId"}, {"collectionId", "limit", "cursor"}),
+    "recordDetail": ({"collectionId", "recordId"}, {"collectionId", "recordId"}),
+}
+COMMERCE_RUNTIME_READ_INPUTS = {
+    "itemList": (set(), {"limit", "cursor"}),
+    "itemDetail": ({"resourceId"}, {"resourceId"}),
+    "offerList": (set(), {"limit", "cursor"}),
+    "offerDetail": ({"resourceId"}, {"resourceId"}),
+    "discountList": (set(), {"limit", "cursor"}),
+    "discountDetail": ({"resourceId"}, {"resourceId"}),
+}
+SERVER_FEATURE_RUNTIME_ACTION_INPUTS = {
+    "createCollection": ({"collectionId", "schema"}, {"collectionId", "schema"}),
+    "updateCollection": ({"collectionId", "schema", "expectedRevision"}, {"collectionId", "schema", "expectedRevision"}),
+    "createRecord": ({"collectionId", "recordId", "data"}, {"collectionId", "recordId", "data"}),
+    "updateRecord": ({"collectionId", "recordId", "data", "expectedRevision"}, {"collectionId", "recordId", "data", "expectedRevision"}),
+    "publishRecord": ({"collectionId", "recordId", "expectedRevision"}, {"collectionId", "recordId", "expectedRevision"}),
+    "unpublishRecord": ({"collectionId", "recordId", "expectedRevision"}, {"collectionId", "recordId", "expectedRevision"}),
+    "createItem": ({"itemId", "sellableType"}, {"itemId", "sellableType", "variants", "dataSpaceReference"}),
+    "createOfferVersion": (
+        {"versionId", "catalogItemId", "revision", "sellableType", "unitPrice", "taxBehavior"},
+        {"versionId", "catalogItemId", "revision", "sellableType", "unitPrice", "taxBehavior", "variantId", "recurrence", "displayName", "displayDescription"},
+    ),
+    "createDiscountVersion": (
+        {"versionId", "revision", "duration"},
+        {"versionId", "revision", "duration", "percentageBasisPoints", "fixedAmount", "durationInMonths", "eligibleOfferVersionIds", "redemptionLimit", "redeemByEpoch", "customerFacingCode", "displayName", "displayDescription"},
+    ),
+    "advanceOfferLifecycle": ({"versionId", "targetState", "expectedRevision"}, {"versionId", "targetState", "expectedRevision"}),
+    "updateOfferPresentation": ({"versionId", "expectedRevision"}, {"versionId", "expectedRevision", "displayName", "displayDescription"}),
+    "advanceDiscountLifecycle": ({"versionId", "targetState", "expectedRevision"}, {"versionId", "targetState", "expectedRevision"}),
+    "updateDiscountPresentation": ({"versionId", "expectedRevision"}, {"versionId", "expectedRevision", "displayName", "displayDescription"}),
+    "adjustStock": ({"stockId", "delta", "expectedRevision"}, {"stockId", "delta", "expectedRevision"}),
+    "changePlan": ({"subscriptionId", "targetOfferVersionId", "expectedRevision"}, {"subscriptionId", "targetOfferVersionId", "expectedRevision"}),
+    "applyDiscount": ({"subscriptionId", "discountVersionId", "expectedRevision"}, {"subscriptionId", "discountVersionId", "expectedRevision"}),
+    "removeDiscount": ({"subscriptionId", "expectedRevision"}, {"subscriptionId", "expectedRevision"}),
+    "pause": ({"subscriptionId", "expectedRevision"}, {"subscriptionId", "expectedRevision"}),
+    "resume": ({"subscriptionId", "expectedRevision"}, {"subscriptionId", "expectedRevision"}),
+    "openPortal": ({"subscriptionId"}, {"subscriptionId"}),
+    "migrationPreview": ({"sourceOfferVersionId", "targetOfferVersionId"}, {"sourceOfferVersionId", "targetOfferVersionId"}),
+    "migrationExecute": ({"commercialRequestId", "dryRunRevision", "dryRunHash", "confirmation"}, {"commercialRequestId", "dryRunRevision", "dryRunHash", "confirmation"}),
+    "migrationPause": ({"commercialRequestId", "expectedRevision"}, {"commercialRequestId", "expectedRevision"}),
+    "migrationResume": ({"commercialRequestId", "expectedRevision"}, {"commercialRequestId", "expectedRevision"}),
+    "migrationCancel": ({"commercialRequestId", "expectedRevision"}, {"commercialRequestId", "expectedRevision"}),
+    "migrationStatus": ({"commercialRequestId"}, {"commercialRequestId", "limit", "cursor"}),
+    "admitCheckout": ({"lines"}, {"lines", "discountVersionId"}),
+    "disable": ({"connectionId", "expectedRevision"}, {"connectionId", "expectedRevision"}),
+    "requestReconnect": ({"connectionId", "expectedRevision"}, {"connectionId", "expectedRevision"}),
+    "stripeOnboardingStart": (set(), set()),
+    "stripeOnboardingReturn": (set(), set()),
+    "stripeOnboardingDeauthorize": (set(), set()),
+}
 SUPPORTED_SCHEMA_KEYWORDS = {
     "$schema", "$id", "$ref", "title", "description", "definitions", "type", "required",
     "properties", "additionalProperties", "propertyNames", "minProperties", "maxProperties",
@@ -739,6 +821,412 @@ def _validate_code_owned_descriptor_values(name: str, content: Dict[str, Any]) -
                 }
                 if set(template_ids) != expected_templates:
                     raise PolicyValidationError("notification_template_mismatch")
+
+
+def _runtime_invalid() -> None:
+    raise ValueError("server_feature_runtime_invalid")
+
+
+def _runtime_has_only_keys(value: Any, allowed: set[str]) -> bool:
+    return isinstance(value, dict) and set(value).issubset(allowed)
+
+
+def _runtime_guard_enabled(site_config: Dict[str, Any]) -> bool:
+    runtime = site_config.get("runtime")
+    if not isinstance(runtime, dict):
+        return False
+    data_sources = runtime.get("dataSources")
+    actions = runtime.get("apiActions")
+    return (
+        isinstance(data_sources, list)
+        and any(
+            isinstance(source, dict)
+            and str(source.get("kind") or "") in SERVER_FEATURE_RUNTIME_KINDS
+            for source in data_sources
+        )
+    ) or (
+        isinstance(actions, list)
+        and any(
+            isinstance(action, dict)
+            and (
+                str(action.get("kind") or "") in SERVER_FEATURE_RUNTIME_KINDS
+                or action.get("trigger") == "route-load"
+            )
+            for action in actions
+        )
+    )
+
+
+def _runtime_expected_binding_key(kind: str) -> str:
+    return "dataSpace" if kind == "data-space" else kind
+
+
+def _runtime_exact_binding(value: Dict[str, Any], kind: str) -> Optional[Dict[str, Any]]:
+    expected = _runtime_expected_binding_key(kind)
+    present = [key for key in SERVER_FEATURE_BINDING_KEYS if key in value]
+    binding = value.get(expected)
+    if len(present) != 1 or present[0] != expected or not isinstance(binding, dict):
+        return None
+    return binding
+
+
+def _runtime_valid_input_keys(value: Any, input_contract: Optional[tuple[set[str], set[str]]]) -> bool:
+    if input_contract is None or (
+        value is not SERVER_FEATURE_RUNTIME_MISSING and not isinstance(value, dict)
+    ):
+        return False
+    keys = set(value) if isinstance(value, dict) else set()
+    required, allowed = input_contract
+    return required.issubset(keys) and keys.issubset(allowed)
+
+
+def _runtime_valid_action_fields(value: Any, input_contract: Optional[tuple[set[str], set[str]]]) -> bool:
+    if input_contract is None or (
+        value is not SERVER_FEATURE_RUNTIME_MISSING and not isinstance(value, list)
+    ):
+        return False
+    fields = value if isinstance(value, list) else []
+    if (
+        any(not isinstance(field, str) or not field.strip() for field in fields)
+        or len(set(fields)) != len(fields)
+    ):
+        return False
+    required, allowed = input_contract
+    field_set = set(fields)
+    return required.issubset(field_set) and field_set.issubset(allowed)
+
+
+def _runtime_read_binding(kind: str, binding: Dict[str, Any]) -> Optional[tuple[str, str]]:
+    if kind == "data-space":
+        if (
+            not _runtime_has_only_keys(binding, {"read", "action", "spaceId", "access"})
+            or binding.get("read") not in DATA_SPACE_RUNTIME_READS
+            or "action" in binding
+            or not isinstance(binding.get("spaceId"), str)
+            or SERVER_FEATURE_SAFE_ID_PATTERN.fullmatch(binding["spaceId"]) is None
+            or ("access" in binding and binding.get("access") not in {"protected", "public"})
+            or (
+                binding.get("access") == "public"
+                and binding.get("read") not in DATA_SPACE_PUBLIC_RUNTIME_READS
+            )
+        ):
+            return None
+        return binding["read"], str(binding.get("access") or "protected")
+    if kind == "commerce":
+        if (
+            not _runtime_has_only_keys(binding, {"read", "action", "access"})
+            or binding.get("read") not in COMMERCE_RUNTIME_READS
+            or "action" in binding
+            or ("access" in binding and binding.get("access") not in {"protected", "public"})
+            or (
+                binding.get("access") == "public"
+                and binding.get("read") not in COMMERCE_PUBLIC_RUNTIME_READS
+            )
+        ):
+            return None
+        return binding["read"], str(binding.get("access") or "protected")
+    if (
+        not _runtime_has_only_keys(binding, {"read", "action", "bindingId"})
+        or binding.get("read") not in INTEGRATION_RUNTIME_READS
+        or "action" in binding
+        or "bindingId" in binding
+    ):
+        return None
+    return binding["read"], "protected"
+
+
+def _runtime_action_binding(kind: str, binding: Dict[str, Any]) -> Optional[str]:
+    if kind == "data-space":
+        if (
+            not _runtime_has_only_keys(binding, {"read", "action", "spaceId", "access"})
+            or binding.get("action") not in DATA_SPACE_RUNTIME_ACTIONS
+            or "read" in binding
+            or "access" in binding
+            or not isinstance(binding.get("spaceId"), str)
+            or SERVER_FEATURE_SAFE_ID_PATTERN.fullmatch(binding["spaceId"]) is None
+        ):
+            return None
+        return binding["action"]
+    if kind == "commerce":
+        if (
+            not _runtime_has_only_keys(binding, {"read", "action", "access"})
+            or binding.get("action") not in COMMERCE_RUNTIME_ACTIONS
+            or "read" in binding
+            or "access" in binding
+        ):
+            return None
+        return binding["action"]
+    operation = binding.get("action")
+    if (
+        not _runtime_has_only_keys(binding, {"read", "action", "bindingId"})
+        or operation not in INTEGRATION_RUNTIME_ACTIONS
+        or "read" in binding
+    ):
+        return None
+    onboarding = str(operation).startswith("stripeOnboarding")
+    valid_binding_id = (
+        isinstance(binding.get("bindingId"), str)
+        and SERVER_FEATURE_SAFE_ID_PATTERN.fullmatch(binding["bindingId"]) is not None
+    )
+    if onboarding != valid_binding_id or (not onboarding and "bindingId" in binding):
+        return None
+    return str(operation)
+
+
+def _validate_runtime_data_source(source: Any) -> None:
+    if not isinstance(source, dict):
+        _runtime_invalid()
+    kind = str(source.get("kind") or "")
+    if kind not in SERVER_FEATURE_RUNTIME_KINDS:
+        return
+    if not isinstance(source.get("id"), str) or not source["id"].strip():
+        _runtime_invalid()
+    if "proxySourceId" in source:
+        _runtime_invalid()
+    binding = _runtime_exact_binding(source, kind)
+    binding_result = _runtime_read_binding(kind, binding) if binding is not None else None
+    if binding_result is None:
+        _runtime_invalid()
+    operation, access = binding_result
+    if not isinstance(source.get("target"), str) or not source["target"].strip():
+        _runtime_invalid()
+    if kind == "data-space":
+        input_contract = DATA_SPACE_RUNTIME_READ_INPUTS.get(operation)
+    elif kind == "commerce" and operation == "offerDetail" and access == "public":
+        input_contract = ({"offerVersionId"}, {"offerVersionId"})
+    elif kind == "commerce":
+        input_contract = COMMERCE_RUNTIME_READ_INPUTS.get(operation)
+    else:
+        input_contract = (set(), set())
+    if not _runtime_valid_input_keys(source.get("input", SERVER_FEATURE_RUNTIME_MISSING), input_contract):
+        _runtime_invalid()
+    if "ssr" in source and type(source.get("ssr")) is not bool:
+        _runtime_invalid()
+    if source.get("ssr") is True and (kind == "integrations" or access != "public"):
+        _runtime_invalid()
+
+
+def _runtime_valid_page_ids(value: Any) -> bool:
+    return (
+        isinstance(value, list)
+        and bool(value)
+        and all(isinstance(page_id, str) and bool(page_id.strip()) for page_id in value)
+        and len(set(value)) == len(value)
+    )
+
+
+def _validate_runtime_action(action: Any) -> None:
+    if not isinstance(action, dict):
+        _runtime_invalid()
+    kind = str(action.get("kind") or "")
+    route_load = action.get("trigger") == "route-load"
+    if kind not in SERVER_FEATURE_RUNTIME_KINDS:
+        if route_load:
+            _runtime_invalid()
+        return
+    if not isinstance(action.get("id"), str) or not action["id"].strip():
+        _runtime_invalid()
+    if "proxyActionId" in action:
+        _runtime_invalid()
+    if "method" in action and action.get("method") != "POST":
+        _runtime_invalid()
+    binding = _runtime_exact_binding(action, kind)
+    operation = _runtime_action_binding(kind, binding) if binding is not None else None
+    if operation is None:
+        _runtime_invalid()
+    fields = action.get("inputFields", SERVER_FEATURE_RUNTIME_MISSING)
+    if (
+        not _runtime_valid_action_fields(fields, SERVER_FEATURE_RUNTIME_ACTION_INPUTS.get(operation))
+        or (
+            operation == "createDiscountVersion"
+            and int(isinstance(fields, list) and "percentageBasisPoints" in fields)
+            + int(isinstance(fields, list) and "fixedAmount" in fields)
+            != 1
+        )
+        or (operation == "stripeOnboardingReturn" and "inputFields" in action)
+    ):
+        _runtime_invalid()
+    if "requiresUserGesture" in action and type(action.get("requiresUserGesture")) is not bool:
+        _runtime_invalid()
+    if operation in USER_GESTURE_RUNTIME_ACTIONS and action.get("requiresUserGesture") is not True:
+        _runtime_invalid()
+    if "pageIds" in action and not _runtime_valid_page_ids(action.get("pageIds")):
+        _runtime_invalid()
+    if "trigger" in action and action.get("trigger") != "route-load":
+        _runtime_invalid()
+    if route_load and (
+        kind != "integrations"
+        or operation != "stripeOnboardingReturn"
+        or "requiresUserGesture" in action
+        or "inputFields" in action
+        or not _runtime_valid_page_ids(action.get("pageIds"))
+        or len(action["pageIds"]) != 1
+    ):
+        _runtime_invalid()
+
+
+def _runtime_normalize_route_path(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return "/"
+    path = raw.split("#", 1)[0].split("?", 1)[0] or "/"
+    try:
+        path = unquote(path)
+    except Exception:
+        pass
+    path = path.replace("\\", "/")
+    if not path.startswith("/"):
+        path = "/" + path
+    path = re.sub(r"/+", "/", path)
+    if len(path) > 1:
+        path = path.rstrip("/")
+    return path or "/"
+
+
+def _runtime_route_matches(route_path: Any, requested_path: Any) -> bool:
+    pattern = _runtime_normalize_route_path(route_path)
+    requested = _runtime_normalize_route_path(requested_path)
+    if pattern == requested:
+        return True
+    if "/:" not in pattern:
+        return False
+    pattern_segments = [segment for segment in pattern.split("/") if segment]
+    requested_segments = [segment for segment in requested.split("/") if segment]
+    return len(pattern_segments) == len(requested_segments) and all(
+        (segment.startswith(":") and bool(segment[1:].strip()) and bool(requested_segments[index]))
+        or segment == requested_segments[index]
+        for index, segment in enumerate(pattern_segments)
+    )
+
+
+def _runtime_url_path(value: Any) -> str:
+    if not isinstance(value, str) or not value.strip():
+        return ""
+    try:
+        parsed = urlsplit(value)
+        if parsed.scheme or parsed.netloc:
+            return parsed.path
+    except ValueError:
+        pass
+    return value if value.startswith("/") else ""
+
+
+def _runtime_auth_registry(files: list[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for entry in files:
+        if (
+            entry.get("kind") == "server-auth-profile-registry"
+            or str(entry.get("path") or "").endswith("/server/auth-profile-registry.json")
+        ) and isinstance(entry.get("content"), dict):
+            return entry["content"]
+    return None
+
+
+def _runtime_auth_callbacks(
+    domain: str,
+    runtime: Dict[str, Any],
+    files: list[Dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    page_ids: set[str] = set()
+    paths: set[str] = set()
+    auth = runtime.get("auth")
+    if isinstance(auth, dict):
+        callback_page_id = auth.get("callbackPageId")
+        if isinstance(callback_page_id, str) and callback_page_id.strip():
+            page_ids.add(callback_page_id)
+        redirect_path = _runtime_url_path(auth.get("redirectPath"))
+        if redirect_path:
+            paths.add(redirect_path)
+    auth_remote = runtime.get("authRemote")
+    if not isinstance(auth_remote, dict):
+        return page_ids, paths
+    profile_id = str(auth_remote.get("authProfileId") or "").strip()
+    registry = _runtime_auth_registry(files)
+    profiles = registry.get("profiles") if isinstance(registry, dict) else None
+    matches = [
+        profile
+        for profile in profiles
+        if isinstance(profile, dict)
+        and str(profile.get("authProfileId") or "").strip() == profile_id
+        and (not profile.get("domain") or profile.get("domain") == domain)
+    ] if isinstance(profiles, list) else []
+    if not profile_id or len(matches) != 1:
+        _runtime_invalid()
+    profile = matches[0]
+    callback_page_id = profile.get("callbackPageId")
+    if isinstance(callback_page_id, str) and callback_page_id.strip():
+        page_ids.add(callback_page_id)
+    redirect_path = _runtime_url_path(profile.get("redirectPath"))
+    if redirect_path:
+        paths.add(redirect_path)
+    callback_urls = profile.get("callbackUrls")
+    if isinstance(callback_urls, list):
+        for callback_url in callback_urls:
+            callback_path = _runtime_url_path(callback_url)
+            if callback_path:
+                paths.add(callback_path)
+    if not redirect_path and not isinstance(callback_urls, list):
+        _runtime_invalid()
+    if not redirect_path and isinstance(callback_urls, list) and not callback_urls:
+        _runtime_invalid()
+    return page_ids, paths
+
+
+def validate_server_feature_runtime_config(
+    domain: str,
+    site_config: Dict[str, Any],
+    files: list[Dict[str, Any]],
+) -> None:
+    """Mirror the browser runtime contract before S3 writes and publication."""
+    if not _runtime_guard_enabled(site_config):
+        return
+    runtime = site_config.get("runtime")
+    if not isinstance(runtime, dict):
+        _runtime_invalid()
+    data_sources = runtime.get("dataSources") if isinstance(runtime.get("dataSources"), list) else []
+    actions = runtime.get("apiActions") if isinstance(runtime.get("apiActions"), list) else []
+    for source in data_sources:
+        _validate_runtime_data_source(source)
+    for action in actions:
+        _validate_runtime_action(action)
+    action_ids = [
+        action["id"].strip()
+        for action in actions
+        if isinstance(action, dict) and isinstance(action.get("id"), str) and action["id"].strip()
+    ]
+    if len(action_ids) != len(set(action_ids)):
+        _runtime_invalid()
+    route_load_actions = [
+        action for action in actions
+        if isinstance(action, dict) and action.get("trigger") == "route-load"
+    ]
+    if not route_load_actions:
+        return
+    target_page_ids = [
+        page_id
+        for action in route_load_actions
+        for page_id in (action.get("pageIds") if isinstance(action.get("pageIds"), list) else [])
+    ]
+    if len(target_page_ids) != len(set(target_page_ids)):
+        _runtime_invalid()
+    routes_value = site_config.get("routes")
+    routes = [route for route in routes_value if isinstance(route, dict)] if isinstance(routes_value, list) else []
+    auth_page_ids, auth_paths = _runtime_auth_callbacks(domain, runtime, files)
+    for action in route_load_actions:
+        page_ids = action.get("pageIds")
+        if not _runtime_valid_page_ids(page_ids) or len(page_ids) != 1:
+            _runtime_invalid()
+        page_id = page_ids[0]
+        matching_routes = [route for route in routes if route.get("pageId") == page_id]
+        if len(matching_routes) != 1:
+            _runtime_invalid()
+        route = matching_routes[0]
+        if not isinstance(route.get("auth"), dict) or route["auth"].get("required") is not True:
+            _runtime_invalid()
+        if page_id in auth_page_ids or any(
+            _runtime_route_matches(route.get("path"), callback_path)
+            for callback_path in auth_paths
+        ):
+            _runtime_invalid()
 
 
 def validate_server_policy_files(

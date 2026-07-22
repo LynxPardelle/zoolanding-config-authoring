@@ -24,6 +24,7 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - S3 bucket: `zoolanding-config-payloads`
 - API Gateway: `POST /config-authoring`
 - CloudWatch Logs
+- SSM Parameter Store owns the non-secret environment identifiers `/zoolanding/{test|production}/config/registry-table-name` and `/zoolanding/{test|production}/config/payload-bucket-name` for downstream service deployment inputs.
 
 ## Environment variables
 
@@ -158,6 +159,8 @@ Those hashes were verified read-only on July 14, 2026 Central Time against the c
 Every integration binding descriptor declares one closed root `adminAccess` policy. Internal-only integrations may use `mode: none`; browser-managed integration operations use an active same-scope Auth Profile and only the code-owned `integration:read` and `integration:manage` authorization capabilities. These capabilities are distinct from provider capabilities such as `checkout` or `subscriptions`. Every Stripe binding selects exactly one Accounts v1 strategy through `accountStrategy: oauth-standard-v1|controller-account-link-v1`; Accounts v2 and draft-authored account ownership, provider account IDs, controller properties, client IDs, credentials, tokens, and secret references are not accepted. A Stripe binding that declares `connect-onboarding` must grant `integration:manage`, reference an active matching Auth Profile with nonempty `allowedGroups` and `adminGroups` where every admin group is allowed, and declare bounded same-origin `returnPath` and `refreshPath` values. Absolute URLs, origins, per-role delegation, provider resource IDs, and sensitive values are not accepted by this contract.
 
 Test descriptors use provider mode `test`. Production descriptors use mode `live`, but any active integration, commerce, or notification policy is deliberately blocked by the code-owned `live_gate_unverified` guard until a later approved phase closes the live operational controls. Notification activation also fails closed unless each deterministic SMTP and recipient secret exists, is enabled, is not scheduled for deletion, and has the exact environment/tenant/draft ownership tags. Only `DescribeSecret` is permitted.
+
+Draft packages that opt into the generic `data-space`, `commerce`, or `integrations` browser runtime contract are also validated before the first S3 write. The authoring Lambda enforces the closed read/action input matrices, exact binding shape, POST-only mutation method, public-only SSR boundary, required user gestures, globally unique action IDs, and a single protected Stripe return route that cannot overlap an Auth callback. The same validation runs again against the integrity-checked stored package before a published pointer can move. Drafts that use only the established runtime kinds remain unchanged; this is an explicit opt-in compatibility boundary, not an open extension point.
 
 ## Content hub package files
 

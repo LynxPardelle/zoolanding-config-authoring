@@ -1,6 +1,7 @@
 from pathlib import Path
 import sys
 import unittest
+import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,42 @@ from tools.verify_promotion_provenance import PromotionProvenanceError, verify_p
 
 
 class RepositoryHygieneTest(unittest.TestCase):
+    def test_template_owns_exact_environment_scoped_config_identifier_parameters(self):
+        template = yaml.safe_load((ROOT / "template.yaml").read_text(encoding="utf-8"))
+        resources = template["Resources"]
+        parameters = {
+            name: resource
+            for name, resource in resources.items()
+            if resource.get("Type") == "AWS::SSM::Parameter"
+        }
+        self.assertEqual(
+            {"ConfigRegistryTableNameParameter", "ConfigPayloadsBucketNameParameter"},
+            set(parameters),
+        )
+        self.assertEqual(
+            {
+                "Fn::Sub": "/zoolanding/${EnvironmentName}/config/registry-table-name",
+            },
+            parameters["ConfigRegistryTableNameParameter"]["Properties"]["Name"],
+        )
+        self.assertEqual(
+            {"Ref": "ConfigTableName"},
+            parameters["ConfigRegistryTableNameParameter"]["Properties"]["Value"],
+        )
+        self.assertEqual(
+            {
+                "Fn::Sub": "/zoolanding/${EnvironmentName}/config/payload-bucket-name",
+            },
+            parameters["ConfigPayloadsBucketNameParameter"]["Properties"]["Name"],
+        )
+        self.assertEqual(
+            {"Ref": "ConfigPayloadsBucketName"},
+            parameters["ConfigPayloadsBucketNameParameter"]["Properties"]["Value"],
+        )
+        serialized = str(parameters).lower()
+        for forbidden in ("secret", "credential", "token", "noecho"):
+            self.assertNotIn(forbidden, serialized)
+
     def test_local_and_sam_artifacts_are_ignored(self):
         gitignore_path = ROOT / ".gitignore"
         samignore_path = ROOT / ".aws-samignore"
