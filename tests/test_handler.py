@@ -196,6 +196,73 @@ class AuthoringHandlerTest(unittest.TestCase):
             },
         ]
 
+    def commerce_files(self):
+        fixture_dir = (
+            Path(__file__).resolve().parent
+            / "fixtures/server-features/valid/example.com/server"
+        )
+        bindings = json.loads(
+            (fixture_dir / "integration-bindings.json").read_text(encoding="utf-8")
+        )
+        bindings["scope"]["domain"] = "pamelabetancourt.com"
+        commerce = json.loads(
+            (fixture_dir / "commerce.json").read_text(encoding="utf-8")
+        )
+        commerce["scope"]["domain"] = "pamelabetancourt.com"
+        # Keep this integration test on the generic descriptor boundary. Legacy
+        # auth registries have a separate closed compatibility manifest.
+        commerce["commerce"]["adminAccess"] = {"mode": "none"}
+        return self.draft_files() + [
+            {
+                "path": "pamelabetancourt.com/server/integration-bindings.json",
+                "content": bindings,
+            },
+            {
+                "path": "pamelabetancourt.com/server/commerce.json",
+                "content": commerce,
+            },
+        ]
+
+    def legacy_commerce_files(self):
+        files = self.commerce_files()
+        commerce = next(
+            file["content"]["commerce"]
+            for file in files
+            if file["path"].endswith("commerce.json")
+        )
+        payments = commerce["payments"]
+        for field in ("planChangePolicy", "pausePolicy", "taxPolicy", "migrationPolicy"):
+            payments.pop(field)
+        payments.update({
+            "operatorPauses": True,
+            "proration": "operator-selectable",
+        })
+        commerce["shipping"].pop("allowedCountries")
+        return files
+
+    def seed_stored_package(self, version_id, files):
+        prefix = self.handler.default_version_prefix(
+            "pamelabetancourt.com", version_id
+        )
+        manifest_files = []
+        for file in sorted(files, key=lambda item: item["path"]):
+            content_bytes = json.dumps(
+                file["content"], ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            self.objects[f"{prefix}{file['path']}"] = copy.deepcopy(file["content"])
+            manifest_files.append({
+                "path": file["path"],
+                "kind": self.handler._infer_kind(file["path"]),
+                "sha256": hashlib.sha256(content_bytes).hexdigest(),
+            })
+        self.objects[f"{prefix}_manifest.json"] = {
+            "version": 1,
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+            "files": manifest_files,
+        }
+
     def upsert(self, role_name="draft-pamela-test-deploy", version_id="v1", environment_name="test"):
         return self.handler.lambda_handler(event({
             "action": "upsertDraft",
@@ -1571,6 +1638,90 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(parse(response)["error"], "invalid_route_language")
         self.assertEqual(self.objects, {})
         self.assertEqual(self.items, {})
+
+    def test_current_commerce_contract_is_stored_and_published_end_to_end(self):
+        version_id = "commerce-current-v1"
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+            "files": self.commerce_files(),
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 200)
+        metadata_key = ("SITE#pamelabetancourt.com", "METADATA")
+        self.assertEqual(self.items[metadata_key]["draft"]["versionId"], version_id)
+
+        published = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(published["statusCode"], 200)
+        self.assertEqual(
+            self.items[metadata_key]["publishedEnvironments"]["test"]["versionId"],
+            version_id,
+        )
+
+    def test_legacy_commerce_contract_is_rejected_before_storage(self):
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "commerce-legacy-v1",
+            "files": self.legacy_commerce_files(),
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "server_policy_invalid")
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_tracked_inventory_without_inventory_enablement_fails_before_storage(self):
+        files = self.commerce_files()
+        commerce = next(
+            file["content"]["commerce"]
+            for file in files
+            if file["path"].endswith("commerce.json")
+        )
+        commerce["sellableTypes"].remove("physical")
+        commerce["inventory"].update({"enabled": False, "tracked": True})
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "commerce-invalid-inventory-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "server_policy_invalid")
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_publish_rejects_checksum_consistent_historical_legacy_commerce_without_pointer_movement(self):
+        baseline = self.upsert(version_id="baseline-v1")
+        self.assertEqual(baseline["statusCode"], 200)
+        version_id = "commerce-legacy-v1"
+        self.seed_stored_package(version_id, self.legacy_commerce_files())
+        metadata_key = ("SITE#pamelabetancourt.com", "METADATA")
+        metadata_before = copy.deepcopy(self.items[metadata_key])
+
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "stored_package_invalid")
+        self.assertEqual(self.items[metadata_key], metadata_before)
+        self.assertNotIn("publishedEnvironments", self.items[metadata_key])
 
     def test_publish_revalidates_checksum_consistent_historical_route_languages(self):
         files = self.route_language_files()

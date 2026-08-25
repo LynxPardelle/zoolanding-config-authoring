@@ -166,6 +166,23 @@ The four generic policy descriptors are schema-validated and must share the exac
 {domain}/server/notification-policies.json
 ```
 
+The Commerce descriptor matches the published Commerce consumer contract. Its
+`payments` object requires `planChangePolicy` and `pausePolicy`; the legacy
+`operatorPauses` and `proration` fields are rejected. Optional `taxPolicy` and
+bounded `migrationPolicy` objects are accepted. Shipping may restrict delivery
+with one to 50 unique uppercase two-letter `allowedCountries` values, and
+tracked inventory requires inventory to be enabled. The code-owned admin
+capability allowlist includes `subscription:migration:execute`. Draft upsert
+applies these rules before storage, and publication applies them again before
+moving a pointer, so an immutable package with the superseded Commerce shape
+cannot be newly published.
+
+Cross-repository Commerce schema parity is measured after normalizing line
+endings to LF. The schema for this release is 9,978 bytes with SHA-256
+`1F1B2934FBBF025ABC3C1CB7D70FAF2EAB4D856DFC7CCA6461E53037A4E3B6CE`;
+the canonical hub and draft-template copies must match those normalized bytes
+before this contract is promoted.
+
 Legacy compatibility is closed, not an arbitrary JSON extension point. Only these canonical domain/file/SHA-256 triples are grandfathered:
 
 | Domain | File | Canonical JSON SHA-256 |

@@ -550,6 +550,205 @@ class ServerPolicyValidationTest(unittest.TestCase):
                 }
                 self.assertIn(expected_code, codes)
 
+    def test_commerce_golden_fixture_matches_the_current_consumer_contract_bidirectionally(self):
+        """Pin the reviewed zoolanding-commerce published-policy contract locally."""
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "commerce.schema.json")
+        fixture = load_json(FIXTURE_DIR / "commerce.json")
+
+        self.assertEqual(self.validator.validate_schema(schema, fixture), [])
+        payments = fixture["commerce"]["payments"]
+        self.assertEqual(
+            set(payments),
+            {
+                "bindingId",
+                "supportedCurrencies",
+                "oneTime",
+                "subscriptions",
+                "editablePrices",
+                "coupons",
+                "planChangePolicy",
+                "pausePolicy",
+                "taxPolicy",
+                "migrationPolicy",
+            },
+        )
+        self.assertNotIn("operatorPauses", payments)
+        self.assertNotIn("proration", payments)
+
+        legacy = copy.deepcopy(fixture)
+        legacy_payments = legacy["commerce"]["payments"]
+        for field in ("planChangePolicy", "pausePolicy", "taxPolicy", "migrationPolicy"):
+            legacy_payments.pop(field)
+        legacy_payments.update({
+            "operatorPauses": True,
+            "proration": "operator-selectable",
+        })
+        legacy_codes = {
+            error["code"]
+            for error in self.validator.validate_schema(schema, legacy)
+        }
+        self.assertIn("required", legacy_codes)
+        self.assertIn("property_not_allowed", legacy_codes)
+
+    def test_commerce_subscription_policy_matrix_matches_the_current_consumer(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "commerce.schema.json")
+        fixture = load_json(FIXTURE_DIR / "commerce.json")
+
+        valid_plan_modes = ("disabled", "next-renewal", "immediate-prorated")
+        for mode in valid_plan_modes:
+            with self.subTest(plan_change_mode=mode):
+                candidate = copy.deepcopy(fixture)
+                candidate["commerce"]["payments"]["planChangePolicy"] = {"mode": mode}
+                self.assertEqual(self.validator.validate_schema(schema, candidate), [])
+
+        for enabled_policy in (
+            {"enabled": False},
+            {
+                "enabled": True,
+                "newInvoiceBehavior": "keep-as-draft",
+                "existingInvoiceBehavior": "unchanged",
+                "accessBehavior": "retain",
+                "resume": {"mode": "manual"},
+                "onResume": {
+                    "collection": "restore",
+                    "access": "restore-if-suspended",
+                },
+            },
+            {
+                "enabled": True,
+                "newInvoiceBehavior": "mark-uncollectible",
+                "existingInvoiceBehavior": "unchanged",
+                "accessBehavior": "suspend",
+                "resume": {"mode": "manual"},
+                "onResume": {
+                    "collection": "restore",
+                    "access": "restore-if-suspended",
+                },
+            },
+        ):
+            with self.subTest(pause_policy=enabled_policy):
+                candidate = copy.deepcopy(fixture)
+                candidate["commerce"]["payments"]["pausePolicy"] = enabled_policy
+                self.assertEqual(self.validator.validate_schema(schema, candidate), [])
+
+        for tax_policy in (None, {"mode": "disabled"}, {"mode": "automatic"}):
+            with self.subTest(tax_policy=tax_policy):
+                candidate = copy.deepcopy(fixture)
+                if tax_policy is None:
+                    candidate["commerce"]["payments"].pop("taxPolicy")
+                else:
+                    candidate["commerce"]["payments"]["taxPolicy"] = tax_policy
+                self.assertEqual(self.validator.validate_schema(schema, candidate), [])
+
+        for migration_policy in (
+            None,
+            {"canarySize": 1, "accountConcurrency": 1},
+            {"canarySize": 25, "accountConcurrency": 5},
+        ):
+            with self.subTest(migration_policy=migration_policy):
+                candidate = copy.deepcopy(fixture)
+                if migration_policy is None:
+                    candidate["commerce"]["payments"].pop("migrationPolicy")
+                else:
+                    candidate["commerce"]["payments"]["migrationPolicy"] = migration_policy
+                self.assertEqual(self.validator.validate_schema(schema, candidate), [])
+
+        invalid_policies = (
+            ("plan-change-missing", lambda payments: payments.pop("planChangePolicy")),
+            ("plan-change-mode", lambda payments: payments.update({"planChangePolicy": {"mode": "later"}})),
+            ("plan-change-extra", lambda payments: payments.update({"planChangePolicy": {"mode": "disabled", "extra": True}})),
+            ("pause-missing", lambda payments: payments.pop("pausePolicy")),
+            ("pause-disabled-extra", lambda payments: payments.update({"pausePolicy": {"enabled": False, "resume": {"mode": "manual"}}})),
+            ("pause-enabled-missing-on-resume", lambda payments: payments["pausePolicy"].pop("onResume")),
+            ("pause-new-invoice", lambda payments: payments["pausePolicy"].update({"newInvoiceBehavior": "pay"})),
+            ("pause-existing-invoice", lambda payments: payments["pausePolicy"].update({"existingInvoiceBehavior": "void"})),
+            ("pause-access", lambda payments: payments["pausePolicy"].update({"accessBehavior": "delete"})),
+            ("pause-resume", lambda payments: payments["pausePolicy"].update({"resume": {"mode": "automatic"}})),
+            ("pause-on-resume", lambda payments: payments["pausePolicy"].update({"onResume": {"collection": "retry", "access": "restore-if-suspended"}})),
+            ("tax-mode", lambda payments: payments.update({"taxPolicy": {"mode": "manual"}})),
+            ("tax-extra", lambda payments: payments.update({"taxPolicy": {"mode": "disabled", "extra": True}})),
+            ("migration-canary-low", lambda payments: payments.update({"migrationPolicy": {"canarySize": 0, "accountConcurrency": 2}})),
+            ("migration-canary-high", lambda payments: payments.update({"migrationPolicy": {"canarySize": 26, "accountConcurrency": 2}})),
+            ("migration-concurrency-low", lambda payments: payments.update({"migrationPolicy": {"canarySize": 5, "accountConcurrency": 0}})),
+            ("migration-concurrency-high", lambda payments: payments.update({"migrationPolicy": {"canarySize": 5, "accountConcurrency": 6}})),
+            ("migration-boolean", lambda payments: payments.update({"migrationPolicy": {"canarySize": True, "accountConcurrency": 2}})),
+            ("migration-missing", lambda payments: payments.update({"migrationPolicy": {"canarySize": 5}})),
+            ("migration-extra", lambda payments: payments.update({"migrationPolicy": {"canarySize": 5, "accountConcurrency": 2, "extra": True}})),
+        )
+        for name, mutate in invalid_policies:
+            with self.subTest(invalid_policy=name):
+                candidate = copy.deepcopy(fixture)
+                mutate(candidate["commerce"]["payments"])
+                self.assertNotEqual(self.validator.validate_schema(schema, candidate), [])
+
+    def test_commerce_shipping_capability_and_inventory_matrix_matches_the_current_consumer(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema = load_json(SCHEMA_DIR / "commerce.schema.json")
+        fixture = load_json(FIXTURE_DIR / "commerce.json")
+
+        expected_capabilities = {
+            "commerce:catalog:read",
+            "commerce:catalog:write",
+            "commerce:inventory:write",
+            "commerce:subscription:manage",
+            "subscription:migration:execute",
+            "commerce:fiscal:manage",
+        }
+        self.assertEqual(
+            set(schema["definitions"]["capability"]["enum"]),
+            expected_capabilities,
+        )
+        self.assertEqual(self.validator.COMMERCE_CAPABILITIES, expected_capabilities)
+
+        countries = [
+            f"{chr(65 + index // 26)}{chr(65 + index % 26)}"
+            for index in range(50)
+        ]
+        for allowed_countries in (None, ["MX"], ["MX", "US"], countries):
+            with self.subTest(allowed_countries=allowed_countries):
+                candidate = copy.deepcopy(fixture)
+                if allowed_countries is None:
+                    candidate["commerce"]["shipping"].pop("allowedCountries")
+                else:
+                    candidate["commerce"]["shipping"]["allowedCountries"] = allowed_countries
+                self.assertEqual(self.validator.validate_schema(schema, candidate), [])
+
+        invalid_country_lists = (
+            [],
+            ["mx"],
+            ["M"],
+            ["MEX"],
+            ["MX", "MX"],
+            ["ÁA"],
+            [7],
+            countries + ["BY"],
+        )
+        for allowed_countries in invalid_country_lists:
+            with self.subTest(invalid_allowed_countries=allowed_countries):
+                candidate = copy.deepcopy(fixture)
+                candidate["commerce"]["shipping"]["allowedCountries"] = allowed_countries
+                self.assertNotEqual(self.validator.validate_schema(schema, candidate), [])
+
+        files = [
+            {
+                "path": f"example.com/server/{fixture_path.name}",
+                "content": load_json(fixture_path),
+            }
+            for fixture_path in sorted(FIXTURE_DIR.glob("*.json"))
+        ]
+        commerce = next(
+            file for file in files if file["path"].endswith("commerce.json")
+        )["content"]["commerce"]
+        commerce["sellableTypes"].remove("physical")
+        commerce["inventory"].update({"enabled": False, "tracked": False})
+        self.validator.validate_server_policy_files("example.com", "test", files)
+        commerce["inventory"].update({"enabled": False, "tracked": True})
+        with self.assertRaises(self.validator.PolicyValidationError) as raised:
+            self.validator.validate_server_policy_files("example.com", "test", files)
+        self.assertEqual(raised.exception.code, "inventory_tracking_requires_inventory")
+
     def test_protected_features_require_an_active_auth_profile_in_the_same_scope(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
 

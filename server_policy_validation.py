@@ -58,6 +58,7 @@ COMMERCE_CAPABILITIES = {
     "commerce:catalog:write",
     "commerce:inventory:write",
     "commerce:subscription:manage",
+    "subscription:migration:execute",
     "commerce:fiscal:manage",
 }
 NOTIFICATION_TEMPLATES_BY_TYPE = {
@@ -887,7 +888,10 @@ def validate_server_policy_files(
                 required_capabilities.add("coupons")
             if not required_capabilities.issubset(set(payment_binding.get("capabilities") or [])):
                 raise PolicyValidationError("commerce_provider_capability_required")
-        if "physical" in commerce.get("sellableTypes", []) and commerce.get("inventory", {}).get("enabled") is not True:
+        inventory = commerce.get("inventory", {})
+        if inventory.get("tracked") is True and inventory.get("enabled") is not True:
+            raise PolicyValidationError("inventory_tracking_requires_inventory")
+        if "physical" in commerce.get("sellableTypes", []) and inventory.get("enabled") is not True:
             raise PolicyValidationError("physical_inventory_required")
         if "physical" in commerce.get("sellableTypes", []) and commerce.get("shipping", {}).get("enabled") is not True:
             raise PolicyValidationError("physical_shipping_required")
