@@ -132,6 +132,27 @@ Draft upsert keeps those proposals only inside the versioned package. Public ali
 
 `publishOnCreate` is unsupported. Publication always requires the separately authorized `publishDraft` action.
 
+## Route-bound languages
+
+A route may opt into a fixed language with an optional `language` field in the exact domain-root `{domain}/site-config.json`. When present, the value must use the runtime's restricted BCP 47 grammar: a two- or three-letter language, optional script, optional two-letter or three-digit region, and optional valid variant subtags, separated only by hyphens and already in canonical casing. The normalized value must appear in `site.i18n.supportedLanguages`; both string entries and language-definition objects with a `code` are supported. Two routes may share a `pageId` when their languages differ, but the same `(pageId, language)` pair is rejected.
+
+```json
+{
+  "routes": [
+    {"path": "/campaign/eng", "pageId": "campaign", "language": "en"},
+    {"path": "/campaign/zh", "pageId": "campaign", "language": "zh"}
+  ],
+  "site": {
+    "i18n": {
+      "defaultLanguage": "es",
+      "supportedLanguages": ["es", {"code": "en"}, {"code": "zh"}]
+    }
+  }
+}
+```
+
+`createSite` and `upsertDraft` reject invalid route-language contracts before any S3 or DynamoDB write. A nested or case-altered file named `site-config.json` is not a second configuration candidate and is rejected as `invalid_site_config_path`; metadata derivation reads only the exact domain-root path. `publishDraft` reloads the immutable package and applies the same path and language validation before moving a publication pointer. Validation reads the payload without normalizing or rewriting authored supported-language definitions, so accepted site configuration and registry routes round-trip unchanged. Existing routes that omit `language` retain their prior behavior and do not require an i18n block.
+
 ## Server-only feature descriptors
 
 Server-only descriptors live at the domain root under `{domain}/server/`. Paths, kinds, and filenames are closed: unknown, nested, case-altered, percent-encoded, local-only, duplicate, or mismatched entries fail before S3 writes.
@@ -144,6 +165,23 @@ The four generic policy descriptors are schema-validated and must share the exac
 {domain}/server/integration-bindings.json
 {domain}/server/notification-policies.json
 ```
+
+The Commerce descriptor matches the published Commerce consumer contract. Its
+`payments` object requires `planChangePolicy` and `pausePolicy`; the legacy
+`operatorPauses` and `proration` fields are rejected. Optional `taxPolicy` and
+bounded `migrationPolicy` objects are accepted. Shipping may restrict delivery
+with one to 50 unique uppercase two-letter `allowedCountries` values, and
+tracked inventory requires inventory to be enabled. The code-owned admin
+capability allowlist includes `subscription:migration:execute`. Draft upsert
+applies these rules before storage, and publication applies them again before
+moving a pointer, so an immutable package with the superseded Commerce shape
+cannot be newly published.
+
+Cross-repository Commerce schema parity is measured after normalizing line
+endings to LF. The schema for this release is 9,978 bytes with SHA-256
+`1F1B2934FBBF025ABC3C1CB7D70FAF2EAB4D856DFC7CCA6461E53037A4E3B6CE`;
+the canonical hub and draft-template copies must match those normalized bytes
+before this contract is promoted.
 
 Legacy compatibility is closed, not an arbitrary JSON extension point. Only these canonical domain/file/SHA-256 triples are grandfathered:
 

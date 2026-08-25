@@ -128,6 +128,24 @@ class AuthoringHandlerTest(unittest.TestCase):
             },
         ]
 
+    def route_language_files(self, supported_languages=None, routes=None):
+        files = self.draft_files()
+        site_config = files[0]["content"]
+        site_config["site"] = {
+            "i18n": {
+                "defaultLanguage": "es",
+                "supportedLanguages": supported_languages
+                if supported_languages is not None
+                else ["es", "en", "zh"],
+            },
+        }
+        site_config["routes"] = routes if routes is not None else [
+            {"path": "/", "pageId": "default"},
+            {"path": "/campaign/eng", "pageId": "campaign", "language": "en"},
+            {"path": "/campaign/zh", "pageId": "campaign", "language": "zh"},
+        ]
+        return files
+
     def runtime_content_hubs(self, count):
         return [
             {
@@ -177,6 +195,73 @@ class AuthoringHandlerTest(unittest.TestCase):
                 "content": notification,
             },
         ]
+
+    def commerce_files(self):
+        fixture_dir = (
+            Path(__file__).resolve().parent
+            / "fixtures/server-features/valid/example.com/server"
+        )
+        bindings = json.loads(
+            (fixture_dir / "integration-bindings.json").read_text(encoding="utf-8")
+        )
+        bindings["scope"]["domain"] = "pamelabetancourt.com"
+        commerce = json.loads(
+            (fixture_dir / "commerce.json").read_text(encoding="utf-8")
+        )
+        commerce["scope"]["domain"] = "pamelabetancourt.com"
+        # Keep this integration test on the generic descriptor boundary. Legacy
+        # auth registries have a separate closed compatibility manifest.
+        commerce["commerce"]["adminAccess"] = {"mode": "none"}
+        return self.draft_files() + [
+            {
+                "path": "pamelabetancourt.com/server/integration-bindings.json",
+                "content": bindings,
+            },
+            {
+                "path": "pamelabetancourt.com/server/commerce.json",
+                "content": commerce,
+            },
+        ]
+
+    def legacy_commerce_files(self):
+        files = self.commerce_files()
+        commerce = next(
+            file["content"]["commerce"]
+            for file in files
+            if file["path"].endswith("commerce.json")
+        )
+        payments = commerce["payments"]
+        for field in ("planChangePolicy", "pausePolicy", "taxPolicy", "migrationPolicy"):
+            payments.pop(field)
+        payments.update({
+            "operatorPauses": True,
+            "proration": "operator-selectable",
+        })
+        commerce["shipping"].pop("allowedCountries")
+        return files
+
+    def seed_stored_package(self, version_id, files):
+        prefix = self.handler.default_version_prefix(
+            "pamelabetancourt.com", version_id
+        )
+        manifest_files = []
+        for file in sorted(files, key=lambda item: item["path"]):
+            content_bytes = json.dumps(
+                file["content"], ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+            self.objects[f"{prefix}{file['path']}"] = copy.deepcopy(file["content"])
+            manifest_files.append({
+                "path": file["path"],
+                "kind": self.handler._infer_kind(file["path"]),
+                "sha256": hashlib.sha256(content_bytes).hexdigest(),
+            })
+        self.objects[f"{prefix}_manifest.json"] = {
+            "version": 1,
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+            "files": manifest_files,
+        }
 
     def upsert(self, role_name="draft-pamela-test-deploy", version_id="v1", environment_name="test"):
         return self.handler.lambda_handler(event({
@@ -1173,6 +1258,514 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(parse(response)["versionId"], "v1")
         self.assertEqual(len(parse(response)["files"]), len(self.draft_files()))
+
+    def test_route_languages_accept_supported_strings_and_round_trip_unchanged(self):
+        files = self.route_language_files()
+        authored_site_config = copy.deepcopy(files[0]["content"])
+        authored_bytes = json.dumps(
+            authored_site_config,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        created = self.handler.lambda_handler(event({
+            "action": "createSite",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "route-languages-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(created["statusCode"], 200)
+        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        self.assertEqual(metadata["routes"], authored_site_config["routes"])
+        stored_site_config = self.objects[
+            "sites/pamelabetancourt.com/versions/route-languages-v1/"
+            "pamelabetancourt.com/site-config.json"
+        ]
+        self.assertEqual(stored_site_config, authored_site_config)
+
+        for stage in ("draft", "published"):
+            if stage == "published":
+                published = self.handler.lambda_handler(event({
+                    "action": "publishDraft",
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": "route-languages-v1",
+                }, "draft-pamela-test-deploy"), Context())
+                self.assertEqual(published["statusCode"], 200)
+
+            response = self.handler.lambda_handler(event({
+                "action": "getSite",
+                "domain": "pamelabetancourt.com",
+                "environment": "test",
+                "stage": stage,
+            }, "draft-pamela-test-deploy"), Context())
+            self.assertEqual(response["statusCode"], 200)
+            body = parse(response)
+            returned_site_config = next(
+                entry["content"]
+                for entry in body["files"]
+                if entry["path"] == "pamelabetancourt.com/site-config.json"
+            )
+            returned_bytes = json.dumps(
+                returned_site_config,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self.assertEqual(returned_bytes, authored_bytes)
+            self.assertEqual(body["metadata"]["registry"]["routes"], authored_site_config["routes"])
+
+    def test_route_languages_accept_supported_language_objects_and_distinct_siblings(self):
+        supported_languages = [
+            {"code": "es", "label": "ES"},
+            {"code": "en", "label": "EN"},
+            {"code": "zh", "label": "中文"},
+        ]
+        files = self.route_language_files(supported_languages=supported_languages)
+        authored_site_config = copy.deepcopy(files[0]["content"])
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "route-language-objects-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 200)
+        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        self.assertEqual(metadata["routes"], authored_site_config["routes"])
+        stored_site_config = self.objects[
+            "sites/pamelabetancourt.com/versions/route-language-objects-v1/"
+            "pamelabetancourt.com/site-config.json"
+        ]
+        self.assertEqual(stored_site_config, authored_site_config)
+        pulled = self.handler.lambda_handler(event({
+            "action": "getSite",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "stage": "draft",
+        }, "draft-pamela-test-deploy"), Context())
+        self.assertEqual(pulled["statusCode"], 200)
+        returned_site_config = next(
+            entry["content"]
+            for entry in parse(pulled)["files"]
+            if entry["path"] == "pamelabetancourt.com/site-config.json"
+        )
+        self.assertEqual(returned_site_config, authored_site_config)
+
+    def test_legacy_routes_without_language_still_create_update_and_publish(self):
+        for action in ("createSite", "upsertDraft"):
+            with self.subTest(action=action):
+                self.objects.clear()
+                self.items.clear()
+                files = self.draft_files()
+                original_site_config = copy.deepcopy(files[0]["content"])
+                version_id = f"legacy-routes-{action.lower()}-v1"
+
+                response = self.handler.lambda_handler(event({
+                    "action": action,
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": version_id,
+                    "files": files,
+                }, "draft-pamela-test-deploy"), Context())
+                self.assertEqual(response["statusCode"], 200)
+
+                published = self.handler.lambda_handler(event({
+                    "action": "publishDraft",
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": version_id,
+                }, "draft-pamela-test-deploy"), Context())
+                self.assertEqual(published["statusCode"], 200)
+                stored_site_config = self.objects[
+                    f"sites/pamelabetancourt.com/versions/{version_id}/"
+                    "pamelabetancourt.com/site-config.json"
+                ]
+                self.assertEqual(stored_site_config, original_site_config)
+
+    def test_invalid_route_languages_fail_before_s3_or_dynamodb_writes(self):
+        invalid_languages = (
+            ("empty", ""),
+            ("whitespace", " "),
+            ("non-string", ["en"]),
+            ("null", None),
+            ("malformed", "en--US"),
+            ("noncanonical", "EN"),
+            ("underscore", "en_US"),
+            ("unsupported", "fr"),
+        )
+        for action in ("createSite", "upsertDraft"):
+            for name, language in invalid_languages:
+                with self.subTest(action=action, name=name):
+                    self.objects.clear()
+                    self.items.clear()
+                    files = self.route_language_files(routes=[
+                        {"path": "/", "pageId": "default"},
+                        {"path": "/campaign", "pageId": "campaign", "language": language},
+                    ])
+
+                    response = self.handler.lambda_handler(event({
+                        "action": action,
+                        "domain": "pamelabetancourt.com",
+                        "environment": "test",
+                        "versionId": "invalid-route-language-v1",
+                        "files": files,
+                    }, "draft-pamela-test-deploy"), Context())
+
+                    self.assertEqual(response["statusCode"], 400)
+                    self.assertEqual(parse(response)["error"], "invalid_route_language")
+                    self.assertEqual(self.objects, {})
+                    self.assertEqual(self.items, {})
+
+    def test_route_locale_grammar_matches_runtime_contract_without_mutating_supported_languages(self):
+        accepted = (
+            ("en", "en"),
+            ("zh", {"code": "zh", "label": "中文"}),
+            ("pt-BR", {"code": "PT-br", "label": "Português"}),
+            ("zh-Hans", "zh-Hans"),
+            ("zh-Hans-CN", "zh-Hans-CN"),
+            ("es-419", "es-419"),
+        )
+        for index, (language, supported_entry) in enumerate(accepted):
+            with self.subTest(accepted=language):
+                self.objects.clear()
+                self.items.clear()
+                files = self.route_language_files(
+                    supported_languages=["es", supported_entry],
+                    routes=[{
+                        "path": f"/campaign/{index}",
+                        "pageId": "campaign",
+                        "language": language,
+                    }],
+                )
+                authored_site_config = copy.deepcopy(files[0]["content"])
+
+                response = self.handler.lambda_handler(event({
+                    "action": "upsertDraft",
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": f"runtime-locale-{index}-v1",
+                    "files": files,
+                }, "draft-pamela-test-deploy"), Context())
+
+                self.assertEqual(response["statusCode"], 200)
+                stored = self.objects[
+                    f"sites/pamelabetancourt.com/versions/runtime-locale-{index}-v1/"
+                    "pamelabetancourt.com/site-config.json"
+                ]
+                self.assertEqual(stored, authored_site_config)
+
+        rejected = (
+            ("empty", "", ["en"]),
+            ("whitespace", " ", ["en"]),
+            ("non-string", None, ["en"]),
+            ("noncanonical", "EN", ["EN"]),
+            ("underscore", "en_US", ["en_US"]),
+            ("malformed", "en--US", ["en--US"]),
+            ("long-language-name", "english", ["english"]),
+            ("unsupported", "fr", ["en"]),
+        )
+        for name, language, supported_languages in rejected:
+            with self.subTest(rejected=name):
+                self.objects.clear()
+                self.items.clear()
+                files = self.route_language_files(
+                    supported_languages=supported_languages,
+                    routes=[{
+                        "path": "/campaign/rejected",
+                        "pageId": "campaign",
+                        "language": language,
+                    }],
+                )
+
+                response = self.handler.lambda_handler(event({
+                    "action": "upsertDraft",
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": "runtime-locale-rejected-v1",
+                    "files": files,
+                }, "draft-pamela-test-deploy"), Context())
+
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(parse(response)["error"], "invalid_route_language")
+                self.assertEqual(self.objects, {})
+                self.assertEqual(self.items, {})
+
+    def test_nested_site_config_before_exact_root_is_rejected_before_writes(self):
+        nested_site_config = {
+            "defaultPageId": "nested-campaign",
+            "routes": [{
+                "path": "/nested-campaign",
+                "pageId": "nested-campaign",
+                "language": "fr",
+            }],
+            "site": {
+                "i18n": {
+                    "defaultLanguage": "fr",
+                    "supportedLanguages": ["fr"],
+                },
+            },
+        }
+        for action in ("createSite", "upsertDraft"):
+            with self.subTest(action=action):
+                self.objects.clear()
+                self.items.clear()
+                files = self.route_language_files()
+                files.insert(0, {
+                    "path": "pamelabetancourt.com/nested/site-config.json",
+                    "content": copy.deepcopy(nested_site_config),
+                })
+
+                response = self.handler.lambda_handler(event({
+                    "action": action,
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": "nested-site-config-v1",
+                    "files": files,
+                }, "draft-pamela-test-deploy"), Context())
+
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(parse(response)["error"], "invalid_site_config_path")
+                self.assertEqual(self.objects, {})
+                self.assertEqual(self.items, {})
+
+    def test_site_metadata_derivation_reads_only_the_exact_root_config(self):
+        files = self.route_language_files()
+        exact_root = copy.deepcopy(files[0]["content"])
+        files.insert(0, {
+            "path": "pamelabetancourt.com/nested/site-config.json",
+            "content": {
+                "defaultPageId": "nested-campaign",
+                "routes": [{"path": "/nested", "pageId": "nested-campaign"}],
+                "contentHubs": [{"hubId": "nested", "name": "Nested"}],
+            },
+        })
+
+        derived = self.handler._derive_site_fields("pamelabetancourt.com", files)
+
+        self.assertEqual(derived["defaultPageId"], exact_root["defaultPageId"])
+        self.assertEqual(derived["routes"], exact_root["routes"])
+        self.assertEqual(derived["contentHubs"], [])
+
+    def test_publish_rejects_checksum_consistent_historical_nested_site_config(self):
+        files = self.route_language_files()
+        upserted = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "historical-nested-site-config-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+        self.assertEqual(upserted["statusCode"], 200)
+
+        prefix = "sites/pamelabetancourt.com/versions/historical-nested-site-config-v1/"
+        nested_path = "pamelabetancourt.com/nested/site-config.json"
+        nested_content = {
+            "defaultPageId": "nested-campaign",
+            "routes": [{"path": "/nested", "pageId": "nested-campaign", "language": "fr"}],
+            "site": {"i18n": {"defaultLanguage": "fr", "supportedLanguages": ["fr"]}},
+        }
+        self.objects[f"{prefix}{nested_path}"] = nested_content
+        manifest = self.objects[f"{prefix}_manifest.json"]
+        manifest["files"].append({
+            "path": nested_path,
+            "kind": "site-config",
+            "sha256": hashlib.sha256(
+                json.dumps(nested_content, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        })
+        manifest["files"].sort(key=lambda entry: entry["path"])
+        metadata_before = copy.deepcopy(self.items)
+        objects_before = copy.deepcopy(self.objects)
+
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "historical-nested-site-config-v1",
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "stored_package_invalid")
+        self.assertEqual(self.items, metadata_before)
+        self.assertEqual(self.objects, objects_before)
+        self.assertNotIn(
+            "publishedEnvironments",
+            self.items[("SITE#pamelabetancourt.com", "METADATA")],
+        )
+
+    def test_duplicate_route_page_language_pair_fails_before_writes(self):
+        for action in ("createSite", "upsertDraft"):
+            with self.subTest(action=action):
+                self.objects.clear()
+                self.items.clear()
+                files = self.route_language_files(routes=[
+                    {"path": "/campaign/eng", "pageId": "campaign", "language": "en"},
+                    {"path": "/campaign/english", "pageId": "campaign", "language": "en"},
+                ])
+
+                response = self.handler.lambda_handler(event({
+                    "action": action,
+                    "domain": "pamelabetancourt.com",
+                    "environment": "test",
+                    "versionId": "duplicate-route-language-v1",
+                    "files": files,
+                }, "draft-pamela-test-deploy"), Context())
+
+                self.assertEqual(response["statusCode"], 400)
+                self.assertEqual(parse(response)["error"], "duplicate_route_language")
+                self.assertEqual(self.objects, {})
+                self.assertEqual(self.items, {})
+
+    def test_route_language_requires_a_supported_language_list_before_writes(self):
+        files = self.draft_files()
+        files[0]["content"]["routes"] = [
+            {"path": "/campaign/eng", "pageId": "campaign", "language": "en"},
+        ]
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "missing-supported-languages-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "invalid_route_language")
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_current_commerce_contract_is_stored_and_published_end_to_end(self):
+        version_id = "commerce-current-v1"
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+            "files": self.commerce_files(),
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 200)
+        metadata_key = ("SITE#pamelabetancourt.com", "METADATA")
+        self.assertEqual(self.items[metadata_key]["draft"]["versionId"], version_id)
+
+        published = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(published["statusCode"], 200)
+        self.assertEqual(
+            self.items[metadata_key]["publishedEnvironments"]["test"]["versionId"],
+            version_id,
+        )
+
+    def test_legacy_commerce_contract_is_rejected_before_storage(self):
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "commerce-legacy-v1",
+            "files": self.legacy_commerce_files(),
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "server_policy_invalid")
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_tracked_inventory_without_inventory_enablement_fails_before_storage(self):
+        files = self.commerce_files()
+        commerce = next(
+            file["content"]["commerce"]
+            for file in files
+            if file["path"].endswith("commerce.json")
+        )
+        commerce["sellableTypes"].remove("physical")
+        commerce["inventory"].update({"enabled": False, "tracked": True})
+
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "commerce-invalid-inventory-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "server_policy_invalid")
+        self.assertEqual(self.objects, {})
+        self.assertEqual(self.items, {})
+
+    def test_publish_rejects_checksum_consistent_historical_legacy_commerce_without_pointer_movement(self):
+        baseline = self.upsert(version_id="baseline-v1")
+        self.assertEqual(baseline["statusCode"], 200)
+        version_id = "commerce-legacy-v1"
+        self.seed_stored_package(version_id, self.legacy_commerce_files())
+        metadata_key = ("SITE#pamelabetancourt.com", "METADATA")
+        metadata_before = copy.deepcopy(self.items[metadata_key])
+
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": version_id,
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "stored_package_invalid")
+        self.assertEqual(self.items[metadata_key], metadata_before)
+        self.assertNotIn("publishedEnvironments", self.items[metadata_key])
+
+    def test_publish_revalidates_checksum_consistent_historical_route_languages(self):
+        files = self.route_language_files()
+        upserted = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "historical-route-language-v1",
+            "files": files,
+        }, "draft-pamela-test-deploy"), Context())
+        self.assertEqual(upserted["statusCode"], 200)
+
+        prefix = "sites/pamelabetancourt.com/versions/historical-route-language-v1/"
+        site_config_path = "pamelabetancourt.com/site-config.json"
+        stored_site_config = self.objects[f"{prefix}{site_config_path}"]
+        stored_site_config["routes"][1]["language"] = "fr"
+        manifest_entry = next(
+            entry
+            for entry in self.objects[f"{prefix}_manifest.json"]["files"]
+            if entry["path"] == site_config_path
+        )
+        manifest_entry["sha256"] = hashlib.sha256(
+            json.dumps(
+                stored_site_config,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        metadata_before = copy.deepcopy(self.items)
+        objects_before = copy.deepcopy(self.objects)
+
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "pamelabetancourt.com",
+            "environment": "test",
+            "versionId": "historical-route-language-v1",
+        }, "draft-pamela-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "stored_package_invalid")
+        self.assertEqual(self.items, metadata_before)
+        self.assertEqual(self.objects, objects_before)
+        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        self.assertNotIn("publishedEnvironments", metadata)
 
     def test_publish_can_roll_back_to_an_immutable_version_without_s3_writes(self):
         self.upsert(version_id="v1")
