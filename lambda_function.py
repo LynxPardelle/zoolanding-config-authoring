@@ -50,6 +50,10 @@ DEPLOY_ROLE_ARN_PATTERN = re.compile(
 )
 DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 VERSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+LOCALE_CODE_PATTERN = re.compile(
+    r"^[A-Za-z]{2,3}(?:-[A-Za-z]{4})?(?:-(?:[A-Za-z]{2}|[0-9]{3}))?"
+    r"(?:-(?:[A-Za-z0-9]{5,8}|[0-9][A-Za-z0-9]{3}))*$"
+)
 WINDOWS_INVALID_PATH_CHARACTER_PATTERN = re.compile(r'[<>:"|?*]')
 WINDOWS_RESERVED_PATH_BASENAME_PATTERN = re.compile(
     r"^(?:con|prn|aux|nul|com[1-9¹²³]|lpt[1-9¹²³])$",
@@ -62,6 +66,7 @@ LOCAL_DRAFT_CONTEXT_FOLDERS = {
 }
 LOCAL_DRAFT_CONTEXT_FILES = {"draft-repo.config.json"}
 SERVER_ONLY_KEY_PATTERN = re.compile(r"(secret|token|credential|password|privatekey|authorization)", re.IGNORECASE)
+MAX_RUNTIME_CONTENT_HUBS = 4
 MANIFEST_FILE_NAME = "_manifest.json"
 DEPLOY_AUTHZ_RULE_KEYS = {
     "roleArn", "tenantId", "draftId", "domains", "environments", "actions"
@@ -79,10 +84,14 @@ class StoredPackageError(ValueError):
 
 SAFE_VALIDATION_CODES = {
     "duplicate_path",
+    "duplicate_route_language",
     "environment_invalid",
     "environment_mismatch",
+    "invalid_route_language",
     "invalid_server_path",
+    "invalid_site_config_path",
     "kind_mismatch",
+    "runtime_content_hub_limit_exceeded",
     "unknown_server_descriptor",
 }
 
@@ -101,9 +110,9 @@ def _initial_lifecycle(updated_at: str, updated_by: str) -> Dict[str, Any]:
     }
 
 
-def _read_site_file(files: list[Dict[str, Any]], suffix: str) -> Optional[Dict[str, Any]]:
+def _read_site_file(files: list[Dict[str, Any]], exact_path: str) -> Optional[Dict[str, Any]]:
     for entry in files:
-        if str(entry.get("path") or "").endswith(suffix):
+        if entry.get("path") == exact_path:
             content = entry.get("content")
             if isinstance(content, dict):
                 return content
@@ -200,6 +209,78 @@ def _reject_server_only_content(value: Any, path: str = "content") -> None:
             _reject_server_only_content(child, f"{path}[{index}]")
 
 
+def _validate_site_config_runtime_limits(content: Dict[str, Any]) -> None:
+    runtime = content.get("runtime")
+    content_hubs = runtime.get("contentHubs") if isinstance(runtime, dict) else None
+    if isinstance(content_hubs, list) and len(content_hubs) > MAX_RUNTIME_CONTENT_HUBS:
+        raise ValueError("runtime_content_hub_limit_exceeded")
+
+
+def _normalize_locale(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    raw = value.strip()
+    if not raw or not LOCALE_CODE_PATTERN.fullmatch(raw):
+        return ""
+
+    parts = raw.split("-")
+    normalized = [parts[0].lower()]
+    for part in parts[1:]:
+        if len(part) == 4 and part.isalpha():
+            normalized.append(part[0].upper() + part[1:].lower())
+        elif len(part) == 2 and part.isalpha():
+            normalized.append(part.upper())
+        else:
+            normalized.append(part.lower())
+    return "-".join(normalized)
+
+
+def _supported_site_languages(content: Dict[str, Any]) -> set[str]:
+    site = content.get("site")
+    i18n = site.get("i18n") if isinstance(site, dict) else None
+    supported = i18n.get("supportedLanguages") if isinstance(i18n, dict) else None
+    if not isinstance(supported, list):
+        return set()
+
+    normalized: set[str] = set()
+    for entry in supported:
+        code = entry if isinstance(entry, str) else entry.get("code") if isinstance(entry, dict) else None
+        locale = _normalize_locale(code)
+        if locale:
+            normalized.add(locale)
+    return normalized
+
+
+def _validate_site_route_languages(content: Dict[str, Any]) -> None:
+    routes = content.get("routes")
+    if not isinstance(routes, list):
+        return
+
+    supported_languages = _supported_site_languages(content)
+    seen_pairs: set[tuple[str, str]] = set()
+    for route in routes:
+        if not isinstance(route, dict) or "language" not in route:
+            continue
+
+        language = route.get("language")
+        normalized_language = _normalize_locale(language)
+        page_id = route.get("pageId")
+        if (
+            not normalized_language
+            or language != normalized_language
+            or normalized_language not in supported_languages
+            or not isinstance(page_id, str)
+            or not page_id
+            or page_id != page_id.strip()
+        ):
+            raise ValueError("invalid_route_language")
+
+        pair = (page_id, normalized_language)
+        if pair in seen_pairs:
+            raise ValueError("duplicate_route_language")
+        seen_pairs.add(pair)
+
+
 def _content_hub_file_info(domain: str, path: str) -> Optional[tuple[str, Optional[str]]]:
     prefix = f"{domain}/content-hubs/"
     if not path.startswith(prefix):
@@ -227,7 +308,7 @@ def _derive_content_hub_fields(domain: str, files: list[Dict[str, Any]]) -> Dict
         if article_id and article_id not in hub["articleIds"]:
             hub["articleIds"].append(article_id)
 
-    site_config = _read_site_file(files, "site-config.json") or {}
+    site_config = _read_site_file(files, f"{domain}/site-config.json") or {}
     configured_hubs = site_config.get("contentHubs")
     if isinstance(configured_hubs, list):
         for configured in configured_hubs:
@@ -282,7 +363,7 @@ def _normalize_environment_aliases(domain: str, environments: Any) -> Dict[str, 
 
 
 def _derive_site_fields(domain: str, files: list[Dict[str, Any]]) -> Dict[str, Any]:
-    site_config = _read_site_file(files, "site-config.json") or {}
+    site_config = _read_site_file(files, f"{domain}/site-config.json") or {}
     content_hub_fields = _derive_content_hub_fields(domain, files)
     return {
         "aliases": _normalize_aliases(domain, site_config.get("aliases")),
@@ -551,9 +632,14 @@ def _normalize_files(
             or not path.endswith(".json")
         ):
             raise ValueError("Each file entry path must be a strict JSON path below the requested domain")
+        if decoded_parts[-1].casefold() == "site-config.json" and path != f"{domain}/site-config.json":
+            raise ValueError("invalid_site_config_path")
         content = entry.get("content")
         if not isinstance(content, dict):
             raise ValueError("Each file entry content must be a JSON object")
+        if path == f"{domain}/site-config.json":
+            _validate_site_config_runtime_limits(content)
+            _validate_site_route_languages(content)
         _content_hub_file_info(domain, path)
 
         inferred_kind = _infer_kind(path)

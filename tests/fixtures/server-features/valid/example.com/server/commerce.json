@@ -15,18 +15,41 @@
         "commerce:catalog:read",
         "commerce:catalog:write",
         "commerce:inventory:write",
-        "commerce:subscription:manage"
+        "commerce:subscription:manage",
+        "subscription:migration:execute"
       ]
     },
     "sellableTypes": ["physical", "service", "subscription", "add_on"],
     "payments": {
       "bindingId": "stripe-primary",
+      "supportedCurrencies": ["MXN"],
       "oneTime": true,
       "subscriptions": true,
       "editablePrices": true,
       "coupons": true,
-      "operatorPauses": true,
-      "proration": "operator-selectable"
+      "planChangePolicy": {
+        "mode": "immediate-prorated"
+      },
+      "pausePolicy": {
+        "enabled": true,
+        "newInvoiceBehavior": "void",
+        "existingInvoiceBehavior": "unchanged",
+        "accessBehavior": "suspend",
+        "resume": {
+          "mode": "manual"
+        },
+        "onResume": {
+          "collection": "restore",
+          "access": "restore-if-suspended"
+        }
+      },
+      "taxPolicy": {
+        "mode": "automatic"
+      },
+      "migrationPolicy": {
+        "canarySize": 5,
+        "accountConcurrency": 2
+      }
     },
     "inventory": {
       "enabled": true,
@@ -36,7 +59,8 @@
     },
     "shipping": {
       "enabled": true,
-      "methods": ["fixed", "free", "pickup"]
+      "methods": ["fixed", "free", "pickup"],
+      "allowedCountries": ["MX", "US"]
     },
     "fiscal": {
       "enabled": false
