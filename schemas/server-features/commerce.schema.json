@@ -30,7 +30,9 @@
         "commerce:catalog:read",
         "commerce:catalog:write",
         "commerce:inventory:write",
-        "commerce:subscription:manage"
+        "commerce:subscription:manage",
+        "subscription:migration:execute",
+        "commerce:fiscal:manage"
       ]
     },
     "sameOriginPath": {
@@ -72,17 +74,93 @@
       },
       "additionalProperties": false
     },
+    "planChangePolicy": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["disabled", "next-renewal", "immediate-prorated"] }
+      },
+      "additionalProperties": false
+    },
+    "pauseDisabled": {
+      "type": "object",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "const": false }
+      },
+      "additionalProperties": false
+    },
+    "pauseEnabled": {
+      "type": "object",
+      "required": ["enabled", "newInvoiceBehavior", "existingInvoiceBehavior", "accessBehavior", "resume", "onResume"],
+      "properties": {
+        "enabled": { "const": true },
+        "newInvoiceBehavior": { "enum": ["void", "keep-as-draft", "mark-uncollectible"] },
+        "existingInvoiceBehavior": { "const": "unchanged" },
+        "accessBehavior": { "enum": ["retain", "suspend"] },
+        "resume": {
+          "type": "object",
+          "required": ["mode"],
+          "properties": {
+            "mode": { "const": "manual" }
+          },
+          "additionalProperties": false
+        },
+        "onResume": {
+          "type": "object",
+          "required": ["collection", "access"],
+          "properties": {
+            "collection": { "const": "restore" },
+            "access": { "const": "restore-if-suspended" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "pausePolicy": {
+      "oneOf": [
+        { "$ref": "#/definitions/pauseDisabled" },
+        { "$ref": "#/definitions/pauseEnabled" }
+      ]
+    },
+    "taxPolicy": {
+      "type": "object",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["disabled", "automatic"] }
+      },
+      "additionalProperties": false
+    },
+    "migrationPolicy": {
+      "type": "object",
+      "required": ["canarySize", "accountConcurrency"],
+      "properties": {
+        "canarySize": { "type": "integer", "minimum": 1, "maximum": 25 },
+        "accountConcurrency": { "type": "integer", "minimum": 1, "maximum": 5 }
+      },
+      "additionalProperties": false
+    },
     "payments": {
       "type": "object",
-      "required": ["bindingId", "oneTime", "subscriptions", "editablePrices", "coupons", "operatorPauses", "proration"],
+      "required": ["bindingId", "supportedCurrencies", "oneTime", "subscriptions", "editablePrices", "coupons", "planChangePolicy", "pausePolicy"],
       "properties": {
         "bindingId": { "$ref": "#/definitions/safeId" },
+        "supportedCurrencies": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z]{3}$" }
+        },
         "oneTime": { "type": "boolean" },
         "subscriptions": { "type": "boolean" },
         "editablePrices": { "type": "boolean" },
         "coupons": { "type": "boolean" },
-        "operatorPauses": { "type": "boolean" },
-        "proration": { "enum": ["disabled", "operator-selectable"] }
+        "planChangePolicy": { "$ref": "#/definitions/planChangePolicy" },
+        "pausePolicy": { "$ref": "#/definitions/pausePolicy" },
+        "taxPolicy": { "$ref": "#/definitions/taxPolicy" },
+        "migrationPolicy": { "$ref": "#/definitions/migrationPolicy" }
       },
       "additionalProperties": false
     },
@@ -108,6 +186,13 @@
           "maxItems": 3,
           "uniqueItems": true,
           "items": { "enum": ["fixed", "free", "pickup"] }
+        },
+        "allowedCountries": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "uniqueItems": true,
+          "items": { "type": "string", "pattern": "^[A-Z]{2}$" }
         }
       },
       "additionalProperties": false
@@ -148,6 +233,37 @@
     "commerce": {
       "type": "object",
       "required": ["status", "adminAccess", "sellableTypes", "payments", "inventory", "shipping", "fiscal", "checkout"],
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "fiscal": {
+                "properties": { "enabled": { "const": true } },
+                "required": ["enabled"]
+              }
+            },
+            "required": ["fiscal"]
+          },
+          "then": {
+            "properties": {
+              "adminAccess": {
+                "allOf": [
+                  { "$ref": "#/definitions/authProfileAccess" },
+                  {
+                    "properties": {
+                      "capabilities": {
+                        "not": {
+                          "items": { "not": { "const": "commerce:fiscal:manage" } }
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
       "properties": {
         "status": { "enum": ["disabled", "active"] },
         "adminAccess": {
@@ -175,7 +291,7 @@
         "checkout": { "$ref": "#/definitions/checkout" },
         "notificationPolicyIds": {
           "type": "array",
-          "maxItems": 16,
+          "maxItems": 1,
           "uniqueItems": true,
           "items": { "$ref": "#/definitions/safeId" }
         }
