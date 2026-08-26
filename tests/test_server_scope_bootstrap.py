@@ -23,13 +23,17 @@ def registry(*entries):
     }
 
 
-def draft(domain, repo):
-    return {
+def draft(domain, repo, *, owner=None):
+    resolved_owner = owner or "LynxPardelle"
+    entry = {
         "domain": domain,
         "repo": repo,
-        "githubUrl": f"https://github.com/LynxPardelle/{repo}.git",
+        "githubUrl": f"https://github.com/{resolved_owner}/{repo}.git",
         "localPath": f"drafts/{domain}",
     }
+    if owner is not None:
+        entry["owner"] = owner
+    return entry
 
 
 def binding(domain, repo, environment):
@@ -152,6 +156,169 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         with self.assertRaises(bootstrap.BootstrapError):
             bootstrap.build_scope_registry(unsafe, expected_draft_count=1, tenant_overrides={})
 
+    def test_scope_registry_accepts_an_explicit_per_draft_owner_without_changing_scope_bytes(self):
+        mixed_owner_registry = registry(
+            draft("example.com", "draft-example-com"),
+            draft(
+                "thehairnarrative.com",
+                "draft-thehairnarrative-com",
+                owner="Toydrum",
+            ),
+        )
+
+        try:
+            result = bootstrap.build_scope_registry(
+                mixed_owner_registry,
+                expected_draft_count=2,
+                tenant_overrides={},
+            )
+        except bootstrap.BootstrapError as exc:
+            self.fail(f"explicit per-draft owner was rejected: {exc}")
+
+        self.assertEqual(result["scopes"][1], {
+            "domain": "thehairnarrative.com",
+            "repo": "draft-thehairnarrative-com",
+            "tenantId": "draft-thehairnarrative-com",
+            "draftId": "draft-thehairnarrative-com",
+        })
+        self.assertNotIn("owner", result["scopes"][1])
+
+    def test_scope_registry_rejects_a_per_draft_owner_url_mismatch(self):
+        mismatched = draft(
+            "thehairnarrative.com",
+            "draft-thehairnarrative-com",
+            owner="Toydrum",
+        )
+        mismatched["githubUrl"] = (
+            "https://github.com/LynxPardelle/draft-thehairnarrative-com.git"
+        )
+
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.build_scope_registry(
+                registry(mismatched),
+                expected_draft_count=1,
+                tenant_overrides={},
+            )
+
+    def test_v2_registry_filters_test_only_drafts_without_changing_shared_mappings(self):
+        shared = draft("example.com", "draft-example-com")
+        shared["deploymentEnvironments"] = ["test", "production"]
+        test_only = draft(
+            "thehairnarrative.com",
+            "draft-thehairnarrative-com",
+            owner="Toydrum",
+        )
+        test_only["deploymentEnvironments"] = ["test"]
+        scoped_registry = {
+            "version": 2,
+            "owner": "LynxPardelle",
+            "drafts": [shared, test_only],
+        }
+
+        test_scopes = bootstrap.build_scope_registry(
+            scoped_registry,
+            expected_draft_count=2,
+            tenant_overrides={},
+            environment="test",
+        )
+        production_scopes = bootstrap.build_scope_registry(
+            scoped_registry,
+            expected_draft_count=2,
+            tenant_overrides={},
+            environment="production",
+        )
+
+        self.assertEqual(len(test_scopes["scopes"]), 2)
+        self.assertEqual(production_scopes["scopes"], [test_scopes["scopes"][0]])
+        self.assertEqual(
+            bootstrap._registered_repo_owner(scoped_registry, "draft-thehairnarrative-com"),
+            "Toydrum",
+        )
+
+    def test_registry_version_must_be_an_exact_integer(self):
+        for invalid_version in (True, False, 1.0, 2.0):
+            with self.subTest(invalid_version=invalid_version):
+                entry = draft("example.com", "draft-example-com")
+                if invalid_version == 2.0:
+                    entry["deploymentEnvironments"] = ["test", "production"]
+                with self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap.build_scope_registry(
+                        {
+                            "version": invalid_version,
+                            "owner": "LynxPardelle",
+                            "drafts": [entry],
+                        },
+                        expected_draft_count=1,
+                        tenant_overrides={},
+                        environment="test",
+                    )
+
+    def test_v2_registry_validates_test_only_tenant_override_before_production_filter(self):
+        shared = draft("example.com", "draft-example-com")
+        shared["deploymentEnvironments"] = ["test", "production"]
+        test_only = draft("test-only.example", "draft-test-only-example")
+        test_only["deploymentEnvironments"] = ["test"]
+
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.build_scope_registry(
+                {
+                    "version": 2,
+                    "owner": "LynxPardelle",
+                    "drafts": [shared, test_only],
+                },
+                expected_draft_count=2,
+                tenant_overrides={"test-only.example": "INVALID ID WITH SPACES"},
+                environment="production",
+            )
+
+    def test_v2_registry_rejects_ambiguous_or_unsafe_environment_scopes(self):
+        for deployment_environments in (
+            None,
+            [],
+            ["production"],
+            ["test", "test"],
+            ["production", "test"],
+            ["test", "preview"],
+        ):
+            with self.subTest(deployment_environments=deployment_environments):
+                entry = draft("example.com", "draft-example-com")
+                if deployment_environments is not None:
+                    entry["deploymentEnvironments"] = deployment_environments
+                with self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap.build_scope_registry(
+                        {"version": 2, "owner": "LynxPardelle", "drafts": [entry]},
+                        expected_draft_count=1,
+                        tenant_overrides={},
+                        environment="test",
+                    )
+
+    def test_canary_owner_is_resolved_from_the_exact_registered_repository(self):
+        mixed_owner_registry = registry(
+            draft("grupoastralegal.com", "draft-grupoastralegal-com"),
+            draft(
+                "thehairnarrative.com",
+                "draft-thehairnarrative-com",
+                owner="Toydrum",
+            ),
+        )
+
+        try:
+            astra_owner = bootstrap._registered_repo_owner(
+                mixed_owner_registry,
+                "draft-grupoastralegal-com",
+            )
+            hair_owner = bootstrap._registered_repo_owner(
+                mixed_owner_registry,
+                "draft-thehairnarrative-com",
+            )
+        except (AttributeError, bootstrap.BootstrapError) as exc:
+            self.fail(f"registered canary owner was not resolved: {exc}")
+
+        self.assertEqual(astra_owner, "LynxPardelle")
+        self.assertEqual(hair_owner, "Toydrum")
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap._registered_repo_owner(mixed_owner_registry, "draft-missing-com")
+
     def test_authz_rules_are_exact_environment_scoped_and_role_arn_only(self):
         scopes = bootstrap.build_scope_registry(
             self.registry,
@@ -243,6 +410,280 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                 account_id="123456789012",
                 evidence=evidence,
             )
+
+    def test_role_evidence_accepts_the_exact_github_immutable_subject(self):
+        expected = binding(
+            "thehairnarrative.com",
+            "draft-thehairnarrative-com",
+            "test",
+        )
+        role_name = expected["roleArn"].split(":role/", 1)[1]
+        subject = (
+            "repo:Toydrum@1234567/"
+            "draft-thehairnarrative-com@7654321:environment:test"
+        )
+        evidence = {
+            "github": {
+                "DRAFT_DOMAIN": "thehairnarrative.com",
+                "AWS_ROLE_ARN": expected["roleArn"],
+            },
+            "iam": {
+                "Arn": expected["roleArn"],
+                "AssumeRolePolicyDocument": {
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Federated": (
+                                "arn:aws:iam::123456789012:oidc-provider/"
+                                "token.actions.githubusercontent.com"
+                            )
+                        },
+                        "Action": "sts:AssumeRoleWithWebIdentity",
+                        "Condition": {"StringEquals": {
+                            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                            "token.actions.githubusercontent.com:ref": "refs/heads/test",
+                            "token.actions.githubusercontent.com:sub": subject,
+                        }},
+                    }],
+                },
+                "RoleName": role_name,
+            },
+        }
+
+        try:
+            verified = bootstrap.verify_role_evidence(
+                owner="Toydrum",
+                domain="thehairnarrative.com",
+                repo="draft-thehairnarrative-com",
+                environment="test",
+                account_id="123456789012",
+                evidence=evidence,
+                oidc_subject=subject,
+            )
+        except (bootstrap.BootstrapError, TypeError) as exc:
+            self.fail(f"exact immutable GitHub subject was rejected: {exc}")
+
+        self.assertEqual(verified, expected)
+
+    def test_immutable_subject_rejects_mismatched_or_wildcard_coordinates(self):
+        for subject in (
+            (
+                "repo:OtherOwner@1234567/"
+                "draft-thehairnarrative-com@7654321:environment:test"
+            ),
+            (
+                "repo:Toydrum@1234567/"
+                "other-repo@7654321:environment:test"
+            ),
+            "repo:Toydrum/*:environment:test",
+        ):
+            with self.subTest(subject=subject):
+                with self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap._validated_github_oidc_subject(
+                        subject,
+                        owner="Toydrum",
+                        repo="draft-thehairnarrative-com",
+                        environment="test",
+                    )
+
+    def test_cross_owner_binding_reads_the_resolved_repository_variables_and_subject(self):
+        external = draft(
+            "thehairnarrative.com",
+            "draft-thehairnarrative-com",
+            owner="Toydrum",
+        )
+        expected = binding(
+            "thehairnarrative.com",
+            "draft-thehairnarrative-com",
+            "test",
+        )
+        role_name = expected["roleArn"].split(":role/", 1)[1]
+        subject_prefix = (
+            "repo:Toydrum@1234567/"
+            "draft-thehairnarrative-com@7654321"
+        )
+
+        class CrossOwnerRunner:
+            def __init__(self):
+                self.commands = []
+
+            def run_json(self, arguments):
+                self.commands.append(arguments)
+                if arguments[:2] == ["gh", "api"]:
+                    return {
+                        "use_default": True,
+                        "use_immutable_subject": False,
+                        "sub_claim_prefix": subject_prefix,
+                    }
+                if arguments[:2] == ["gh", "variable"]:
+                    if arguments[4:6] != ["Toydrum/draft-thehairnarrative-com", "--env"]:
+                        self.fail_unexpected(arguments)
+                    return [
+                        {"name": "DRAFT_DOMAIN", "value": "thehairnarrative.com"},
+                        {"name": "AWS_ROLE_ARN", "value": expected["roleArn"]},
+                    ]
+                if arguments[:3] == ["aws", "iam", "get-role"]:
+                    return {"Role": {
+                        "Arn": expected["roleArn"],
+                        "RoleName": role_name,
+                        "AssumeRolePolicyDocument": {"Statement": [{
+                            "Effect": "Allow",
+                            "Principal": {
+                                "Federated": (
+                                    "arn:aws:iam::123456789012:oidc-provider/"
+                                    "token.actions.githubusercontent.com"
+                                )
+                            },
+                            "Action": "sts:AssumeRoleWithWebIdentity",
+                            "Condition": {"StringEquals": {
+                                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                                "token.actions.githubusercontent.com:ref": "refs/heads/test",
+                                "token.actions.githubusercontent.com:sub": (
+                                    f"{subject_prefix}:environment:test"
+                                ),
+                            }},
+                        }]},
+                    }}
+                self.fail_unexpected(arguments)
+
+            @staticmethod
+            def fail_unexpected(arguments):
+                raise AssertionError(f"unexpected command: {arguments}")
+
+        runner = CrossOwnerRunner()
+        try:
+            bindings = bootstrap.collect_verified_bindings(
+                registry(external),
+                environment="test",
+                profile="default",
+                account_id="123456789012",
+                runner=runner,
+            )
+        except (bootstrap.BootstrapError, AssertionError) as exc:
+            self.fail(f"cross-owner binding was not verified safely: {exc}")
+
+        self.assertEqual(bindings, [expected])
+        self.assertTrue(any(
+            command[:5] == [
+                "gh", "variable", "list", "--repo",
+                "Toydrum/draft-thehairnarrative-com",
+            ]
+            for command in runner.commands
+        ))
+
+    def test_cross_owner_variable_denial_fails_closed_without_fallback(self):
+        external = draft(
+            "thehairnarrative.com",
+            "draft-thehairnarrative-com",
+            owner="Toydrum",
+        )
+
+        class DeniedRunner:
+            def __init__(self):
+                self.commands = []
+
+            def run_json(self, arguments):
+                self.commands.append(arguments)
+                if arguments[:2] == ["gh", "api"]:
+                    return {
+                        "use_default": True,
+                        "sub_claim_prefix": (
+                            "repo:Toydrum@1234567/"
+                            "draft-thehairnarrative-com@7654321"
+                        ),
+                    }
+                if arguments[:5] == [
+                    "gh", "variable", "list", "--repo",
+                    "Toydrum/draft-thehairnarrative-com",
+                ]:
+                    raise bootstrap.BootstrapError("GitHub variables are unavailable")
+                raise AssertionError(f"unexpected command: {arguments}")
+
+        runner = DeniedRunner()
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.collect_verified_bindings(
+                registry(external),
+                environment="test",
+                profile="default",
+                account_id="123456789012",
+                runner=runner,
+            )
+
+        self.assertFalse(any(command[:2] == ["aws", "iam"] for command in runner.commands))
+        self.assertFalse(any(
+            "LynxPardelle/draft-thehairnarrative-com" in command
+            for command in runner.commands
+        ))
+
+    def test_v2_production_binding_collection_skips_test_only_drafts(self):
+        shared = draft("example.com", "draft-example-com")
+        shared["deploymentEnvironments"] = ["test", "production"]
+        test_only = draft(
+            "thehairnarrative.com",
+            "draft-thehairnarrative-com",
+            owner="Toydrum",
+        )
+        test_only["deploymentEnvironments"] = ["test"]
+        scoped_registry = {
+            "version": 2,
+            "owner": "LynxPardelle",
+            "drafts": [shared, test_only],
+        }
+        expected = binding("example.com", "draft-example-com", "production")
+        role_name = expected["roleArn"].split(":role/", 1)[1]
+
+        class ProductionRunner:
+            def __init__(self):
+                self.commands = []
+
+            def run_json(self, arguments):
+                self.commands.append(arguments)
+                joined = " ".join(arguments)
+                if "Toydrum" in joined or "thehairnarrative" in joined:
+                    raise AssertionError("test-only draft was queried for production")
+                if arguments[:2] == ["gh", "api"]:
+                    return {
+                        "use_default": True,
+                        "sub_claim_prefix": "repo:LynxPardelle/draft-example-com",
+                    }
+                if arguments[:2] == ["gh", "variable"]:
+                    return [
+                        {"name": "DRAFT_DOMAIN", "value": "example.com"},
+                        {"name": "AWS_ROLE_ARN", "value": expected["roleArn"]},
+                    ]
+                if arguments[:3] == ["aws", "iam", "get-role"]:
+                    return {"Role": {
+                        "Arn": expected["roleArn"],
+                        "RoleName": role_name,
+                        "AssumeRolePolicyDocument": {"Statement": [{
+                            "Effect": "Allow",
+                            "Principal": {"Federated": (
+                                "arn:aws:iam::123456789012:oidc-provider/"
+                                "token.actions.githubusercontent.com"
+                            )},
+                            "Action": "sts:AssumeRoleWithWebIdentity",
+                            "Condition": {"StringEquals": {
+                                "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                                "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                                "token.actions.githubusercontent.com:sub": (
+                                    "repo:LynxPardelle/draft-example-com:environment:production"
+                                ),
+                            }},
+                        }]},
+                    }}
+                raise AssertionError(f"unexpected command: {arguments}")
+
+        runner = ProductionRunner()
+        bindings = bootstrap.collect_verified_bindings(
+            scoped_registry,
+            environment="production",
+            profile="default",
+            account_id="123456789012",
+            runner=runner,
+        )
+
+        self.assertEqual(bindings, [expected])
+        self.assertFalse(any("Toydrum" in " ".join(command) for command in runner.commands))
 
     def test_role_evidence_rejects_extra_trust_conditions_or_statements(self):
         expected = binding("example.com", "draft-example-com", "test")
@@ -336,10 +777,47 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         with self.assertRaises(bootstrap.BootstrapError):
             bootstrap.require_environment_bucket("production", "zoolanding-config-payloads-test")
 
-    def test_scope_bytes_must_be_stable_across_environments(self):
-        bootstrap.require_stable_scope_bytes(b"same", b"same")
-        with self.assertRaises(bootstrap.BootstrapError):
-            bootstrap.require_stable_scope_bytes(b"test", b"production")
+    def test_production_scopes_must_be_an_exact_subset_of_test(self):
+        shared = {
+            "domain": "example.com",
+            "repo": "draft-example-com",
+            "tenantId": "draft-example-com",
+            "draftId": "draft-example-com",
+        }
+        test_only = {
+            "domain": "test-only.example.com",
+            "repo": "draft-test-only-example-com",
+            "tenantId": "draft-test-only-example-com",
+            "draftId": "draft-test-only-example-com",
+        }
+        test_bytes = bootstrap.canonical_json_bytes({
+            "version": 1,
+            "scopes": [shared, test_only],
+        })
+        production_bytes = bootstrap.canonical_json_bytes({
+            "version": 1,
+            "scopes": [shared],
+        })
+
+        bootstrap.require_production_scope_subset(test_bytes, production_bytes)
+        bootstrap.require_production_scope_subset(production_bytes, production_bytes)
+
+        mutated = copy.deepcopy(shared)
+        mutated["tenantId"] = "other"
+        for invalid_production in (
+            {"version": 1, "scopes": [mutated]},
+            {"version": 1, "scopes": [shared, test_only, {
+                "domain": "production-only.example.com",
+                "repo": "draft-production-only-example-com",
+                "tenantId": "draft-production-only-example-com",
+                "draftId": "draft-production-only-example-com",
+            }]},
+        ):
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.require_production_scope_subset(
+                    test_bytes,
+                    bootstrap.canonical_json_bytes(invalid_production),
+                )
 
     def test_test_green_evidence_is_machine_verified_and_hash_approved(self):
         owner = "LynxPardelle"
@@ -557,6 +1035,29 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         bootstrap.require_approved_test_evidence(evidence, approved)
         self.assertEqual(evidence["testCommit"], commit)
         self.assertEqual(evidence["unsignedApiStatus"], 403)
+
+        external_canary = copy.deepcopy(snapshot)
+        for state in (external_canary, external_canary["finalState"]):
+            state["canaryPulls"][0]["base"]["repo"]["full_name"] = (
+                f"Toydrum/{canary_repo}"
+            )
+            state["canaryPulls"][0]["head"]["repo"]["full_name"] = (
+                f"Toydrum/{canary_repo}"
+            )
+        try:
+            bootstrap.validate_test_green_snapshot(
+                external_canary,
+                owner=owner,
+                canary_owner="Toydrum",
+                test_commit=commit,
+                test_run_id=123,
+                canary_repo=canary_repo,
+                canary_run_id=456,
+                expected_scope_bytes=scope_bytes,
+                expected_authz_bytes=authz_bytes,
+            )
+        except (TypeError, bootstrap.BootstrapError) as exc:
+            self.fail(f"external canary owner was not kept separate: {exc}")
 
         for path, bad_value in (
             (("run", "conclusion"), "failure"),
