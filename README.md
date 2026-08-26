@@ -69,7 +69,7 @@ The checked-in deploy profiles use the parallel `system/deploy-authz-v2.json` ke
 
 ### Private server-scope bootstrap
 
-`tools/bootstrap_server_scopes.py` is the operator-only bootstrap for the private scope registry and runtime authorization object. It is not part of the Lambda artifact. It derives the exact draft set from the hub's `docs/drafts-registry.json`, verifies each repository's environment-scoped `DRAFT_DOMAIN` and `AWS_ROLE_ARN`, and verifies the matching IAM role's exact GitHub OIDC trust before generating any bytes.
+`tools/bootstrap_server_scopes.py` is the operator-only bootstrap for the private scope registry and runtime authorization object. It is not part of the Lambda artifact. It derives the exact draft set from the hub's `docs/drafts-registry.json`, resolves an optional entry-level GitHub owner with the registry owner as the default, verifies each resolved repository's environment-scoped `DRAFT_DOMAIN` and `AWS_ROLE_ARN`, and verifies the matching IAM role's exact GitHub OIDC trust before generating any bytes. The operator's authenticated GitHub profile must have read access to the required Environment variables and OIDC metadata for every resolved repository; missing cross-owner access fails closed and must not be replaced with inferred values. Registry version 2 requires every draft to declare exactly `deploymentEnvironments: ["test"]` or `deploymentEnvironments: ["test", "production"]`; version 1 remains compatible only for registries whose complete draft set belongs to both environments.
 
 The reviewed ID rule is deliberately small:
 
@@ -83,7 +83,7 @@ Plan from the authoring repository without writing AWS state:
 ```powershell
 python tools/bootstrap_server_scopes.py plan `
   --registry ..\zoolandingpage\docs\drafts-registry.json `
-  --expected-draft-count 11 `
+  --expected-draft-count 12 `
   --tenant-override zoositioweb.com.mx=zoosite `
   --profile ADMIN-AIM-CLI `
   --region us-east-1 `
@@ -91,7 +91,7 @@ python tools/bootstrap_server_scopes.py plan `
   --production-bucket zoolanding-config-payloads
 ```
 
-Review and retain only the plan's safe metadata: counts, SHA-256 values, bucket state, ETags, version IDs, lengths, and timestamps. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values. The initial plan must prove exactly 11 scopes and 11 rules per environment, identical scope bytes across environments, enforced bucket ownership, all four S3 public-access blocks, and the reviewed current scope and v2 authorization ETag/version/SHA-256 values when present. It reports `scopeUpdateMode` as `create`, `idempotent`, or `append`.
+Review and retain only the plan's safe metadata: counts, SHA-256 values, bucket state, ETags, version IDs, lengths, and timestamps. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values. The initial plan must prove exactly 12 test scopes and rules, exactly 11 production scopes and rules, production as an exact subset of test, enforced bucket ownership, all four S3 public-access blocks, and the reviewed current scope and v2 authorization ETag/version/SHA-256 values when present. The expected draft count remains 12 because it reviews the complete registry before environment filtering. The plan reports `productionScopesSubsetOfTest`, whether the scope bytes happen to be stable across environments, and each environment's `scopeUpdateMode` as `create`, `idempotent`, or `append`.
 
 Use `apply --help` for the conditional write arguments. Apply test first with the exact plan hashes and reviewed current metadata. Use the literal `MISSING` triplet when the planned current scope does not exist, and the literal `MISSING` ETag/version pair when the planned v2 authorization object does not exist. Missing objects use `If-None-Match: *`; an unchanged scope is idempotent; an update uses `If-Match` only when it strictly appends canonical drafts without changing or removing any existing mapping. The scope is written first, the complete v2 authorization object is generated second, and both current and version-specific objects are read back exactly. A partial failure can therefore leave a new scope without a grant, never a grant without its scope. The tool reports prior v2 versions and hashes when they exist; the separate legacy authorization key is never a bootstrap or rollback target. It refuses an unknown or environment-mismatched bucket, disabled versioning, non-enforced ownership, incomplete public-access block, changed object metadata, unreviewed hashes, scope mutation/deletion, duplicate bindings, or non-exact OIDC trust.
 
