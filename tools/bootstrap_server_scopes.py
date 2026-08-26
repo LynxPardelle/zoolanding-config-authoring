@@ -1,9 +1,10 @@
 """Plan, apply, and roll back private per-draft authoring scope registries.
 
 The tool derives the reviewed draft set from the Zoolanding hub registry, reads
-environment-scoped AWS_ROLE_ARN values from GitHub, verifies each IAM role and
-its exact GitHub OIDC trust, and writes only private S3 objects. It never reads
-secret values and never accepts legacy roleName authorization.
+environment-scoped AWS_ROLE_ARN values from each resolved GitHub repository,
+verifies each IAM role and its exact GitHub OIDC trust, and writes only private
+S3 objects. It never reads secret values and never accepts legacy roleName
+authorization.
 """
 
 from __future__ import annotations
@@ -190,15 +191,58 @@ def _load_json_file(path: Path) -> Any:
         raise BootstrapError("JSON input is unavailable or invalid") from exc
 
 
+def _registry_version(registry: Any) -> int:
+    if not isinstance(registry, dict):
+        raise BootstrapError("unsupported canonical draft registry")
+    version = registry.get("version")
+    if type(version) is not int or version not in {1, 2}:
+        raise BootstrapError("unsupported canonical draft registry")
+    return version
+
+
+def _entry_deployment_environments(entry: dict[str, Any], registry_version: int) -> tuple[str, ...]:
+    if registry_version == 1:
+        if "deploymentEnvironments" in entry:
+            raise BootstrapError("version 1 draft registry cannot declare deployment environments")
+        return ENVIRONMENTS
+    value = entry.get("deploymentEnvironments")
+    if value == ["test"]:
+        return ("test",)
+    if value == ["test", "production"]:
+        return ENVIRONMENTS
+    raise BootstrapError("canonical draft deployment environments are invalid")
+
+
+def _registered_repo_owner(registry: Any, repo: str) -> str:
+    _registry_version(registry)
+    default_owner = _strict_owner(registry.get("owner"))
+    repo = _strict_repo(repo)
+    drafts = registry.get("drafts")
+    if not isinstance(drafts, list):
+        raise BootstrapError("canonical draft registry is invalid")
+    matches = [
+        entry
+        for entry in drafts
+        if isinstance(entry, dict) and entry.get("repo") == repo
+    ]
+    if len(matches) != 1:
+        raise BootstrapError("canonical draft repository is missing or duplicated")
+    return _strict_owner(matches[0].get("owner", default_owner))
+
+
 def build_scope_registry(
     registry: Any,
     *,
     expected_draft_count: int,
     tenant_overrides: dict[str, str],
+    environment: Optional[str] = None,
 ) -> dict[str, Any]:
-    if not isinstance(registry, dict) or registry.get("version") != 1:
-        raise BootstrapError("unsupported canonical draft registry")
-    owner = _strict_owner(registry.get("owner"))
+    registry_version = _registry_version(registry)
+    if environment is not None and environment not in ENVIRONMENTS:
+        raise BootstrapError("environment must be test or production")
+    if registry_version == 2 and environment is None:
+        raise BootstrapError("version 2 draft registry requires an environment")
+    default_owner = _strict_owner(registry.get("owner"))
     drafts = registry.get("drafts")
     if not isinstance(drafts, list) or len(drafts) != expected_draft_count or expected_draft_count < 1:
         raise BootstrapError("canonical draft count does not match explicit review")
@@ -210,7 +254,9 @@ def build_scope_registry(
         if not isinstance(entry, dict):
             raise BootstrapError("canonical draft entry is invalid")
         domain = _strict_domain(entry.get("domain"))
+        owner = _strict_owner(entry.get("owner", default_owner))
         repo = _strict_repo(entry.get("repo"))
+        deployment_environments = _entry_deployment_environments(entry, registry_version)
         expected_url = f"https://github.com/{owner}/{repo}.git"
         if entry.get("githubUrl") != expected_url or entry.get("localPath") != f"drafts/{domain}":
             raise BootstrapError("canonical draft ownership fields disagree")
@@ -219,16 +265,21 @@ def build_scope_registry(
         domains.add(domain)
         repos.add(repo)
         tenant_id = _strict_id(tenant_overrides.get(domain, repo), "tenantId")
+        draft_id = _strict_id(repo, "draftId")
+        if environment is not None and environment not in deployment_environments:
+            continue
         scopes.append({
             "domain": domain,
             "repo": repo,
             "tenantId": tenant_id,
-            "draftId": _strict_id(repo, "draftId"),
+            "draftId": draft_id,
         })
 
     unknown_overrides = set(tenant_overrides) - domains
     if unknown_overrides:
         raise BootstrapError("tenant override targets an unregistered draft")
+    if not scopes:
+        raise BootstrapError("canonical draft environment has no deployable scopes")
     scopes.sort(key=lambda entry: entry["domain"])
     return {"version": 1, "scopes": scopes}
 
@@ -297,9 +348,14 @@ def require_environment_bucket(environment: str, bucket: str) -> None:
         raise BootstrapError("environment and private config bucket do not match")
 
 
-def require_stable_scope_bytes(test_scope_bytes: bytes, production_scope_bytes: bytes) -> None:
-    if test_scope_bytes != production_scope_bytes:
-        raise BootstrapError("scope registry bytes differ across test and production")
+def require_production_scope_subset(test_scope_bytes: bytes, production_scope_bytes: bytes) -> None:
+    _, test_scopes = _validated_scope_contract(test_scope_bytes)
+    _, production_scopes = _validated_scope_contract(production_scope_bytes)
+    if not set(production_scopes).issubset(test_scopes) or any(
+        test_scopes.get(domain) != scope
+        for domain, scope in production_scopes.items()
+    ):
+        raise BootstrapError("production scopes are not an exact subset of test scopes")
 
 
 def _exact_parameter_map(stack: dict[str, Any]) -> dict[str, str]:
@@ -477,10 +533,12 @@ def validate_test_green_snapshot(
     canary_run_id: int,
     expected_scope_bytes: bytes,
     expected_authz_bytes: bytes,
+    canary_owner: Optional[str] = None,
 ) -> dict[str, Any]:
     if not isinstance(snapshot, dict) or not re.fullmatch(r"[a-f0-9]{40}", test_commit):
         raise BootstrapError("test deployment evidence context is invalid")
     owner = _strict_owner(owner)
+    canary_owner = _strict_owner(canary_owner or owner)
     canary_repo = _strict_repo(canary_repo)
     if (
         not isinstance(test_run_id, int)
@@ -573,7 +631,7 @@ def validate_test_green_snapshot(
         raise BootstrapError("signed canonical draft test canary is not green and ordered")
     canary_provenance = _validate_canary_dispatch_provenance(
         snapshot,
-        owner=owner,
+        owner=canary_owner,
         canary_repo=canary_repo,
         canary_commit_sha=canary_run["headSha"],
         canary_started=canary_started,
@@ -899,8 +957,10 @@ def collect_test_green_evidence(
     canary_run_id: int,
     expected_scope_bytes: bytes,
     expected_authz_bytes: bytes,
+    canary_owner: Optional[str] = None,
 ) -> dict[str, Any]:
     owner = _strict_owner(owner)
+    canary_owner = _strict_owner(canary_owner or owner)
     remote_ref = runner.run_json([
         "gh", "api", f"repos/{owner}/{AUTHORING_REPOSITORY}/git/ref/heads/test",
     ])
@@ -913,22 +973,22 @@ def collect_test_green_evidence(
     ]))
     canary_repo = _strict_repo(canary_repo)
     canary_ref = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/ref/heads/test",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/ref/heads/test",
     ])
     canary_workflow = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/actions/workflows/deploy-test.yml",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/actions/workflows/deploy-test.yml",
     ])
     canary_run = _rest_run_evidence(runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/actions/runs/{canary_run_id}",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/actions/runs/{canary_run_id}",
     ]))
     canary_commit_sha = canary_run.get("headSha") if isinstance(canary_run, dict) else None
     if not _git_sha(canary_commit_sha):
         raise BootstrapError("test canary run commit is invalid")
     canary_commit = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{canary_commit_sha}",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/commits/{canary_commit_sha}",
     ])
     canary_dev_ref = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/ref/heads/dev",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/ref/heads/dev",
     ])
     canary_dev_object = (
         canary_dev_ref.get("object") if isinstance(canary_dev_ref, dict) else None
@@ -939,14 +999,14 @@ def collect_test_green_evidence(
     if not _git_sha(canary_dev_sha):
         raise BootstrapError("test canary dev ref is invalid")
     canary_dev_commit = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{canary_dev_sha}",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/commits/{canary_dev_sha}",
     ])
     canary_pulls = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/commits/{canary_commit_sha}/pulls",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/commits/{canary_commit_sha}/pulls",
     ])
     canary_authoring_endpoint = _github_environment_variable_evidence(
         runner,
-        owner,
+        canary_owner,
         canary_repo,
         "test",
         "AUTHORING_ENDPOINT",
@@ -1038,13 +1098,13 @@ def collect_test_green_evidence(
         "gh", "api", f"repos/{owner}/{AUTHORING_REPOSITORY}/actions/runs/{test_run_id}",
     ]))
     final_canary_ref = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/ref/heads/test",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/ref/heads/test",
     ])
     final_canary_workflow = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/actions/workflows/deploy-test.yml",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/actions/workflows/deploy-test.yml",
     ])
     final_canary_run = _rest_run_evidence(runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/actions/runs/{canary_run_id}",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/actions/runs/{canary_run_id}",
     ]))
     final_canary_object = (
         final_canary_ref.get("object") if isinstance(final_canary_ref, dict) else None
@@ -1055,10 +1115,10 @@ def collect_test_green_evidence(
     if not _git_sha(final_canary_sha):
         raise BootstrapError("final test canary ref is invalid")
     final_canary_commit = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{final_canary_sha}",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/commits/{final_canary_sha}",
     ])
     final_canary_dev_ref = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/ref/heads/dev",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/ref/heads/dev",
     ])
     final_canary_dev_object = (
         final_canary_dev_ref.get("object")
@@ -1073,14 +1133,14 @@ def collect_test_green_evidence(
     if not _git_sha(final_canary_dev_sha):
         raise BootstrapError("final test canary dev ref is invalid")
     final_canary_dev_commit = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/git/commits/{final_canary_dev_sha}",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/git/commits/{final_canary_dev_sha}",
     ])
     final_canary_pulls = runner.run_json([
-        "gh", "api", f"repos/{owner}/{canary_repo}/commits/{final_canary_sha}/pulls",
+        "gh", "api", f"repos/{canary_owner}/{canary_repo}/commits/{final_canary_sha}/pulls",
     ])
     final_canary_authoring_endpoint = _github_environment_variable_evidence(
         runner,
-        owner,
+        canary_owner,
         canary_repo,
         "test",
         "AUTHORING_ENDPOINT",
@@ -1167,6 +1227,7 @@ def collect_test_green_evidence(
         canary_run_id=canary_run_id,
         expected_scope_bytes=expected_scope_bytes,
         expected_authz_bytes=expected_authz_bytes,
+        canary_owner=canary_owner,
     )
 
 
@@ -1178,6 +1239,7 @@ def verify_role_evidence(
     environment: str,
     account_id: str,
     evidence: dict[str, Any],
+    oidc_subject: Optional[str] = None,
 ) -> dict[str, str]:
     owner = _strict_owner(owner)
     domain = _strict_domain(domain)
@@ -1214,10 +1276,16 @@ def verify_role_evidence(
     condition = statement.get("Condition")
     equals = condition.get("StringEquals") if isinstance(condition, dict) else None
     expected_branch = "test" if environment == "test" else "main"
+    expected_subject = _validated_github_oidc_subject(
+        oidc_subject or f"repo:{owner}/{repo}:environment:{environment}",
+        owner=owner,
+        repo=repo,
+        environment=environment,
+    )
     expected_equals = {
         "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
         "token.actions.githubusercontent.com:ref": f"refs/heads/{expected_branch}",
-        "token.actions.githubusercontent.com:sub": f"repo:{owner}/{repo}:environment:{environment}",
+        "token.actions.githubusercontent.com:sub": expected_subject,
     }
     if (
         set(statement) != {"Effect", "Principal", "Action", "Condition"}
@@ -1305,6 +1373,78 @@ def _github_variables(runner: CommandRunner, owner: str, repo: str, environment:
     return variables
 
 
+def _validated_github_oidc_subject_prefix(value: Any, *, owner: str, repo: str) -> tuple[str, bool]:
+    owner = _strict_owner(owner)
+    repo = _strict_repo(repo)
+    if value == f"repo:{owner}/{repo}":
+        return value, False
+    if not isinstance(value, str):
+        raise BootstrapError("GitHub OIDC subject prefix is invalid")
+    immutable = re.fullmatch(
+        r"repo:(?P<owner>[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)@"
+        r"(?P<owner_id>[1-9][0-9]*)/(?P<repo>[A-Za-z0-9._-]{1,100})@"
+        r"(?P<repo_id>[1-9][0-9]*)",
+        value,
+    )
+    if (
+        immutable is None
+        or immutable.group("owner").casefold() != owner.casefold()
+        or immutable.group("repo").casefold() != repo.casefold()
+    ):
+        raise BootstrapError("GitHub OIDC subject prefix is invalid")
+    return value, True
+
+
+def _validated_github_oidc_subject(
+    value: Any,
+    *,
+    owner: str,
+    repo: str,
+    environment: str,
+) -> str:
+    if environment not in ENVIRONMENTS or not isinstance(value, str):
+        raise BootstrapError("GitHub OIDC subject is invalid")
+    suffix = f":environment:{environment}"
+    if not value.endswith(suffix):
+        raise BootstrapError("GitHub OIDC subject is invalid")
+    _validated_github_oidc_subject_prefix(value[:-len(suffix)], owner=owner, repo=repo)
+    return value
+
+
+def _github_oidc_subject(
+    runner: CommandRunner,
+    owner: str,
+    repo: str,
+    environment: str,
+) -> str:
+    owner = _strict_owner(owner)
+    repo = _strict_repo(repo)
+    if environment not in ENVIRONMENTS:
+        raise BootstrapError("GitHub environment is invalid")
+    result = runner.run_json([
+        "gh", "api", f"repos/{owner}/{repo}/actions/oidc/customization/sub",
+        "-H", "Accept: application/vnd.github+json",
+        "-H", "X-GitHub-Api-Version: 2026-03-10",
+    ])
+    if (
+        not isinstance(result, dict)
+        or result.get("use_default") is not True
+        or (
+            "use_immutable_subject" in result
+            and not isinstance(result.get("use_immutable_subject"), bool)
+        )
+    ):
+        raise BootstrapError("GitHub OIDC customization is invalid")
+    prefix, immutable = _validated_github_oidc_subject_prefix(
+        result.get("sub_claim_prefix"),
+        owner=owner,
+        repo=repo,
+    )
+    if result.get("use_immutable_subject") is True and not immutable:
+        raise BootstrapError("GitHub OIDC subject mode is inconsistent")
+    return f"{prefix}:environment:{environment}"
+
+
 def _github_environment_variable_evidence(
     runner: CommandRunner,
     owner: str,
@@ -1344,7 +1484,10 @@ def collect_verified_bindings(
     account_id: str,
     runner: CommandRunner,
 ) -> list[dict[str, str]]:
-    owner = _strict_owner(registry.get("owner"))
+    registry_version = _registry_version(registry)
+    if environment not in ENVIRONMENTS:
+        raise BootstrapError("environment must be test or production")
+    default_owner = _strict_owner(registry.get("owner"))
     drafts = registry.get("drafts")
     if not isinstance(drafts, list):
         raise BootstrapError("canonical draft registry is invalid")
@@ -1353,7 +1496,11 @@ def collect_verified_bindings(
         if not isinstance(entry, dict):
             raise BootstrapError("canonical draft entry is invalid")
         domain = _strict_domain(entry.get("domain"))
+        owner = _strict_owner(entry.get("owner", default_owner))
         repo = _strict_repo(entry.get("repo"))
+        if environment not in _entry_deployment_environments(entry, registry_version):
+            continue
+        oidc_subject = _github_oidc_subject(runner, owner, repo, environment)
         github = _github_variables(runner, owner, repo, environment)
         role_arn = github.get("AWS_ROLE_ARN")
         match = ROLE_ARN_PATTERN.fullmatch(role_arn or "")
@@ -1372,6 +1519,7 @@ def collect_verified_bindings(
             environment=environment,
             account_id=account_id,
             evidence={"github": github, "iam": iam_result["Role"]},
+            oidc_subject=oidc_subject,
         ))
     return bindings
 
@@ -1904,6 +2052,7 @@ def _generated_bundle(args: argparse.Namespace, environment: str, runner: Comman
         registry,
         expected_draft_count=args.expected_draft_count,
         tenant_overrides=overrides,
+        environment=environment,
     )
     account_id = _account_id(runner, args.profile)
     bindings = collect_verified_bindings(
@@ -1996,10 +2145,11 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
             "currentAuthz": _safe_head(current_authz),
             "currentAuthzSha256": current_authz_sha256,
         }
-    require_stable_scope_bytes(bundles["test"][0], bundles["production"][0])
+    require_production_scope_subset(bundles["test"][0], bundles["production"][0])
     return {
         "mode": "plan",
-        "scopeBytesStableAcrossEnvironments": True,
+        "productionScopesSubsetOfTest": True,
+        "scopeBytesStableAcrossEnvironments": bundles["test"][0] == bundles["production"][0],
         "environments": environments,
     }
 
@@ -2021,9 +2171,10 @@ def _apply(args: argparse.Namespace) -> dict[str, Any]:
         test_scope_bytes, test_authz_bytes, test_account_id = _generated_bundle(args, "test", runner)
         if test_account_id != account_id:
             raise BootstrapError("test and production AWS accounts differ")
-        require_stable_scope_bytes(test_scope_bytes, scope_bytes)
+        require_production_scope_subset(test_scope_bytes, scope_bytes)
         registry = _load_json_file(args.registry)
         owner = _strict_owner(registry.get("owner") if isinstance(registry, dict) else None)
+        canary_owner = _registered_repo_owner(registry, args.canary_repo)
         test_s3 = AwsCliS3(profile=args.profile, region=args.region, runner=runner)
         evidence = collect_test_green_evidence(
             runner=runner,
@@ -2038,6 +2189,7 @@ def _apply(args: argparse.Namespace) -> dict[str, Any]:
             canary_run_id=args.canary_run_id,
             expected_scope_bytes=test_scope_bytes,
             expected_authz_bytes=test_authz_bytes,
+            canary_owner=canary_owner,
         )
         require_approved_test_evidence(evidence, args.approve_test_evidence_sha256)
         test_evidence_sha256 = sha256_hex(canonical_json_bytes(evidence))
@@ -2067,6 +2219,7 @@ def _verify_test(args: argparse.Namespace) -> dict[str, Any]:
     scope_bytes, authz_bytes, account_id = _generated_bundle(args, "test", runner)
     registry = _load_json_file(args.registry)
     owner = _strict_owner(registry.get("owner") if isinstance(registry, dict) else None)
+    canary_owner = _registered_repo_owner(registry, args.canary_repo)
     s3 = AwsCliS3(profile=args.profile, region=args.region, runner=runner)
     evidence = collect_test_green_evidence(
         runner=runner,
@@ -2081,6 +2234,7 @@ def _verify_test(args: argparse.Namespace) -> dict[str, Any]:
         canary_run_id=args.canary_run_id,
         expected_scope_bytes=scope_bytes,
         expected_authz_bytes=authz_bytes,
+        canary_owner=canary_owner,
     )
     return {
         "mode": "verify-test",
@@ -2097,6 +2251,7 @@ def _rollback(args: argparse.Namespace) -> dict[str, Any]:
         registry,
         expected_draft_count=args.expected_draft_count,
         tenant_overrides=_parse_overrides(args.tenant_override),
+        environment=args.environment,
     )
     scope_bytes = canonical_json_bytes(scopes)
     account_id = _account_id(runner, args.profile)
