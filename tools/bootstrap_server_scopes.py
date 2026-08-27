@@ -184,9 +184,19 @@ def _strict_owner(value: Any) -> str:
     return value
 
 
-def _load_json_file(path: Path) -> Any:
+def _load_json_file(path: Path, *, reject_duplicate_keys: bool = False) -> Any:
+    def unique_object(pairs):
+        value = dict(pairs)
+        if len(value) != len(pairs):
+            raise ValueError("duplicate JSON object keys")
+        return value
+
     try:
-        return json.loads(path.read_text(encoding="utf-8"), parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+        return json.loads(
+            path.read_text(encoding="utf-8"),
+            parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)),
+            object_pairs_hook=unique_object if reject_duplicate_keys else None,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise BootstrapError("JSON input is unavailable or invalid") from exc
 
@@ -1483,6 +1493,7 @@ def collect_verified_bindings(
     profile: str,
     account_id: str,
     runner: CommandRunner,
+    domain: Optional[str] = None,
 ) -> list[dict[str, str]]:
     registry_version = _registry_version(registry)
     if environment not in ENVIRONMENTS:
@@ -1491,6 +1502,17 @@ def collect_verified_bindings(
     drafts = registry.get("drafts")
     if not isinstance(drafts, list):
         raise BootstrapError("canonical draft registry is invalid")
+    isolated = domain is not None
+    if isolated:
+        if environment != "test":
+            raise BootstrapError("isolated onboarding is test only")
+        domain = _strict_domain(domain)
+        build_scope_registry(
+            registry, expected_draft_count=len(drafts), tenant_overrides={}, environment="test",
+        )
+        drafts = [entry for entry in drafts if entry["domain"] == domain]
+        if len(drafts) != 1:
+            raise BootstrapError("isolated domain must select exactly one registered draft")
     bindings: list[dict[str, str]] = []
     for entry in drafts:
         if not isinstance(entry, dict):
@@ -1506,6 +1528,13 @@ def collect_verified_bindings(
         match = ROLE_ARN_PATTERN.fullmatch(role_arn or "")
         if match is None:
             raise BootstrapError("GitHub AWS_ROLE_ARN is invalid")
+        if isolated and (
+            github.get("DRAFT_DOMAIN") != domain
+            or match.group("partition") != "aws"
+            or match.group("account") != account_id
+            or match.group("name") != f"{repo}-test-deploy"
+        ):
+            raise BootstrapError("isolated role coordinates do not match the selected draft")
         iam_result = runner.run_json([
             "aws", "iam", "get-role", "--profile", profile,
             "--role-name", match.group("name"), "--output", "json", "--no-cli-pager",
@@ -1648,6 +1677,75 @@ class AwsCliS3:
                 path.unlink(missing_ok=True)
 
 
+class InMemoryS3(AwsCliS3):
+    """Operator-only body transport; metadata retains the existing CLI checks."""
+
+    def __init__(self, *, profile: str, region: str, runner=None, client=None):
+        super().__init__(profile=profile, region=region, runner=runner)
+        if client is None:
+            try:
+                from boto3 import Session
+                from botocore.config import Config
+                client = Session(profile_name=profile).client(
+                    "s3", region_name=region,
+                    config=Config(
+                        signature_version="s3v4", connect_timeout=10, read_timeout=60,
+                        retries={"mode": "standard", "total_max_attempts": 1},
+                    ),
+                )
+            except ImportError:
+                raise BootstrapError("isolated onboarding requires operator-only boto3") from None
+            except Exception:
+                raise BootstrapError("isolated S3 client could not be initialized") from None
+        self.client = client
+
+    @staticmethod
+    def _parameters(bucket, key, expected_owner):
+        require_environment_bucket("test", bucket)
+        if key not in {SCOPE_KEY, AUTHZ_KEY}:
+            raise BootstrapError("isolated S3 key is not allowlisted")
+        return {"Bucket": bucket, "Key": key, "ExpectedBucketOwner": expected_owner}
+
+    def get_object(self, bucket, key, expected_owner, version_id=None):
+        parameters = self._parameters(bucket, key, expected_owner)
+        if version_id is not None:
+            parameters["VersionId"] = version_id
+        try:
+            stream = self.client.get_object(**parameters)["Body"]
+            try:
+                body = stream.read()
+                if not isinstance(body, bytes):
+                    raise ValueError("invalid body type")
+                return body
+            finally:
+                stream.close()
+        except Exception:
+            raise BootstrapError("isolated S3 body could not be read") from None
+
+    def put_object(self, bucket, key, body, expected_owner, *, if_match=None, if_none_match=None):
+        parameters = self._parameters(bucket, key, expected_owner)
+        parameters.update(
+            Body=body, ContentType="application/json", ServerSideEncryption="AES256",
+            ChecksumAlgorithm="SHA256",
+            ChecksumSHA256=base64.b64encode(hashlib.sha256(body).digest()).decode("ascii"),
+        )
+        if if_match is not None:
+            parameters["IfMatch"] = if_match
+        if if_none_match is not None:
+            parameters["IfNoneMatch"] = if_none_match
+        try:
+            result = self.client.put_object(**parameters)
+        except Exception as exc:
+            response = getattr(exc, "response", None)
+            error = response.get("Error") if isinstance(response, dict) else None
+            if isinstance(error, dict) and error.get("Code") in {"PreconditionFailed", "ConditionalRequestConflict"}:
+                raise BootstrapError("isolated S3 precondition failed; re-plan required") from None
+            raise BootstrapError("isolated S3 write failed; recheck state before proceeding") from None
+        if not isinstance(result, dict) or not isinstance(result.get("ETag"), str) or not result.get("VersionId"):
+            raise BootstrapError("versioned S3 write did not return ETag and VersionId")
+        return {"etag": result["ETag"], "versionId": result["VersionId"]}
+
+
 def _require_approved_hash(value: str, body: bytes, label: str) -> str:
     if not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value) or value != sha256_hex(body):
         raise BootstrapError(f"{label} approval hash does not match generated bytes")
@@ -1713,6 +1811,7 @@ def apply_private_bundle(
     expected_current_scope_etag: str,
     expected_current_scope_version_id: str,
     expected_current_scope_sha256: str,
+    expected_current_authz_sha256: Optional[str] = None,
 ) -> dict[str, Any]:
     _require_approved_hash(approved_scope_sha256, scope_bytes, "scope registry")
     _require_approved_hash(approved_authz_sha256, authz_bytes, "authorization")
@@ -1739,6 +1838,15 @@ def apply_private_bundle(
         ):
             raise BootstrapError("authorization object changed after review")
     scope_head = s3.head_object(bucket, SCOPE_KEY, expected_owner)
+    if expected_current_authz_sha256 is not None:
+        require_environment_bucket("test", bucket)
+        if current_authz is None or scope_head is None:
+            raise BootstrapError("isolated onboarding requires both existing private objects")
+        current_authz_body = _read_stable_versioned_object(
+            s3, bucket=bucket, key=AUTHZ_KEY, expected_owner=expected_owner, head=current_authz,
+        )
+        _require_approved_hash(expected_current_authz_sha256, current_authz_body, "current authorization")
+        _require_exact_object_metadata(current_authz, current_authz_body)
     scope_result: dict[str, str]
     scope_written = False
     previous_scope: Optional[dict[str, str]] = None
@@ -1822,6 +1930,15 @@ def apply_private_bundle(
             "versionId": expected_current_authz_version_id,
             "sha256": sha256_hex(previous_authz_body),
         }
+    if expected_current_authz_sha256 is not None:
+        _require_approved_hash(expected_current_authz_sha256, previous_authz_body, "current authorization")
+        _require_exact_object_metadata(current_authz, previous_authz_body)
+        _verify_readback(
+            s3, bucket=bucket, key=SCOPE_KEY, expected_owner=expected_owner,
+            expected_body=scope_bytes, result=scope_result,
+        )
+        if s3.bucket_state(bucket, expected_owner) != state:
+            raise BootstrapError("private bucket controls changed before authorization write")
     authz_result = s3.put_object(
         bucket,
         AUTHZ_KEY,
@@ -2021,6 +2138,55 @@ def validate_restore_contract(
         raise BootstrapError("authorization rollback is missing canonical scopes")
 
 
+def build_isolated_bundle(
+    *,
+    scope_bytes: bytes,
+    authz_bytes: bytes,
+    target_scope: dict[str, str],
+    target_binding: dict[str, str],
+    expected_owner: str,
+) -> tuple[bytes, bytes, str]:
+    contract, existing = _validated_scope_contract(scope_bytes)
+    validate_restore_contract(
+        key=AUTHZ_KEY, restore_body=authz_bytes, canonical_scope_bytes=scope_bytes,
+        environment="test", expected_owner=expected_owner,
+    )
+    rules = _parse_canonical_json_bytes(authz_bytes, "current authorization")
+    selected = {"version": 1, "scopes": [target_scope]}
+    selected_bytes = canonical_json_bytes(selected)
+    _validated_scope_contract(selected_bytes)
+    if target_scope["tenantId"] != target_scope["repo"] or target_scope["draftId"] != target_scope["repo"]:
+        raise BootstrapError("isolated onboarding requires repository-derived IDs")
+    target_rule = build_authz_rules(selected, [target_binding], "test")[0]
+    validate_restore_contract(
+        key=AUTHZ_KEY, restore_body=canonical_json_bytes([target_rule]),
+        canonical_scope_bytes=selected_bytes, environment="test", expected_owner=expected_owner,
+    )
+    domain = target_scope["domain"]
+    identities = {target_scope[key] for key in ("repo", "tenantId", "draftId")}
+    for old in contract["scopes"]:
+        if old["domain"] != domain and identities.intersection(old[key] for key in ("repo", "tenantId", "draftId")):
+            raise BootstrapError("isolated identity collides with an existing scope")
+    if domain in existing:
+        matched = [rule for rule in rules if rule["domains"] == [domain]]
+        if existing[domain] != target_scope or matched != [target_rule]:
+            raise BootstrapError("isolated target conflicts with its existing scope or grant")
+        return scope_bytes, authz_bytes, "noop"
+    if any(rule["roleArn"] == target_rule["roleArn"] for rule in rules):
+        raise BootstrapError("isolated role collides with an existing grant")
+    scopes = list(contract["scopes"])
+    index = next((i for i, old in enumerate(scopes) if old["domain"] > domain), len(scopes))
+    scopes.insert(index, target_scope)
+    proposed_scope = canonical_json_bytes({"version": 1, "scopes": scopes})
+    proposed_authz = canonical_json_bytes(rules + [target_rule])
+    validate_append_only_scope_update(scope_bytes, proposed_scope)
+    validate_restore_contract(
+        key=AUTHZ_KEY, restore_body=proposed_authz, canonical_scope_bytes=proposed_scope,
+        environment="test", expected_owner=expected_owner,
+    )
+    return proposed_scope, proposed_authz, "add"
+
+
 def _parse_overrides(values: list[str]) -> dict[str, str]:
     overrides: dict[str, str] = {}
     for value in values:
@@ -2091,7 +2257,86 @@ def _safe_head(head: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     }
 
 
+def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any]:
+    domain = _strict_domain(args.add_domain)
+    bucket = args.bucket if write else args.test_bucket
+    if args.tenant_override or (write and args.environment != "test"):
+        raise BootstrapError("isolated onboarding is test only without tenant overrides")
+    require_environment_bucket("test", bucket)
+    registry = _load_json_file(args.registry, reject_duplicate_keys=True)
+    reviewed_scopes = build_scope_registry(
+        registry, expected_draft_count=args.expected_draft_count,
+        tenant_overrides={}, environment="test",
+    )
+    selected = [scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain]
+    if len(selected) != 1:
+        raise BootstrapError("isolated domain must select exactly one registered draft")
+    runner = CommandRunner()
+    account = _account_id(runner, args.profile)
+    bindings = collect_verified_bindings(
+        registry, environment="test", profile=args.profile, account_id=account,
+        runner=runner, domain=domain,
+    )
+    s3 = InMemoryS3(profile=args.profile, region=args.region, runner=runner)
+    state = s3.bucket_state(bucket, account)
+    if state != {"versioning": "Enabled", "ownership": "BucketOwnerEnforced", "publicAccessBlock": True}:
+        raise BootstrapError("isolated onboarding requires a private versioned bucket")
+    snapshots = {}
+    for label, key in (("scope", SCOPE_KEY), ("authz", AUTHZ_KEY)):
+        head = s3.head_object(bucket, key, account)
+        if head is None:
+            raise BootstrapError("isolated onboarding requires both existing private objects")
+        body = _read_stable_versioned_object(s3, bucket=bucket, key=key, expected_owner=account, head=head)
+        _require_exact_object_metadata(head, body)
+        snapshots[label] = (head, body)
+    scope_bytes, authz_bytes, mode = build_isolated_bundle(
+        scope_bytes=snapshots["scope"][1], authz_bytes=snapshots["authz"][1],
+        target_scope=selected[0], target_binding=bindings[0], expected_owner=account,
+    )
+    response = {
+        "mode": "apply" if write else "plan", "environment": "test", "domain": domain,
+        "repo": selected[0]["repo"], "updateMode": mode, "bucketState": state,
+        "scopeCount": len(json.loads(scope_bytes)["scopes"]), "ruleCount": len(json.loads(authz_bytes)),
+        "scopeSha256": sha256_hex(scope_bytes), "authzSha256": sha256_hex(authz_bytes),
+        "existingScopesPreserved": True, "existingGrantsPreserved": True,
+    }
+    if write:
+        _require_approved_hash(args.approve_scope_sha256, scope_bytes, "scope registry")
+        _require_approved_hash(args.approve_authz_sha256, authz_bytes, "authorization")
+    for label, key in (("scope", SCOPE_KEY), ("authz", AUTHZ_KEY)):
+        head, body = snapshots[label]
+        if write:
+            if (
+                head["etag"] != getattr(args, f"expected_current_{label}_etag")
+                or head["versionId"] != getattr(args, f"expected_current_{label}_version_id")
+            ):
+                raise BootstrapError("isolated baseline metadata changed after review")
+            _require_approved_hash(getattr(args, f"expected_current_{label}_sha256"), body, "current private object")
+        _verify_readback(s3, bucket=bucket, key=key, expected_owner=account, expected_body=body, result=head)
+        response[f"current{label.title()}"] = _safe_head(head)
+        response[f"current{label.title()}Sha256"] = sha256_hex(body)
+    if s3.bucket_state(bucket, account) != state:
+        raise BootstrapError("private bucket controls changed after review")
+    if not write:
+        return response
+    if mode == "noop":
+        return {**response, "scopeWritten": False, "authzWritten": False}
+    result = apply_private_bundle(
+        s3, bucket=bucket, expected_owner=account, scope_bytes=scope_bytes, authz_bytes=authz_bytes,
+        approved_scope_sha256=args.approve_scope_sha256, approved_authz_sha256=args.approve_authz_sha256,
+        expected_current_scope_etag=args.expected_current_scope_etag,
+        expected_current_scope_version_id=args.expected_current_scope_version_id,
+        expected_current_scope_sha256=args.expected_current_scope_sha256,
+        expected_current_authz_etag=args.expected_current_authz_etag,
+        expected_current_authz_version_id=args.expected_current_authz_version_id,
+        expected_current_authz_sha256=args.expected_current_authz_sha256,
+    )
+    return {**response, **result, "authzWritten": True}
+
+
 def _plan(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "add_domain", None) is not None:
+        return _isolated_command(args, write=False)
     require_environment_bucket("test", args.test_bucket)
     require_environment_bucket("production", args.production_bucket)
     runner = CommandRunner()
@@ -2155,6 +2400,8 @@ def _plan(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _apply(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "add_domain", None) is not None:
+        return _isolated_command(args, write=True)
     require_environment_bucket(args.environment, args.bucket)
     runner = CommandRunner()
     scope_bytes, authz_bytes, account_id = _generated_bundle(args, args.environment, runner)
@@ -2291,12 +2538,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     plan = commands.add_parser("plan", help="Verify sources and print hashes/metadata without writing.")
     _add_generation_arguments(plan)
     plan.add_argument("--test-bucket", required=True)
-    plan.add_argument("--production-bucket", required=True)
+    plan.add_argument("--production-bucket")
+    plan.add_argument("--add-domain", action="append")
 
     apply = commands.add_parser("apply", help="Conditionally write and read back one reviewed environment.")
     _add_generation_arguments(apply)
     apply.add_argument("--environment", required=True, choices=ENVIRONMENTS)
     apply.add_argument("--bucket", required=True)
+    apply.add_argument("--add-domain", action="append")
     apply.add_argument("--approve-scope-sha256", required=True)
     apply.add_argument("--approve-authz-sha256", required=True)
     apply.add_argument("--expected-current-authz-etag", required=True)
@@ -2304,6 +2553,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     apply.add_argument("--expected-current-scope-etag", required=True)
     apply.add_argument("--expected-current-scope-version-id", required=True)
     apply.add_argument("--expected-current-scope-sha256", required=True)
+    apply.add_argument("--expected-current-authz-sha256")
     apply.add_argument("--test-commit")
     apply.add_argument("--test-run-id", type=int)
     apply.add_argument("--canary-repo")
@@ -2328,7 +2578,25 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     rollback.add_argument("--restore-version-id", required=True)
     rollback.add_argument("--approve-restore-sha256", required=True)
     rollback.add_argument("--expected-current-etag", required=True)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    selected = getattr(args, "add_domain", None)
+    if selected is not None:
+        if len(selected) != 1:
+            parser.error("--add-domain requires exactly one domain")
+        args.add_domain = _strict_domain(selected[0])
+        if args.tenant_override:
+            parser.error("isolated onboarding does not accept tenant overrides")
+        if args.command == "plan" and args.production_bucket is not None:
+            parser.error("isolated plan does not accept a production bucket")
+        if args.command == "apply" and args.environment != "test":
+            parser.error("isolated onboarding is test only")
+        if args.command == "apply" and args.expected_current_authz_sha256 is None:
+            parser.error("isolated apply requires --expected-current-authz-sha256")
+    elif args.command == "plan" and args.production_bucket is None:
+        parser.error("global plan requires --production-bucket")
+    elif args.command == "apply" and args.expected_current_authz_sha256 is not None:
+        parser.error("--expected-current-authz-sha256 requires --add-domain")
+    return args
 
 
 def main(argv: Optional[list[str]] = None) -> int:
