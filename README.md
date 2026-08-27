@@ -83,7 +83,7 @@ Plan from the authoring repository without writing AWS state:
 ```powershell
 python tools/bootstrap_server_scopes.py plan `
   --registry ..\zoolandingpage\docs\drafts-registry.json `
-  --expected-draft-count 12 `
+  --expected-draft-count 13 `
   --tenant-override zoositioweb.com.mx=zoosite `
   --profile ADMIN-AIM-CLI `
   --region us-east-1 `
@@ -91,7 +91,7 @@ python tools/bootstrap_server_scopes.py plan `
   --production-bucket zoolanding-config-payloads
 ```
 
-Review and retain only the plan's safe metadata: counts, SHA-256 values, bucket state, ETags, version IDs, lengths, and timestamps. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values. The initial plan must prove exactly 12 test scopes and rules, exactly 11 production scopes and rules, production as an exact subset of test, enforced bucket ownership, all four S3 public-access blocks, and the reviewed current scope and v2 authorization ETag/version/SHA-256 values when present. The expected draft count remains 12 because it reviews the complete registry before environment filtering. The plan reports `productionScopesSubsetOfTest`, whether the scope bytes happen to be stable across environments, and each environment's `scopeUpdateMode` as `create`, `idempotent`, or `append`.
+Review and retain only the plan's safe metadata: counts, SHA-256 values, bucket state, ETags, version IDs, lengths, and timestamps. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values. The initial plan must prove exactly 13 test scopes and rules, exactly 12 production scopes and rules, production as an exact subset of test, enforced bucket ownership, all four S3 public-access blocks, and the reviewed current scope and v2 authorization ETag/version/SHA-256 values when present. The expected draft count remains 13 because it reviews the complete registry before environment filtering. The plan reports `productionScopesSubsetOfTest`, whether the scope bytes happen to be stable across environments, and each environment's `scopeUpdateMode` as `create`, `idempotent`, or `append`.
 
 Use `apply --help` for the conditional write arguments. Apply test first with the exact plan hashes and reviewed current metadata. Use the literal `MISSING` triplet when the planned current scope does not exist, and the literal `MISSING` ETag/version pair when the planned v2 authorization object does not exist. Missing objects use `If-None-Match: *`; an unchanged scope is idempotent; an update uses `If-Match` only when it strictly appends canonical drafts without changing or removing any existing mapping. The scope is written first, the complete v2 authorization object is generated second, and both current and version-specific objects are read back exactly. A partial failure can therefore leave a new scope without a grant, never a grant without its scope. The tool reports prior v2 versions and hashes when they exist; the separate legacy authorization key is never a bootstrap or rollback target. It refuses an unknown or environment-mismatched bucket, disabled versioning, non-enforced ownership, incomplete public-access block, changed object metadata, unreviewed hashes, scope mutation/deletion, duplicate bindings, or non-exact OIDC trust.
 
