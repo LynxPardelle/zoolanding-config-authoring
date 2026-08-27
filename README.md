@@ -122,7 +122,7 @@ For isolated plan, supply the existing registry, expected count, profile, region
 
 An exact existing target produces a true no-op: neither object is written and no version is created. An addition inserts only the new sorted scope and appends the new authorization rule without reordering or reconstructing existing arrays. It writes scope first, rechecks the pair, then conditionally writes authz and reads both current/versioned results back. `If-Match` conditions ETag, not VersionId; version/hash rechecks do not make two S3 keys atomic. A race or failure can leave the new scope without its grant. Errors are sanitized and stop without automatic retry or repair; a one-sided state requires a separately reviewed recovery decision. Never restore or delete shared objects to force onboarding through.
 
-This tool is outside the Lambda artifact. Release its source through the normal protected feature-to-dev PR and execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator, because that push starts a service deployment. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
+This tool is outside the Lambda artifact. Release its source through a feature-to-dev PR with successful CI and reviewed changes, then execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator, because that push starts a service deployment. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
 
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
