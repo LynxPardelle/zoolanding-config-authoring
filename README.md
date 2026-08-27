@@ -110,6 +110,20 @@ Rollback uses `rollback --help` to copy an explicitly approved prior version bac
 
 Scope removals, canonical ID changes, and tenant split/merge migrations are outside Phase 1. They require a separately reviewed migration and must not be represented as an append or rollback.
 
+### Isolated additive test onboarding
+
+For an explicitly reviewed single-draft onboarding, `plan` and `apply` accept `--add-domain` with exactly one canonical registry domain. This opt-in mode is test-only: it rejects production, multiple selectors and tenant overrides. Global commands without this flag retain their full-inventory verification and cross-owner failure; `verify-test` and rollback are unchanged.
+
+The operator validates the local registry and expected count, but reads GitHub Environment/OIDC metadata and IAM evidence only for the selected draft. It rejects a mismatched role before querying IAM. Both private test objects must already exist as exact canonical JSON with valid scope/grant mappings. Existing grants are structurally validated and preserved in memory, not re-certified against their repositories. The selected draft receives repository-derived IDs and the existing four canonical actions; collisions or conflicting/one-sided entries fail closed. No IAM/GitHub permissions or existing grants are changed.
+
+Use a separate ignored operator environment with `boto3==1.43.81` and `botocore==1.43.81` installed from HTTPS PyPI. These are lazy-loaded operator dependencies, not Lambda or CI dependencies. The isolated S3 body transport uses in-memory SDK bytes/streams and explicitly permits only one total SDK attempt; existing CLI metadata checks are reused. The global AWS CLI transport is unchanged. Do not enable SDK wire/debug logging, save private bodies or dump environment variables.
+
+For isolated plan, supply the existing registry, expected count, profile, region and test-bucket arguments plus `--add-domain`; omit `--production-bucket`. Review only the emitted safe counts, hashes, ETags, VersionIds and preservation results. For isolated apply, retain all existing approval arguments, use `--environment test`, repeat the same selector, and additionally pass `--expected-current-authz-sha256`. Both baseline ETag/VersionId/SHA-256 triples and both candidate hashes must match the reviewed plan. `MISSING` is not an isolated-onboarding baseline.
+
+An exact existing target produces a true no-op: neither object is written and no version is created. An addition inserts only the new sorted scope and appends the new authorization rule without reordering or reconstructing existing arrays. It writes scope first, rechecks the pair, then conditionally writes authz and reads both current/versioned results back. `If-Match` conditions ETag, not VersionId; version/hash rechecks do not make two S3 keys atomic. A race or failure can leave the new scope without its grant. Errors are sanitized and stop without automatic retry or repair; a one-sided state requires a separately reviewed recovery decision. Never restore or delete shared objects to force onboarding through.
+
+This tool is outside the Lambda artifact. Release its source through a feature-to-dev PR with successful CI and reviewed changes, then execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator, because that push starts a service deployment. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
+
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
 Current deployed endpoint:
