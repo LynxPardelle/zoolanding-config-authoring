@@ -22,6 +22,7 @@ EXPECTED_RUNTIME_FILES = {
     "schemas/server-features/data-spaces.schema.json",
     "schemas/server-features/integration-bindings.schema.json",
     "schemas/server-features/notification-policies.schema.json",
+    "schemas/server-features/protected-feature-bindings-v2.schema.json",
     "zoolanding_lambda_common.py",
 }
 sys.path.insert(0, str(ROOT))
@@ -86,6 +87,29 @@ class SamPackagingTest(unittest.TestCase):
         self.assertLessEqual(local_dependencies, EXPECTED_RUNTIME_FILES)
 
     def test_builder_stages_only_runtime_allowlist(self):
+        relative_path = "schemas/server-features/protected-feature-bindings-v2.schema.json"
+        attributes_path = ROOT / ".gitattributes"
+        self.assertTrue(attributes_path.is_file(), ".gitattributes must pin the hashed schema bytes")
+        self.assertEqual(
+            attributes_path.read_text(encoding="utf-8"),
+            f"{relative_path} text eol=lf\n",
+        )
+        checked = subprocess.run(
+            ["git", "check-attr", "text", "eol", "--", relative_path],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(checked.returncode, 0, checked.stderr)
+        self.assertEqual(
+            checked.stdout.splitlines(),
+            [
+                f"{relative_path}: text: set",
+                f"{relative_path}: eol: lf",
+            ],
+        )
+
         result = self.run_builder()
 
         self.assertEqual(0, result.returncode, result.stderr)
@@ -242,7 +266,7 @@ class SamPackagingTest(unittest.TestCase):
             self.assertEqual(315532800, int(path.stat().st_mtime), path)
         self.assertEqual(EXPECTED_RUNTIME_FILES, artifact_inventory(STAGED_ARTIFACT))
 
-    def test_sam_manifest_binds_exact_source_commit_and_seven_file_bytes(self):
+    def test_sam_manifest_binds_exact_source_commit_and_eight_file_bytes(self):
         build = self.run_builder()
         self.assertEqual(0, build.returncode, build.stderr)
         source_commit = "a" * 40

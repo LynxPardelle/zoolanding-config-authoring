@@ -16,6 +16,7 @@ SERVER_SCHEMA_FILES = {
     "commerce.json": "commerce.schema.json",
     "integration-bindings.json": "integration-bindings.schema.json",
     "notification-policies.json": "notification-policies.schema.json",
+    "protected-feature-bindings-v2.json": "protected-feature-bindings-v2.schema.json",
 }
 LEGACY_SERVER_FILES = {"auth-profile-registry.json", "integrations.json"}
 # Closed compatibility manifest verified July 14, 2026 Central Time against the
@@ -768,6 +769,11 @@ def validate_server_policy_files(
         _validate_code_owned_descriptor_values(name, content)
         if validate_schema(schemas[name], content):
             raise PolicyValidationError("schema_invalid")
+        if name == "protected-feature-bindings-v2.json":
+            if content.get("domain") != domain or content.get("environment") != environment:
+                raise PolicyValidationError("scope_mismatch")
+            descriptors[name] = content
+            continue
         scope = content.get("scope")
         if not _is_object(scope) or scope.get("domain") != domain or scope.get("environment") != environment:
             raise PolicyValidationError("scope_mismatch")

@@ -16,6 +16,19 @@ SCHEMA_NAMES = (
     "notification-policies.schema.json",
 )
 
+THN_PROTECTED_FEATURE_BINDING = {
+    "bindingId": "journal-v2",
+    "domain": "thehairnarrative.com",
+    "environment": "test",
+    "authProfileId": "journal-owner",
+    "featureId": "journal",
+    "hubId": "thehairnarrative-com-journal",
+    "serviceBindingId": "thn-journal-test-v2",
+    "authBasePath": "/auth-v2",
+    "contentHubBasePath": "/features/content-hub-v2",
+    "status": "active",
+}
+
 
 def load_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
@@ -71,6 +84,82 @@ class ServerPolicyValidationTest(unittest.TestCase):
             "content": load_json(auth_registry),
         })
         self.validator.validate_server_policy_files("example.com", "test", files)
+
+    def test_protected_feature_binding_v2_schema_is_closed_and_exact(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema_path = SCHEMA_DIR / "protected-feature-bindings-v2.schema.json"
+        self.assertTrue(schema_path.is_file(), schema_path.name)
+        schema = load_json(schema_path)
+
+        self.validator.assert_supported_schema(schema)
+        self.assertEqual(
+            hashlib.sha256(schema_path.read_bytes()).hexdigest(),
+            "e2a3990fcd929377ef3dd8d4ffca411598ed410d8d1a0a7f1b0d61a51220c1ec",
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(THN_PROTECTED_FEATURE_BINDING), set(schema["required"]))
+        self.assertEqual(
+            set(THN_PROTECTED_FEATURE_BINDING),
+            set(schema["properties"]),
+        )
+        self.assertEqual(
+            self.validator.SERVER_SCHEMA_FILES.get("protected-feature-bindings-v2.json"),
+            "protected-feature-bindings-v2.schema.json",
+        )
+        self.assertEqual(
+            self.validator.validate_schema(schema, THN_PROTECTED_FEATURE_BINDING),
+            [],
+        )
+
+        invalid_bindings = []
+        for field in THN_PROTECTED_FEATURE_BINDING:
+            missing = copy.deepcopy(THN_PROTECTED_FEATURE_BINDING)
+            missing.pop(field)
+            invalid_bindings.append((f"missing-{field}", missing))
+        for field, value in THN_PROTECTED_FEATURE_BINDING.items():
+            changed = copy.deepcopy(THN_PROTECTED_FEATURE_BINDING)
+            changed[field] = f"{value}-changed"
+            invalid_bindings.append((f"changed-{field}", changed))
+        with_extra = copy.deepcopy(THN_PROTECTED_FEATURE_BINDING)
+        with_extra["unexpected"] = True
+        invalid_bindings.append(("unexpected-field", with_extra))
+
+        for name, candidate in invalid_bindings:
+            with self.subTest(name=name):
+                self.assertNotEqual(self.validator.validate_schema(schema, candidate), [])
+
+    def test_protected_feature_binding_v2_is_bound_to_thn_test_without_legacy_registry(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        files = [{
+            "path": "thehairnarrative.com/server/protected-feature-bindings-v2.json",
+            "content": copy.deepcopy(THN_PROTECTED_FEATURE_BINDING),
+        }]
+
+        self.validator.validate_server_policy_files(
+            "thehairnarrative.com",
+            "test",
+            files,
+            expected_scope={
+                "tenantId": "thehairnarrative-com",
+                "draftId": "draft-thehairnarrative-com",
+            },
+        )
+
+        for domain, environment in (
+            ("other.example.com", "test"),
+            ("thehairnarrative.com", "production"),
+        ):
+            with self.subTest(domain=domain, environment=environment):
+                with self.assertRaises(self.validator.PolicyValidationError):
+                    self.validator.validate_server_policy_files(
+                        domain,
+                        environment,
+                        files,
+                        expected_scope={
+                            "tenantId": "thehairnarrative-com",
+                            "draftId": "draft-thehairnarrative-com",
+                        },
+                    )
 
     def test_validator_enforces_all_supported_keyword_families(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
@@ -138,6 +227,10 @@ class ServerPolicyValidationTest(unittest.TestCase):
         self.assertNotIn(sentinel, repr(raised.exception))
 
     def test_legacy_descriptors_are_closed_to_three_verified_canonical_hashes(self):
+        self.assertEqual(
+            {"auth-profile-registry.json", "integrations.json"},
+            self.validator.LEGACY_SERVER_FILES,
+        )
         self.assertEqual(
             {
                 ("music.lynxpardelle.com", "integrations.json"): {
