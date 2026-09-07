@@ -131,7 +131,7 @@ jobs:
             .aws-sam/build-manifest.sha256
           if-no-files-found: error
           include-hidden-files: true
-          retention-days: 7
+          retention-days: 30
 
   deploy:
     runs-on: ubuntu-latest
@@ -427,3 +427,35 @@ jobs:
             --output text \
             --no-cli-pager)"
           test "$final_status" = "UPDATE_COMPLETE"
+      - name: Post-deploy smoke
+        shell: bash
+        env:
+          STACK_NAME: zoolanding-config-authoring-test
+        run: |
+          set -euo pipefail
+          status="$(aws cloudformation describe-stacks --stack-name "$STACK_NAME" --query 'Stacks[0].StackStatus' --output text --no-cli-pager)"
+          case "$status" in
+            CREATE_COMPLETE|UPDATE_COMPLETE) ;;
+            *) echo "stack_status_invalid"; exit 1 ;;
+          esac
+          mapfile -t functions < <(aws cloudformation list-stack-resources --stack-name "$STACK_NAME" --query "StackResourceSummaries[?ResourceType=='AWS::Lambda::Function'].PhysicalResourceId" --output text --no-cli-pager | tr '\t' '\n' | sed '/^$/d')
+          test "${#functions[@]}" -gt 0
+          for function_name in "${functions[@]}"; do
+            read -r state update_status < <(aws lambda get-function-configuration --function-name "$function_name" --query '[State,LastUpdateStatus]' --output text --no-cli-pager)
+            test "$state" = "Active"
+            test "$update_status" = "Successful"
+          done
+      - name: Record immutable release coordinates
+        shell: bash
+        env:
+          ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
+          MANIFEST_DIGEST: ${{ needs.validate.outputs.manifest_digest }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          {
+            echo "### TEST release"
+            echo "- source_run_id: $GITHUB_RUN_ID"
+            echo "- source_artifact_id: $ARTIFACT_ID"
+            echo "- source_sha: $RELEASE_SHA"
+            echo "- source_manifest_sha256: $MANIFEST_DIGEST"
+          } >> "$GITHUB_STEP_SUMMARY"
