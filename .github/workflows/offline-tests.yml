@@ -30,7 +30,6 @@ jobs:
           set -euo pipefail
           python -m venv "$RUNNER_TEMP/offline-python"
           "$RUNNER_TEMP/offline-python/bin/python" -m pip install --disable-pip-version-check boto3==1.43.84 tzdata==2026.3
-          "$RUNNER_TEMP/offline-python/bin/python" -m pip install --disable-pip-version-check -r requirements.txt
           "$RUNNER_TEMP/offline-python/bin/python" -m pip check
       - name: Run the full unit suite with no network or inherited credentials
         shell: bash
@@ -47,4 +46,3 @@ jobs:
         run: |
           echo 'Full unit suite passed in an isolated network namespace, without cloud credentials.' >> "$GITHUB_STEP_SUMMARY"
           echo 'No deployment, AWS integration test, cache, or uploaded artifact was produced.' >> "$GITHUB_STEP_SUMMARY"
-
