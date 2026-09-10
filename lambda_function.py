@@ -806,6 +806,7 @@ def _infer_kind(relative_path: str) -> str:
         "server/commerce.json": "server-commerce",
         "server/integration-bindings.json": "server-integration-bindings",
         "server/notification-policies.json": "server-notification-policies",
+        "server/protected-feature-bindings-v2.json": "server-protected-feature-bindings-v2",
     }
     package_path = relative_path.split("/", 1)[1] if "/" in relative_path else relative_path
     if package_path.startswith("server/"):

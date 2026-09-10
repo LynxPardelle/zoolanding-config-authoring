@@ -56,6 +56,7 @@ RUNTIME_ARTIFACT_FILES = (
     "schemas/server-features/data-spaces.schema.json",
     "schemas/server-features/integration-bindings.schema.json",
     "schemas/server-features/notification-policies.schema.json",
+    "schemas/server-features/protected-feature-bindings-v2.schema.json",
     "zoolanding_lambda_common.py",
 )
 MAX_DEPLOYED_ZIP_BYTES = 10 * 1024 * 1024

@@ -265,6 +265,7 @@ jobs:
             './ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
             './ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
             './ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/protected-feature-bindings-v2.schema.json' \
             './ConfigAuthoringFunction/server_policy_validation.py' \
             './ConfigAuthoringFunction/zoolanding_lambda_common.py' \
             './config-authoring-manifest.json' \
@@ -282,6 +283,7 @@ jobs:
             './build/ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
             './build/ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
             './build/ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/protected-feature-bindings-v2.schema.json' \
             './build/ConfigAuthoringFunction/server_policy_validation.py' \
             './build/ConfigAuthoringFunction/zoolanding_lambda_common.py' \
             './build/config-authoring-manifest.json' \
@@ -405,6 +407,7 @@ jobs:
             './ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
             './ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
             './ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './ConfigAuthoringFunction/schemas/server-features/protected-feature-bindings-v2.schema.json' \
             './ConfigAuthoringFunction/server_policy_validation.py' \
             './ConfigAuthoringFunction/zoolanding_lambda_common.py' \
             './config-authoring-manifest.json' \
@@ -421,6 +424,7 @@ jobs:
             './build/ConfigAuthoringFunction/schemas/server-features/data-spaces.schema.json' \
             './build/ConfigAuthoringFunction/schemas/server-features/integration-bindings.schema.json' \
             './build/ConfigAuthoringFunction/schemas/server-features/notification-policies.schema.json' \
+            './build/ConfigAuthoringFunction/schemas/server-features/protected-feature-bindings-v2.schema.json' \
             './build/ConfigAuthoringFunction/server_policy_validation.py' \
             './build/ConfigAuthoringFunction/zoolanding_lambda_common.py' \
             './build/config-authoring-manifest.json' \
@@ -530,6 +534,7 @@ jobs:
               "schemas/server-features/data-spaces.schema.json",
               "schemas/server-features/integration-bindings.schema.json",
               "schemas/server-features/notification-policies.schema.json",
+              "schemas/server-features/protected-feature-bindings-v2.schema.json",
               "server_policy_validation.py",
               "zoolanding_lambda_common.py",
           }
@@ -807,6 +812,7 @@ jobs:
               "schemas/server-features/data-spaces.schema.json",
               "schemas/server-features/integration-bindings.schema.json",
               "schemas/server-features/notification-policies.schema.json",
+              "schemas/server-features/protected-feature-bindings-v2.schema.json",
               "server_policy_validation.py",
               "zoolanding_lambda_common.py",
           }
