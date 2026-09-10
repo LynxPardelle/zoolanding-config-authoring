@@ -64,7 +64,9 @@ def review_change_set(
         change_set.get("StackName") != expected_stack_name
         or change_set.get("ChangeSetName") != expected_change_set_name
         or change_set.get("ChangeSetId") != expected_change_set_arn
-        or change_set.get("ChangeSetType") != expected_change_set_type
+        # DescribeChangeSet omits the type; the create request pins it.
+        # Reject an explicit conflicting field without requiring AWS to return it.
+        or ("ChangeSetType" in change_set and change_set["ChangeSetType"] != expected_change_set_type)
     ):
         raise ChangeSetReviewError("change_set_identity_invalid")
 
@@ -143,4 +145,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
