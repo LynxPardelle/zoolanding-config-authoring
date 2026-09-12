@@ -1,6 +1,9 @@
 name: Rollback Test
 
 on:
+  # Discovery only; both provenance modes remain manual-only.
+  push:
+    branches: [codex/thn-task029-config-authoring]
   workflow_dispatch:
     inputs:
       recovery_mode:
@@ -53,7 +56,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  register:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - run: echo 'TEST manual workflow registered. No checkout, environment, artifact or AWS credentials.'
+
   verify-source:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -131,7 +143,7 @@ jobs:
             }
 
   rollback:
-    if: inputs.recovery_mode == 'GitHub-release'
+    if: github.event_name == 'workflow_dispatch' && inputs.recovery_mode == 'GitHub-release'
     runs-on: ubuntu-latest
     needs: verify-source
     environment: test
@@ -218,7 +230,7 @@ jobs:
         run: bash tools/smoke_test_stack.sh
 
   recover-aws:
-    if: inputs.recovery_mode == 'AWS-live-snapshot/v1'
+    if: github.event_name == 'workflow_dispatch' && inputs.recovery_mode == 'AWS-live-snapshot/v1'
     runs-on: ubuntu-latest
     needs: verify-source
     environment: test
