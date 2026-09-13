@@ -1,11 +1,14 @@
 import hashlib
 import base64
 import copy
+import contextlib
+import io
 import json
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import zipfile
 
 
@@ -70,7 +73,7 @@ class FakeS3:
         }
 
     def head_object(self, bucket, key, expected_owner):
-        return self.heads.get(key)
+        return copy.deepcopy(self.heads.get(key))
 
     def get_object(self, bucket, key, expected_owner, version_id=None):
         lookup = (key, version_id) if version_id is not None else key
@@ -86,6 +89,10 @@ class FakeS3:
         if_match=None,
         if_none_match=None,
     ):
+        if if_match is not None and self.heads.get(key, {}).get("etag") != if_match:
+            raise bootstrap.BootstrapError("PreconditionFailed")
+        if if_none_match == "*" and key in self.heads:
+            raise bootstrap.BootstrapError("PreconditionFailed")
         self.puts.append({
             "key": key,
             "body": body,
@@ -113,6 +120,448 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             draft("example.com", "draft-example-com"),
             draft("zoositioweb.com.mx", "draft-zoositioweb-com-mx"),
         )
+
+    def test_isolated_plan_cli_accepts_one_domain_without_production_bucket(self):
+        arguments = [
+            "plan", "--registry", "registry.json", "--expected-draft-count", "2",
+            "--profile", "operator", "--test-bucket", bootstrap.ENVIRONMENT_BUCKETS["test"],
+            "--add-domain", "example.com",
+        ]
+        try:
+            with contextlib.redirect_stderr(io.StringIO()):
+                parsed = bootstrap.parse_args(arguments)
+        except SystemExit as exc:
+            self.fail(f"isolated plan should accept a single test target: exit {exc.code}")
+        self.assertEqual(parsed.add_domain, "example.com")
+        self.assertIsNone(parsed.production_bucket)
+
+    def test_isolated_registry_duplicate_keys_fail_before_any_external_access(self):
+        raw = json.dumps(self.registry)
+        for old, duplicated in (
+            ('"owner": "LynxPardelle"', '"owner": "LynxPardelle", "owner": "LynxPardelle"'),
+            ('"domain": "example.com"', '"domain": "example.com", "domain": "example.com"'),
+        ):
+            with self.subTest(field=old), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "registry.json"
+                path.write_text(raw.replace(old, duplicated, 1), encoding="utf-8")
+                args = bootstrap.parse_args([
+                    "plan", "--registry", str(path), "--expected-draft-count", "2",
+                    "--profile", "operator", "--test-bucket", bootstrap.ENVIRONMENT_BUCKETS["test"],
+                    "--add-domain", "example.com",
+                ])
+                with mock.patch.object(bootstrap, "CommandRunner") as external:
+                    with self.assertRaises(bootstrap.BootstrapError):
+                        bootstrap._plan(args)
+                external.assert_not_called()
+
+    def test_isolated_cli_rejects_multiple_domains_and_production_inputs(self):
+        arguments = [
+            "plan", "--registry", "registry.json", "--expected-draft-count", "2",
+            "--profile", "operator", "--test-bucket", bootstrap.ENVIRONMENT_BUCKETS["test"],
+            "--add-domain", "example.com",
+        ]
+        for extra in (
+            ["--add-domain", "zoositioweb.com.mx"],
+            ["--production-bucket", bootstrap.ENVIRONMENT_BUCKETS["production"]],
+            ["--tenant-override", "example.com=shared"],
+        ):
+            with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises((SystemExit, bootstrap.BootstrapError)):
+                    bootstrap.parse_args(arguments + extra)
+        for domain in ("*", "example.com,zoositioweb.com.mx", "", "EXAMPLE.COM"):
+            with self.subTest(domain=domain), contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises((SystemExit, bootstrap.BootstrapError)):
+                    bootstrap.parse_args(arguments[:-1] + [domain])
+
+    def test_isolated_binding_never_reads_an_unselected_repository_or_role(self):
+        expected = binding("example.com", "draft-example-com", "test")
+        commands = []
+
+        def run_json(arguments):
+            commands.append(arguments)
+            if arguments[:3] == ["gh", "api", "repos/LynxPardelle/draft-example-com/actions/oidc/customization/sub"]:
+                return {"use_default": True, "sub_claim_prefix": "repo:LynxPardelle/draft-example-com"}
+            if arguments[:7] == ["gh", "variable", "list", "--repo", "LynxPardelle/draft-example-com", "--env", "test"]:
+                return [{"name": "DRAFT_DOMAIN", "value": "example.com"},
+                        {"name": "AWS_ROLE_ARN", "value": expected["roleArn"]}]
+            if arguments[:3] == ["aws", "iam", "get-role"] and arguments[arguments.index("--role-name") + 1] == "draft-example-com-test-deploy":
+                return {"Role": {
+                    "Arn": expected["roleArn"], "RoleName": "draft-example-com-test-deploy",
+                    "AssumeRolePolicyDocument": {"Statement": [{
+                        "Effect": "Allow", "Action": "sts:AssumeRoleWithWebIdentity",
+                        "Principal": {"Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"},
+                        "Condition": {"StringEquals": {
+                            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                            "token.actions.githubusercontent.com:ref": "refs/heads/test",
+                            "token.actions.githubusercontent.com:sub": "repo:LynxPardelle/draft-example-com:environment:test",
+                        }},
+                    }]},
+                }}
+            self.fail("isolated collection attempted an unselected external read")
+
+        try:
+            result = bootstrap.collect_verified_bindings(
+                self.registry, environment="test", profile="operator",
+                account_id="123456789012", runner=mock.Mock(run_json=run_json),
+                domain="example.com",
+            )
+        except TypeError:
+            self.fail("binding collector does not yet support exact isolated selection")
+        self.assertEqual(result, [expected])
+        self.assertEqual(len(commands), 3)
+
+    def test_isolated_binding_rejects_wrong_role_before_iam_lookup(self):
+        commands = []
+
+        def run_json(arguments):
+            commands.append(arguments)
+            if arguments[:2] == ["gh", "api"]:
+                return {"use_default": True, "sub_claim_prefix": "repo:LynxPardelle/draft-example-com"}
+            if arguments[:2] == ["gh", "variable"]:
+                return [{"name": "DRAFT_DOMAIN", "value": "example.com"},
+                        {"name": "AWS_ROLE_ARN", "value": binding("other.example", "draft-other", "test")["roleArn"]}]
+            self.fail("wrong role must be rejected before IAM access")
+
+        try:
+            with self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.collect_verified_bindings(
+                    self.registry, environment="test", profile="operator",
+                    account_id="123456789012", runner=mock.Mock(run_json=run_json),
+                    domain="example.com",
+                )
+        except TypeError:
+            self.fail("binding collector does not yet guard the isolated role")
+        self.assertEqual(len(commands), 2)
+
+    def _isolated_baseline(self):
+        scopes = bootstrap.build_scope_registry(
+            self.registry, expected_draft_count=2,
+            tenant_overrides={"zoositioweb.com.mx": "zoosite"},
+        )
+        rules = bootstrap.build_authz_rules(scopes, [
+            binding(item["domain"], item["repo"], "test") for item in scopes["scopes"]
+        ], "test")
+        rules.reverse()
+        target = {"domain": "middle.example", "repo": "draft-middle-example",
+                  "tenantId": "draft-middle-example", "draftId": "draft-middle-example"}
+        return bootstrap.canonical_json_bytes(scopes), bootstrap.canonical_json_bytes(rules), target
+
+    def _isolated_candidate(self, scope_bytes, authz_bytes, target):
+        try:
+            return bootstrap.build_isolated_bundle(
+                scope_bytes=scope_bytes, authz_bytes=authz_bytes, target_scope=target,
+                target_binding=binding(target["domain"], target["repo"], "test"),
+                expected_owner="123456789012",
+            )
+        except AttributeError:
+            self.fail("isolated preserved-bundle generation is not implemented")
+
+    def test_isolated_candidate_preserves_every_existing_entry_and_authz_order(self):
+        scopes, rules, target = self._isolated_baseline()
+        candidate_scopes, candidate_rules, mode = self._isolated_candidate(scopes, rules, target)
+        self.assertEqual(mode, "add")
+        old_scopes, old_rules = json.loads(scopes), json.loads(rules)
+        new_scopes, new_rules = json.loads(candidate_scopes), json.loads(candidate_rules)
+        self.assertEqual(new_scopes["scopes"][1], target)
+        self.assertEqual([item for item in new_scopes["scopes"] if item != target], old_scopes["scopes"])
+        self.assertEqual(new_rules[:-1], old_rules)
+        for old, new in zip(old_rules, new_rules):
+            self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
+        self.assertEqual(new_rules[-1]["domains"], [target["domain"]])
+
+    def test_isolated_candidate_is_exact_noop_when_both_target_entries_exist(self):
+        scopes, rules, target = self._isolated_baseline()
+        new_scopes, new_rules, _ = self._isolated_candidate(scopes, rules, target)
+        self.assertEqual(self._isolated_candidate(new_scopes, new_rules, target), (new_scopes, new_rules, "noop"))
+
+    def test_isolated_candidate_rejects_one_sided_or_changed_existing_target(self):
+        scopes, rules, target = self._isolated_baseline()
+        new_scopes, new_rules, _ = self._isolated_candidate(scopes, rules, target)
+        for baseline in ((new_scopes, rules), (scopes, new_rules)):
+            with self.subTest(kind="one-sided"), self.assertRaises(bootstrap.BootstrapError):
+                self._isolated_candidate(*baseline, target)
+        changed = {**target, "tenantId": "different-tenant"}
+        with self.assertRaises(bootstrap.BootstrapError):
+            self._isolated_candidate(new_scopes, new_rules, changed)
+
+    def test_isolated_candidate_rejects_cross_field_identity_collisions(self):
+        scopes, rules, target = self._isolated_baseline()
+        for key, value in (("tenantId", "zoosite"), ("tenantId", "draft-example-com"),
+                           ("draftId", "zoosite"), ("repo", "draft-example-com")):
+            with self.subTest(key=key, value=value), self.assertRaises(bootstrap.BootstrapError):
+                self._isolated_candidate(scopes, rules, {**target, key: value})
+        existing = json.loads(scopes)
+        existing["scopes"][0]["tenantId"] = target["repo"]
+        existing_scopes = bootstrap.canonical_json_bytes(existing)
+        existing_rules = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(existing, [
+            binding(item["domain"], item["repo"], "test") for item in existing["scopes"]
+        ], "test"))
+        bootstrap.validate_restore_contract(
+            key=bootstrap.AUTHZ_KEY, restore_body=existing_rules,
+            canonical_scope_bytes=existing_scopes, environment="test", expected_owner="123456789012",
+        )
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "identity collides"):
+            self._isolated_candidate(existing_scopes, existing_rules, target)
+
+    def test_isolated_candidate_rejects_noncanonical_duplicate_or_narrowed_baseline(self):
+        scopes, rules, target = self._isolated_baseline()
+        altered = json.loads(rules)
+        altered[0]["actions"] = ["getSite"]
+        invalid_scopes = scopes.replace(b'"version": 1', b'"version": 1, "version": 1')
+        for scope_body, rule_body in (
+            (scopes + b"\n", rules), (invalid_scopes, rules),
+            (scopes, bootstrap.canonical_json_bytes(altered)),
+            (scopes, bootstrap.canonical_json_bytes(json.loads(rules) * 2)),
+        ):
+            with self.subTest(kind="invalid baseline"), self.assertRaises(bootstrap.BootstrapError):
+                self._isolated_candidate(scope_body, rule_body, target)
+
+    def _memory_s3(self, client=None):
+        adapter = getattr(bootstrap, "InMemoryS3", None)
+        self.assertIsNotNone(adapter, "isolated S3 transport is not implemented")
+        return adapter(profile="operator", region="us-east-1", client=client)
+
+    def test_isolated_sdk_reads_and_writes_bodies_only_in_memory(self):
+        body = b'{"synthetic":true}\n'
+        stream = io.BytesIO(body)
+        client = mock.Mock()
+        client.get_object.return_value = {"Body": stream}
+        client.put_object.return_value = {"ETag": '"new"', "VersionId": "version-new"}
+        adapter = self._memory_s3(client)
+        with mock.patch.object(bootstrap.tempfile, "NamedTemporaryFile", side_effect=AssertionError("private body reached disk")):
+            self.assertEqual(adapter.get_object(bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY, "123456789012", "version-old"), body)
+            self.assertEqual(adapter.put_object(bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY, body, "123456789012", if_match='"old"'), {"etag": '"new"', "versionId": "version-new"})
+        self.assertTrue(stream.closed)
+        self.assertEqual(client.get_object.call_args.kwargs["VersionId"], "version-old")
+        self.assertEqual(client.put_object.call_args.kwargs["Body"], body)
+        self.assertEqual(client.put_object.call_args.kwargs["IfMatch"], '"old"')
+        self.assertEqual(client.put_object.call_count, 1)
+
+    def test_isolated_sdk_factory_disables_automatic_retries(self):
+        sdk = mock.Mock()
+        config = mock.Mock()
+        with mock.patch.dict(sys.modules, {"boto3": sdk, "botocore.config": config}):
+            self._memory_s3()
+        self.assertEqual(config.Config.call_args.kwargs["retries"], {"mode": "standard", "total_max_attempts": 1})
+        self.assertEqual(sdk.Session.call_args.kwargs, {"profile_name": "operator"})
+        self.assertEqual(sdk.Session.return_value.client.call_args.kwargs["region_name"], "us-east-1")
+
+    def test_isolated_sdk_sanitizes_precondition_failed_without_retry(self):
+        class ConditionalFailure(Exception):
+            response = {"Error": {"Code": "PreconditionFailed", "Message": "PRIVATE-SENTINEL"}}
+
+        client = mock.Mock()
+        client.put_object.side_effect = ConditionalFailure("PRIVATE-SENTINEL")
+        adapter = self._memory_s3(client)
+        with self.assertRaises(bootstrap.BootstrapError) as raised:
+            adapter.put_object(bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY, b"[]\n", "123456789012", if_match='"old"')
+        self.assertIn("precondition", str(raised.exception).lower())
+        self.assertNotIn("PRIVATE-SENTINEL", str(raised.exception))
+        self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual(client.put_object.call_count, 1)
+
+    def _isolated_apply_fixture(self, fake_type=FakeS3):
+        scopes, rules, target = self._isolated_baseline()
+        proposed_scopes, proposed_rules, _ = self._isolated_candidate(scopes, rules, target)
+        store = fake_type()
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["test"], "123456789012"
+        scope_head = store.put_object(bucket, bootstrap.SCOPE_KEY, scopes, account)
+        authz_head = store.put_object(bucket, bootstrap.AUTHZ_KEY, rules, account)
+        arguments = dict(
+            bucket=bucket, expected_owner=account, scope_bytes=proposed_scopes, authz_bytes=proposed_rules,
+            approved_scope_sha256=bootstrap.sha256_hex(proposed_scopes),
+            approved_authz_sha256=bootstrap.sha256_hex(proposed_rules),
+            expected_current_scope_etag=scope_head["etag"], expected_current_scope_version_id=scope_head["versionId"],
+            expected_current_scope_sha256=bootstrap.sha256_hex(scopes),
+            expected_current_authz_etag=authz_head["etag"], expected_current_authz_version_id=authz_head["versionId"],
+            expected_current_authz_sha256=bootstrap.sha256_hex(rules),
+        )
+        return store, arguments
+
+    def _apply_isolated_fixture(self, store, arguments):
+        try:
+            return bootstrap.apply_private_bundle(store, **arguments)
+        except TypeError:
+            self.fail("isolated conditional writer does not yet bind the authz baseline hash")
+
+    def test_isolated_apply_writes_scope_then_authz_with_exact_cas(self):
+        store, arguments = self._isolated_apply_fixture()
+        self._apply_isolated_fixture(store, arguments)
+        self.assertEqual([item["key"] for item in store.puts[2:]], [bootstrap.SCOPE_KEY, bootstrap.AUTHZ_KEY])
+        self.assertEqual(store.puts[2]["ifMatch"], arguments["expected_current_scope_etag"])
+        self.assertEqual(store.puts[3]["ifMatch"], arguments["expected_current_authz_etag"])
+        self.assertEqual(store.objects[bootstrap.AUTHZ_KEY], arguments["authz_bytes"])
+
+    def test_isolated_apply_rejects_each_stale_baseline_before_writing(self):
+        for field in ("expected_current_scope_sha256", "expected_current_authz_sha256",
+                      "expected_current_scope_version_id", "expected_current_authz_version_id",
+                      "expected_current_scope_etag", "expected_current_authz_etag"):
+            with self.subTest(field=field):
+                store, arguments = self._isolated_apply_fixture()
+                arguments[field] = "0" * 64
+                with self.assertRaises(bootstrap.BootstrapError):
+                    self._apply_isolated_fixture(store, arguments)
+                self.assertEqual(len(store.puts), 2)
+
+    def test_isolated_apply_rechecks_scope_version_before_authz_write(self):
+        class ScopeDrift(FakeS3):
+            def get_object(self, bucket, key, expected_owner, version_id=None):
+                if key == bootstrap.AUTHZ_KEY and len(self.puts) == 3:
+                    self.heads[bootstrap.SCOPE_KEY]["versionId"] = "concurrent-version"
+                    self.objects[(bootstrap.SCOPE_KEY, "concurrent-version")] = self.objects[bootstrap.SCOPE_KEY]
+                return super().get_object(bucket, key, expected_owner, version_id)
+
+        store, arguments = self._isolated_apply_fixture(ScopeDrift)
+        old_authz = store.objects[bootstrap.AUTHZ_KEY]
+        with self.assertRaises(bootstrap.BootstrapError):
+            self._apply_isolated_fixture(store, arguments)
+        self.assertEqual(len(store.puts), 3)
+        self.assertEqual(store.objects[bootstrap.AUTHZ_KEY], old_authz)
+
+    def test_isolated_apply_loses_scope_cas_before_any_operator_write(self):
+        class ScopeRace(FakeS3):
+            attempts = 0
+
+            def put_object(self, bucket, key, body, expected_owner, **conditions):
+                if key == bootstrap.SCOPE_KEY and conditions.get("if_match"):
+                    self.attempts += 1
+                    super().put_object(bucket, key, b'{"synthetic-concurrent":true}\n', expected_owner)
+                return super().put_object(bucket, key, body, expected_owner, **conditions)
+
+        store, arguments = self._isolated_apply_fixture(ScopeRace)
+        old_authz = store.objects[bootstrap.AUTHZ_KEY]
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "PreconditionFailed"):
+            self._apply_isolated_fixture(store, arguments)
+        self.assertEqual(store.objects[bootstrap.SCOPE_KEY], b'{"synthetic-concurrent":true}\n')
+        self.assertEqual(store.objects[bootstrap.AUTHZ_KEY], old_authz)
+        self.assertEqual(store.attempts, 1)
+        self.assertEqual(len(store.puts), 3)
+
+    def test_isolated_apply_blocks_bucket_control_drift_before_authz(self):
+        for field, value in (("versioning", "Suspended"), ("ownership", "ObjectWriter"),
+                             ("publicAccessBlock", False)):
+            with self.subTest(field=field):
+                class BucketDrift(FakeS3):
+                    def bucket_state(self, bucket, expected_owner):
+                        state = super().bucket_state(bucket, expected_owner)
+                        if len(self.puts) == 3:
+                            state[field] = value
+                        return state
+
+                store, arguments = self._isolated_apply_fixture(BucketDrift)
+                old_authz = store.objects[bootstrap.AUTHZ_KEY]
+                with self.assertRaisesRegex(bootstrap.BootstrapError, "controls changed"):
+                    self._apply_isolated_fixture(store, arguments)
+                self.assertEqual(len(store.puts), 3)
+                self.assertEqual(store.objects[bootstrap.AUTHZ_KEY], old_authz)
+
+    def test_isolated_apply_readback_fault_stops_without_retry_or_rollback(self):
+        for fault_key, expected_puts in ((bootstrap.SCOPE_KEY, 3), (bootstrap.AUTHZ_KEY, 4)):
+            for versioned in (False, True):
+                with self.subTest(key=fault_key, versioned=versioned):
+                    class ReadbackFault(FakeS3):
+                        faults = 0
+
+                        def get_object(self, bucket, key, expected_owner, version_id=None):
+                            if key == fault_key and len(self.puts) == expected_puts and (version_id is not None) == versioned:
+                                self.faults += 1
+                                return b'{"synthetic-readback-fault":true}\n'
+                            return super().get_object(bucket, key, expected_owner, version_id)
+
+                    store, arguments = self._isolated_apply_fixture(ReadbackFault)
+                    old_authz = store.objects[bootstrap.AUTHZ_KEY]
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "readback"):
+                        self._apply_isolated_fixture(store, arguments)
+                    self.assertEqual(len(store.puts), expected_puts)
+                    self.assertEqual(store.faults, 1)
+                    if fault_key == bootstrap.SCOPE_KEY:
+                        self.assertEqual(store.objects[bootstrap.AUTHZ_KEY], old_authz)
+
+    def test_isolated_apply_loses_authz_cas_without_overwriting_or_retrying(self):
+        class AuthzRace(FakeS3):
+            def put_object(self, bucket, key, body, expected_owner, **conditions):
+                if key == bootstrap.AUTHZ_KEY and conditions.get("if_match"):
+                    super().put_object(bucket, key, b'{"synthetic-concurrent":true}\n', expected_owner)
+                return super().put_object(bucket, key, body, expected_owner, **conditions)
+
+        store, arguments = self._isolated_apply_fixture(AuthzRace)
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "PreconditionFailed"):
+            self._apply_isolated_fixture(store, arguments)
+        self.assertEqual(store.objects[bootstrap.AUTHZ_KEY], b'{"synthetic-concurrent":true}\n')
+        self.assertEqual(len(store.puts), 4)
+
+    def _isolated_command(self, store, arguments, *, write=False):
+        selected = draft("middle.example", "draft-middle-example")
+        args = bootstrap.argparse.Namespace(
+            registry=Path("synthetic-registry.json"), expected_draft_count=3, tenant_override=[],
+            profile="operator", region="us-east-1", add_domain=selected["domain"],
+            test_bucket=arguments["bucket"], production_bucket=None, bucket=arguments["bucket"],
+            environment="test", approve_scope_sha256=arguments["approved_scope_sha256"],
+            approve_authz_sha256=arguments["approved_authz_sha256"],
+            **{key: value for key, value in arguments.items() if key.startswith("expected_current_")},
+        )
+        with mock.patch.object(bootstrap, "_load_json_file", return_value=registry(*self.registry["drafts"], selected)), \
+             mock.patch.object(bootstrap, "_account_id", return_value="123456789012"), \
+             mock.patch.object(bootstrap, "collect_verified_bindings", return_value=[binding(selected["domain"], selected["repo"], "test")]) as collector, \
+             mock.patch.object(bootstrap, "InMemoryS3", return_value=store), \
+             mock.patch.object(bootstrap, "_generated_bundle", side_effect=AssertionError("global generation is forbidden in isolated mode")):
+            try:
+                result = bootstrap._apply(args) if write else bootstrap._plan(args)
+            except (bootstrap.BootstrapError, AssertionError) as exc:
+                self.fail(f"isolated command did not complete: {exc}")
+        self.assertEqual(collector.call_args.kwargs["domain"], selected["domain"])
+        return result
+
+    def test_isolated_command_plans_without_writes_and_emits_only_safe_metadata(self):
+        store, arguments = self._isolated_apply_fixture()
+        result = self._isolated_command(store, arguments)
+        self.assertEqual(result["updateMode"], "add")
+        self.assertEqual(result["scopeCount"], 3)
+        self.assertEqual(result["currentAuthzSha256"], arguments["expected_current_authz_sha256"])
+        self.assertTrue(result["existingGrantsPreserved"])
+        self.assertEqual(len(store.puts), 2)
+        self.assertNotIn("arn:", json.dumps(result))
+        self.assertNotIn("roleArn", json.dumps(result))
+
+    def test_isolated_command_applies_and_then_noops_without_a_new_version(self):
+        store, arguments = self._isolated_apply_fixture()
+        result = self._isolated_command(store, arguments, write=True)
+        self.assertEqual(result["updateMode"], "add")
+        self.assertEqual(len(store.puts), 4)
+        for label, key in (("scope", bootstrap.SCOPE_KEY), ("authz", bootstrap.AUTHZ_KEY)):
+            arguments[f"expected_current_{label}_etag"] = store.heads[key]["etag"]
+            arguments[f"expected_current_{label}_version_id"] = store.heads[key]["versionId"]
+            arguments[f"expected_current_{label}_sha256"] = bootstrap.sha256_hex(store.objects[key])
+        result = self._isolated_command(store, arguments, write=True)
+        self.assertEqual(result["updateMode"], "noop")
+        self.assertFalse(result["scopeWritten"])
+        self.assertFalse(result["authzWritten"])
+        self.assertEqual(len(store.puts), 4)
+
+    def test_isolated_apply_cli_requires_authz_baseline_hash_and_test(self):
+        _, arguments = self._isolated_apply_fixture()
+        cli = ["apply", "--registry", "registry.json", "--expected-draft-count", "3",
+               "--profile", "operator", "--environment", "test", "--bucket", arguments["bucket"],
+               "--add-domain", "middle.example", "--approve-scope-sha256", arguments["approved_scope_sha256"],
+               "--approve-authz-sha256", arguments["approved_authz_sha256"]]
+        for key, value in arguments.items():
+            if key.startswith("expected_current_") and key != "expected_current_authz_sha256":
+                cli.extend(["--" + key.replace("_", "-"), value])
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises((SystemExit, bootstrap.BootstrapError)):
+                bootstrap.parse_args(cli)
+            try:
+                parsed = bootstrap.parse_args(cli + ["--expected-current-authz-sha256", arguments["expected_current_authz_sha256"]])
+            except SystemExit as exc:
+                self.fail(f"isolated apply cannot accept its baseline hash: exit {exc.code}")
+        self.assertEqual(parsed.environment, "test")
+        production_cli = cli + ["--expected-current-authz-sha256", arguments["expected_current_authz_sha256"]]
+        production_cli[production_cli.index("--environment") + 1] = "production"
+        production_cli[production_cli.index("--bucket") + 1] = bootstrap.ENVIRONMENT_BUCKETS["production"]
+        with mock.patch.object(bootstrap, "CommandRunner") as external, contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises((SystemExit, bootstrap.BootstrapError)):
+                bootstrap.parse_args(production_cli)
+        external.assert_not_called()
 
     def test_scope_registry_uses_repo_slug_and_explicit_tenant_override(self):
         result = bootstrap.build_scope_registry(

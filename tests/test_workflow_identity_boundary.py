@@ -27,6 +27,7 @@ RUNTIME_FILES = (
     "schemas/server-features/data-spaces.schema.json",
     "schemas/server-features/integration-bindings.schema.json",
     "schemas/server-features/notification-policies.schema.json",
+    "schemas/server-features/protected-feature-bindings-v2.schema.json",
     "server_policy_validation.py",
     "zoolanding_lambda_common.py",
 )
