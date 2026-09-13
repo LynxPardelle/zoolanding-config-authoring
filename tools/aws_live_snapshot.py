@@ -396,12 +396,55 @@ def _configuration(function):
             if key not in {"CodeSha256", "CodeSize", "RevisionId", "LastModified"}}
 
 
+def _runtime_management(session, current):
+    function = current["function"]
+    response = _call(_client(session, "lambda"), "get_runtime_management_config",
+                     FunctionName=function["FunctionName"])
+    require(isinstance(response, dict)
+            and set(response).issubset({"FunctionArn", "UpdateRuntimeOn", "RuntimeVersionArn", "ResponseMetadata"})
+            and response.get("FunctionArn") == function["FunctionArn"], "runtime_management_identity_invalid")
+    mode, arn = response.get("UpdateRuntimeOn"), response.get("RuntimeVersionArn")
+    require(mode in {"Auto", "FunctionUpdate", "Manual"}, "runtime_management_mode_invalid")
+    if mode == "Manual":
+        require(isinstance(arn, str) and re.fullmatch(rf"arn:aws:lambda:{REGION}::runtime:[a-f0-9]{{64}}", arn)
+                and function.get("RuntimeVersionConfig") == {"RuntimeVersionArn": arn}, "runtime_manual_pin_invalid")
+    else:
+        require(arn is None, "runtime_automatic_pin_invalid")
+    result = {"UpdateRuntimeOn": mode, **({"RuntimeVersionArn": arn} if mode == "Manual" else {})}
+    expected = current["processed"]["Resources"][FUNCTION]["Properties"].get(
+        "RuntimeManagementConfig", {"UpdateRuntimeOn": "Auto"})
+    require(result == expected, "runtime_management_template_drift")
+    return result
+
+
+def _same_configuration(left, right, runtime_management):
+    left, right = _configuration(left), _configuration(right)
+    if left == right:
+        return True
+    if runtime_management["UpdateRuntimeOn"] not in {"Auto", "FunctionUpdate"}:
+        return False
+    normalized = []
+    for function in (left, right):
+        patch = function.get("RuntimeVersionConfig")
+        if (not isinstance(patch, dict) or set(patch) != {"RuntimeVersionArn"}
+                or not isinstance(patch["RuntimeVersionArn"], str)
+                or not re.fullmatch(rf"arn:aws:lambda:{REGION}::runtime:[a-f0-9]{{64}}", patch["RuntimeVersionArn"])
+                or function.get("Runtime") != "python3.13" or function.get("PackageType") != "Zip"
+                or function.get("Architectures") not in (["x86_64"], ["arm64"])):
+            return False
+        # Compare only across deployments; the full ARN remains in every live
+        # observation and plan digest, so concurrent patch changes still deny.
+        normalized.append({**function, "RuntimeVersionConfig": {"RuntimeVersionArn": "aws-managed-patch"}})
+    return normalized[0] == normalized[1]
+
+
 def plan_recovery(session, tooling, snapshot):
     _validate_snapshot(snapshot)
     current = observe(session, tooling, legacy=False)
+    runtime_management = _runtime_management(session, current)
     require(current["account"] == snapshot["account"] and current["stack"] == snapshot["stack"]
             and current["parameters"] == snapshot["parameters"] and current["inventory"] == snapshot["inventory"]
-            and _configuration(current["function"]) == _configuration(snapshot["function"])
+            and _same_configuration(current["function"], snapshot["function"], runtime_management)
             and _without_code(current["original"]) == _without_code(snapshot["original"])
             and _without_code(current["processed"], True) == _without_code(snapshot["processed"], True),
             "non_code_baseline_drift")
@@ -414,8 +457,9 @@ def plan_recovery(session, tooling, snapshot):
         "Bucket": package["Bucket"], "Key": package["Key"], "Version": package["VersionId"]}
     require(len(canonical(template)) <= 51200, "recovery_template_too_large")
     require(current == observe(session, tooling, legacy=False), "plan_baseline_drift")
+    require(runtime_management == _runtime_management(session, current), "plan_runtime_management_drift")
     return {"schema": SCHEMA, "tooling": _tooling(tooling), "snapshotSha256": digest(snapshot), "baseline": current,
-            "template": template,
+            "template": template, "runtimeManagement": runtime_management,
             "parameters": [{"ParameterKey": key, "UsePreviousValue": True} for key in sorted(current["parameters"])]}
 
 
@@ -482,6 +526,7 @@ def recover(session, tooling, snapshot, expected_plan, change_set_name):
             and {k: v for k, v in description.items() if k != "ResponseMetadata"}
             == {k: v for k, v in final.items() if k != "ResponseMetadata"}, "change_set_drift")
     require(observe(session, tooling, legacy=False) == plan["baseline"], "final_baseline_drift")
+    require(_runtime_management(session, plan["baseline"]) == plan["runtimeManagement"], "final_runtime_management_drift")
     if decision == "noop":
         require(plan["baseline"]["package"] == snapshot["package"], "noop_target_not_live")
         _call(cfn, "delete_change_set", StackName=stack_id, ChangeSetName=change_id)
@@ -491,9 +536,10 @@ def recover(session, tooling, snapshot, expected_plan, change_set_name):
           ClientRequestToken=change_set_name + "-execute-" + expected_plan[:24])
     require(_wait(cfn, "stack_update_complete", StackName=stack_id), "recovery_stack_wait_failed")
     post = observe(session, tooling)
+    require(_runtime_management(session, post) == plan["runtimeManagement"], "recovery_runtime_management_drift")
     require(post["original"] == plan["template"] and post["parameters"] == snapshot["parameters"]
             and post["inventory"] == snapshot["inventory"] and post["stack"] == snapshot["stack"]
-            and _configuration(post["function"]) == _configuration(snapshot["function"])
+            and _same_configuration(post["function"], snapshot["function"], plan["runtimeManagement"])
             and _without_code(post["processed"], True) == _without_code(snapshot["processed"], True)
             and post["package"] == snapshot["package"], "recovery_postcheck_failed")
     return {**safe_summary(post), "status": "recovered", "planSha256": expected_plan, "smoke": "stack_and_lambda_ready"}
