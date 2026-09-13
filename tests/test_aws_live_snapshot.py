@@ -94,8 +94,12 @@ class FakeAws:
             "ConfigRegistryTable": {"PhysicalResourceId": "synthetic-table", "ResourceType": "AWS::DynamoDB::Table"}}
         self.configuration = {"FunctionName": self.function_id, "FunctionArn": self.function_arn,
             "Version": "$LATEST", "RevisionId": "synthetic-revision", "State": "Active",
+            "Runtime": "python3.13", "PackageType": "Zip", "Architectures": ["x86_64"],
+            "RuntimeVersionConfig": {"RuntimeVersionArn": "arn:aws:lambda:us-east-1::runtime:" + "1" * 64},
             "LastUpdateStatus": "Successful", "CodeSize": len(self.payload),
             "CodeSha256": base64.b64encode(hashlib.sha256(self.payload).digest()).decode()}
+        self.runtime_management = {"UpdateRuntimeOn": "Auto", "FunctionArn": self.function_arn,
+                                   "RuntimeVersionArn": None}
         self.description = None
 
     def client(self, name, **kwargs):
@@ -122,6 +126,10 @@ class FakeAws:
         if self.read_hook:
             self.read_hook(self)
         return {**deepcopy(self.configuration), "ResponseMetadata": {"RequestId": str(self.function_reads)}}
+
+    def get_runtime_management_config(self, **kwargs):
+        self.calls.append(("get_runtime_management_config", kwargs))
+        return {**deepcopy(self.runtime_management), "ResponseMetadata": {"RequestId": "ignored"}}
 
     def head_object(self, **kwargs):
         self.calls.append(("head", kwargs))
@@ -452,6 +460,129 @@ class AwsObservedRecoveryTests(unittest.TestCase):
         with self.assertRaises(recovery.RecoveryBlocked):
             recovery.plan_recovery(self.aws, TOOLING, snapshot)
         self.assertEqual(self.aws.writes, [])
+
+    def test_auto_managed_patch_can_change_between_deployments_and_during_code_recovery(self):
+        snapshot = self.snapshot()
+        frozen = deepcopy(snapshot)
+        self.aws.configuration["RuntimeVersionConfig"]["RuntimeVersionArn"] = "arn:aws:lambda:us-east-1::runtime:" + "2" * 64
+        try:
+            plan = recovery.plan_recovery(self.aws, TOOLING, snapshot)
+        except recovery.RecoveryBlocked:
+            self.fail("A validated AWS-managed patch must not prevent a code-only recovery plan")
+        self.assertEqual(plan["runtimeManagement"], {"UpdateRuntimeOn": "Auto"})
+        self.assertEqual(plan["baseline"]["function"]["RuntimeVersionConfig"], self.aws.configuration["RuntimeVersionConfig"])
+        execute = self.aws.execute_change_set
+        def managed_patch(**kwargs):
+            result = execute(**kwargs)
+            self.aws.configuration["RuntimeVersionConfig"]["RuntimeVersionArn"] = "arn:aws:lambda:us-east-1::runtime:" + "3" * 64
+            return result
+        with patch.object(self.aws, "execute_change_set", managed_patch):
+            result = recovery.recover(self.aws, TOOLING, snapshot, recovery.plan_digest(plan), "recovery-42-1")
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(result["fileCount"], 7)
+        self.assertEqual(snapshot, frozen, "the immutable original record is never rewritten")
+        self.assertNotIn("RuntimeVersionArn", json.dumps(result))
+
+    def test_function_update_mode_must_match_both_unchanged_templates(self):
+        setting = {"UpdateRuntimeOn": "FunctionUpdate"}
+        for template in (self.aws.original, self.aws.processed):
+            template["Resources"]["ConfigAuthoringFunction"]["Properties"]["RuntimeManagementConfig"] = deepcopy(setting)
+        self.aws.runtime_management["UpdateRuntimeOn"] = "FunctionUpdate"
+        snapshot = self.snapshot()
+        self.aws.configuration["RuntimeVersionConfig"]["RuntimeVersionArn"] = "arn:aws:lambda:us-east-1::runtime:" + "2" * 64
+        try:
+            plan = recovery.plan_recovery(self.aws, TOOLING, snapshot)
+        except recovery.RecoveryBlocked:
+            self.fail("An unchanged FunctionUpdate mode permits a provider-managed patch")
+        self.assertEqual(plan["runtimeManagement"], setting)
+        self.assertEqual(self.aws.writes, [])
+
+    def test_runtime_mode_read_failure_blocks_before_any_change_set(self):
+        snapshot = self.snapshot()
+        with patch.object(self.aws, "get_runtime_management_config", side_effect=RuntimeError("private-aws-error")):
+            with self.assertRaisesRegex(recovery.RecoveryBlocked, "aws_get_runtime_management_config_failed"):
+                recovery.plan_recovery(self.aws, TOOLING, snapshot)
+        self.assertEqual(self.aws.writes, [])
+
+    def test_runtime_mode_identity_shape_and_template_mismatch_are_closed(self):
+        snapshot = self.snapshot()
+        for changed in ({"FunctionArn": self.aws.function_arn + ":1"},
+                        {"UpdateRuntimeOn": "Manual", "RuntimeVersionArn": self.aws.configuration["RuntimeVersionConfig"]["RuntimeVersionArn"]},
+                        {"UpdateRuntimeOn": "FunctionUpdate"}, {"UpdateRuntimeOn": "unexpected"},
+                        {"RuntimeVersionArn": "unexpected"}, {"Unknown": "private"}):
+            with self.subTest(changed=changed):
+                original = deepcopy(self.aws.runtime_management)
+                self.aws.runtime_management.update(changed)
+                with self.assertRaises(recovery.RecoveryBlocked):
+                    recovery.plan_recovery(self.aws, TOOLING, snapshot)
+                self.aws.runtime_management = original
+                self.assertEqual(self.aws.writes, [])
+
+    def test_runtime_patch_exception_does_not_accept_missing_invalid_or_extra_metadata(self):
+        snapshot = self.snapshot()
+        valid = deepcopy(self.aws.configuration["RuntimeVersionConfig"])
+        for value in (None, {}, {"RuntimeVersionArn": "not-an-arn"},
+                      {"RuntimeVersionArn": "arn:aws:lambda:us-west-2::runtime:" + "2" * 64},
+                      {"RuntimeVersionArn": "arn:aws:lambda:us-east-1::runtime:" + "2" * 64, "Error": {"ErrorCode": "InvalidRuntime"}},
+                      {**valid, "Unexpected": "private"}):
+            with self.subTest(value=value):
+                self.aws.configuration["RuntimeVersionConfig"] = value
+                with self.assertRaises(recovery.RecoveryBlocked):
+                    recovery.plan_recovery(self.aws, TOOLING, snapshot)
+                self.assertEqual(self.aws.writes, [])
+        self.aws.configuration["RuntimeVersionConfig"] = valid
+        missing = deepcopy(snapshot)
+        missing["function"].pop("RuntimeVersionConfig")
+        with self.assertRaises(recovery.RecoveryBlocked):
+            recovery.plan_recovery(self.aws, TOOLING, missing)
+
+    def test_runtime_patch_exception_still_rejects_every_other_function_change(self):
+        snapshot = self.snapshot()
+        original = deepcopy(self.aws.configuration)
+        for field, value in (("Runtime", "python3.14"), ("Architectures", ["arm64"]),
+                             ("PackageType", "Image"), ("Handler", "changed.handler"),
+                             ("Environment", {"Variables": {"private": "changed"}}),
+                             ("Role", "private-changed-role"), ("Unexpected", {"nested": "changed"})):
+            self.aws.configuration = deepcopy(original)
+            self.aws.configuration["RuntimeVersionConfig"]["RuntimeVersionArn"] = "arn:aws:lambda:us-east-1::runtime:" + "2" * 64
+            self.aws.configuration[field] = value
+            with self.subTest(field=field), self.assertRaises(recovery.RecoveryBlocked):
+                recovery.plan_recovery(self.aws, TOOLING, snapshot)
+            self.assertEqual(self.aws.writes, [])
+
+    def test_reviewed_plan_still_pins_the_exact_current_runtime_patch(self):
+        snapshot = self.snapshot()
+        plan = recovery.plan_recovery(self.aws, TOOLING, snapshot)
+        self.aws.configuration["RuntimeVersionConfig"]["RuntimeVersionArn"] = "arn:aws:lambda:us-east-1::runtime:" + "2" * 64
+        with self.assertRaisesRegex(recovery.RecoveryBlocked, "plan_approval_mismatch"):
+            recovery.recover(self.aws, TOOLING, snapshot, recovery.plan_digest(plan), "recovery-42-1")
+        self.assertEqual(self.aws.writes, [])
+
+    def test_runtime_patch_drift_during_final_description_never_executes(self):
+        snapshot = self.snapshot()
+        plan = recovery.plan_recovery(self.aws, TOOLING, snapshot)
+        original = self.aws.describe_change_set
+        def drift(**kwargs):
+            result = original(**kwargs)
+            if sum(name == "describe_change_set" for name, _ in self.aws.calls) == 2:
+                self.aws.configuration["RuntimeVersionConfig"]["RuntimeVersionArn"] = "arn:aws:lambda:us-east-1::runtime:" + "2" * 64
+            return result
+        with patch.object(self.aws, "describe_change_set", drift), self.assertRaises(recovery.RecoveryBlocked):
+            recovery.recover(self.aws, TOOLING, snapshot, recovery.plan_digest(plan), "recovery-42-1")
+        self.assertEqual([name for name, _ in self.aws.writes], ["create_change_set"])
+
+    def test_runtime_mode_drift_during_final_description_never_executes(self):
+        snapshot = self.snapshot()
+        plan = recovery.plan_recovery(self.aws, TOOLING, snapshot)
+        original = self.aws.describe_change_set
+        def drift(**kwargs):
+            result = original(**kwargs)
+            if sum(name == "describe_change_set" for name, _ in self.aws.calls) == 2:
+                self.aws.runtime_management["UpdateRuntimeOn"] = "FunctionUpdate"
+            return result
+        with patch.object(self.aws, "describe_change_set", drift), self.assertRaises(recovery.RecoveryBlocked):
+            recovery.recover(self.aws, TOOLING, snapshot, recovery.plan_digest(plan), "recovery-42-1")
+        self.assertEqual([name for name, _ in self.aws.writes], ["create_change_set"])
 
     def test_drift_after_change_set_review_never_executes(self):
         snapshot = self.snapshot()
