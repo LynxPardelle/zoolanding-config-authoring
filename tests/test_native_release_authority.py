@@ -44,3 +44,40 @@ class NativeAuthorityTests(unittest.TestCase):
    invalid=subprocess.run([sys.executable,'-c',script],cwd=root,env=env,capture_output=True,text=True);self.assertNotEqual(invalid.returncode,0)
    env['ACTIVATION_SELECTION_JSON']='{"mode":"thn-reviewed-activation"}'
    valid=subprocess.run([sys.executable,'-c',script],cwd=root,env=env,capture_output=True,text=True);self.assertEqual(valid.returncode,0,valid.stderr)
+
+ def test_test_transport_runs_actual_precredential_parser_without_checkout(self):
+  import os,re,shutil,subprocess,sys,tempfile,yaml
+  workflow=yaml.safe_load((ROOT/'.github/workflows/deploy-test.yml').read_text(encoding='utf-8'))
+  upload=next(step for step in workflow['jobs']['validate']['steps'] if step.get('id')=='upload')
+  names={Path(line.strip()).name for line in upload['with']['path'].splitlines() if line.strip().endswith('.py')}
+  script=next(step['with']['script'] for step in workflow['jobs']['deploy']['steps'] if 'ACTIVATION_SELECTION_JSON' in step.get('env',{}))
+  command=re.search(r"execFileSync\('python3', \['-c', '([^']+)'\]",script).group(1)
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp);(root/'.aws-sam').mkdir()
+   for name in names:
+    source='native_runtime_release.py' if name=='native-runtime-release.py' else name
+    shutil.copy2(ROOT/'tools'/source,root/'.aws-sam'/name)
+   env={**os.environ,'ACTIVATION_SELECTION_JSON':'{"mode":"thn-reviewed-activation"}'};env.pop('PYTHONPATH',None)
+   run=lambda:subprocess.run([sys.executable,'-c',command],cwd=root,env=env,capture_output=True,text=True)
+   valid=run();self.assertEqual(valid.returncode,0,valid.stderr)
+   env['ACTIVATION_SELECTION_JSON']='{"mode":"wrong","mode":"thn-reviewed-activation"}'
+   self.assertNotEqual(run().returncode,0)
+   env['ACTIVATION_SELECTION_JSON']='{"mode":"thn-reviewed-activation"}'
+   if 'native-runtime-release.py' in names:
+    result=subprocess.run([sys.executable,str(root/'.aws-sam/native-runtime-release.py'),'--help'],cwd=root,env=env,capture_output=True,text=True)
+    self.assertEqual(result.returncode,0,result.stderr)
+   (root/'.aws-sam/native_release_authority.py').unlink();self.assertNotEqual(run().returncode,0)
+
+ def test_test_authority_digest_rejects_substituted_helper_before_credentials(self):
+  import hashlib,os,shutil,subprocess,tempfile,yaml
+  workflow=yaml.safe_load((ROOT/'.github/workflows/deploy-test.yml').read_text(encoding='utf-8'))
+  steps=workflow['jobs']['deploy']['steps']
+  verify=next(step for step in steps if step.get('name') in ['Verify validated build artifact','Verify and normalize exact validated artifact'])
+  seal=next(line.strip() for line in verify['run'].splitlines() if 'EXPECTED_AUTHORITY_DIGEST' in line and 'sha256sum --check' in line)
+  self.assertLess(steps.index(verify),next(i for i,step in enumerate(steps) if 'configure-aws-credentials' in step.get('uses','')))
+  with tempfile.TemporaryDirectory() as temp:
+   root=Path(temp);(root/'.aws-sam').mkdir();helper=root/'.aws-sam/native_release_authority.py';helper.write_bytes((ROOT/'tools/native_release_authority.py').read_bytes())
+   env={**os.environ,'EXPECTED_AUTHORITY_DIGEST':hashlib.sha256(helper.read_bytes()).hexdigest()}
+   run=lambda:subprocess.run([('C:/Program Files/Git/bin/bash.exe' if os.name == 'nt' else shutil.which('bash')),'-c','set -euo pipefail\n'+seal],cwd=root,env=env,capture_output=True,text=True)
+   self.assertEqual(run().returncode,0)
+   helper.write_bytes(helper.read_bytes()+b'\n# substituted\n');self.assertNotEqual(run().returncode,0)

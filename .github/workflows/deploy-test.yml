@@ -85,6 +85,7 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_name: ${{ steps.artifact_metadata.outputs.name }}
       manifest_digest: ${{ steps.manifest.outputs.digest }}
+      authority_digest: ${{ steps.authority.outputs.digest }}
     permissions:
       contents: read
     env:
@@ -146,6 +147,12 @@ jobs:
           python tools/build_lambda_artifact.py \
             --verify-sam-build .aws-sam/build \
             --expected-source-commit "$GITHUB_SHA"
+      - name: Seal reviewed authority tooling separately from Lambda bytes
+        id: authority
+        run: |
+          set -euo pipefail
+          cp tools/native_release_authority.py .aws-sam/native_release_authority.py
+          printf 'digest=%s\n' "$(sha256sum .aws-sam/native_release_authority.py | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Write exact outer build manifest
         id: manifest
         shell: bash
@@ -174,6 +181,7 @@ jobs:
           path: |
             .aws-sam/build/
             .aws-sam/build-manifest.sha256
+            .aws-sam/native_release_authority.py
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 30
@@ -186,6 +194,7 @@ jobs:
       id-token: write
       contents: read
     env:
+      EXPECTED_AUTHORITY_DIGEST: ${{ needs.validate.outputs.authority_digest }}
       EXECUTION: ${{ inputs.execution }}
       REVIEW_DIGEST: ${{ inputs.review_digest }}
       REVIEW_CHANGE_SET_ARN: ${{ inputs.review_change_set_arn }}
@@ -229,6 +238,8 @@ jobs:
             echo "artifact_link_invalid"
             exit 1
           fi
+          [[ "$EXPECTED_AUTHORITY_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_AUTHORITY_DIGEST" .aws-sam/native_release_authority.py | sha256sum --check --strict -
           test -f .aws-sam/build-manifest.sha256
           printf '%s  %s\n' "$EXPECTED_MANIFEST_DIGEST" '.aws-sam/build-manifest.sha256' \
             | sha256sum --check --strict -
@@ -260,7 +271,8 @@ jobs:
             './build/ConfigAuthoringFunction/server_policy_validation.py' \
             './build/ConfigAuthoringFunction/zoolanding_lambda_common.py' \
             './build/config-authoring-manifest.json' \
-            './build/template.yaml' > "$RUNNER_TEMP/expected-artifact-files.txt"
+            './build/template.yaml' \
+            './native_release_authority.py' > "$RUNNER_TEMP/expected-artifact-files.txt"
           (cd .aws-sam && LC_ALL=C find . \( -type f -o -type l \) -print | LC_ALL=C sort) \
             > "$RUNNER_TEMP/all-artifact-paths.txt"
           diff -u "$RUNNER_TEMP/expected-artifact-files.txt" "$RUNNER_TEMP/all-artifact-paths.txt"
@@ -328,7 +340,7 @@ jobs:
               || (process.env.EXECUTION === 'execute' && !/^[a-f0-9]{64}$/.test(process.env.REVIEW_DIGEST ?? ''))
               || (process.env.EXECUTION === 'review' && (process.env.REVIEW_DIGEST || process.env.REVIEW_CHANGE_SET_ARN))
               || (process.env.EXECUTION === 'execute' && !/^arn:aws:cloudformation:us-east-1:765932874577:changeSet\/zoolanding-[1-9][0-9]*-[1-9][0-9]*\/[a-f0-9-]+$/.test(process.env.REVIEW_CHANGE_SET_ARN ?? ''))) activationFail();
-            const selection = JSON.parse(require('node:child_process').execFileSync('python3', ['-c', 'import json,os;from tools.verify_source_only_promotion import parse_selection;print(json.dumps(parse_selection(os.getenv("ACTIVATION_SELECTION_JSON","null"))))'], {encoding:'utf8'}));
+            const selection = JSON.parse(require('node:child_process').execFileSync('python3', ['-c', 'import json,os;import sys;sys.path.insert(0,".aws-sam");from native_release_authority import parse_selection;print(json.dumps(parse_selection(os.getenv("ACTIVATION_SELECTION_JSON","null"))))'], {encoding:'utf8'}));
             if (!selection || Object.keys(selection).sort().join(',') !== 'mode,schemaVersion,sha,tree,workflowSha256'
               || selection.schemaVersion !== 1 || selection.mode !== 'thn-reviewed-activation'
               || selection.sha !== context.sha || !/^[a-f0-9]{40}$/.test(selection.tree ?? '')

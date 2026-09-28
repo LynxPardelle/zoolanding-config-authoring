@@ -348,10 +348,12 @@ jobs:
             './build/ConfigAuthoringFunction/server_policy_validation.py' \
             './build/ConfigAuthoringFunction/zoolanding_lambda_common.py' \
             './build/config-authoring-manifest.json' \
-            './build/template.yaml' > "$RUNNER_TEMP/expected-promoted-artifact-files.txt"
+            './build/template.yaml' \
+            './native_release_authority.py' > "$RUNNER_TEMP/expected-promoted-artifact-files.txt"
           (cd "$promoted" && LC_ALL=C find . \( -type f -o -type l \) -print | LC_ALL=C sort) \
             > "$RUNNER_TEMP/promoted-artifact-paths.txt"
           diff -u "$RUNNER_TEMP/expected-promoted-artifact-files.txt" "$RUNNER_TEMP/promoted-artifact-paths.txt"
+          cmp -s tools/native_release_authority.py "$promoted/native_release_authority.py"
           python tools/build_lambda_artifact.py \
             --normalize-artifact "$promoted/build/ConfigAuthoringFunction"
           python tools/build_lambda_artifact.py \

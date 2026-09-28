@@ -13,3 +13,9 @@ validation and deployed package, S3 and recovery byte hashes are unchanged.
 The real ShellCheck gate now recognizes intentional literal JMESPath backtick queries through narrowly documented per-statement annotations.
 No global lint exclusions were added; release coordinates, query arguments and
 summary bytes remain unchanged.
+
+## TEST activation dependency repair
+
+- Transport and hash-check the strict activation parser outside the unchanged eight-file Lambda payload. The deploy job uses this sealed helper without requiring a checkout.
+- Keep the exact twelve-file outer transport and the unchanged ten-file build inventory; production verifies the promoted TEST helper against reviewed source.
+- Reproduce the previous missing-module failure in an isolated artifact directory; verify successful parsing and rejection of duplicate selectors, missing helpers and substituted helper bytes before credentials.
