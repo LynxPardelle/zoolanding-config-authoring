@@ -1,6 +1,19 @@
 name: Deploy Test
 
 on:
+  workflow_dispatch:
+    inputs:
+      execution:
+        type: choice
+        options: [review, execute]
+        default: review
+        required: true
+      review_digest:
+        type: string
+        required: false
+      review_change_set_arn:
+        type: string
+        required: false
   push:
     branches: [test]
 
@@ -14,6 +27,8 @@ concurrency:
 jobs:
   guard:
     runs-on: ubuntu-latest
+    outputs:
+      source_only: ${{ steps.release_mode.outputs.source_only }}
     permissions:
       contents: read
     env:
@@ -23,15 +38,25 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
+      - name: Separate source-only promotion from reviewed activation
+        id: release_mode
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROMOTION_SELECTION_JSON: ${{ vars.AUTHORING_TEST_PROMOTION_SELECTION_JSON }}
+          ACTIVATION_SELECTION_JSON: ${{ vars.AUTHORING_TEST_ACTIVATION_SELECTION_JSON }}
+        run: python tools/verify_source_only_promotion.py --target=test
       - name: Require dev merge
+        if: steps.release_mode.outputs.source_only != 'true'
         run: |
           set -euo pipefail
           git fetch --no-tags origin "refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
           commit="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then BEFORE_SHA="$(git rev-parse HEAD^1)"; fi
           source_tip="$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")"
           commit_tree="$(git rev-parse "${commit}^{tree}")"
           source_tree="$(git rev-parse "${source_tip}^{tree}")"
           parents_line="$(git rev-list --parents -n 1 HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == "push" ]]; then
           python tools/verify_promotion_provenance.py \
             --commit "$commit" \
             --before-sha "$BEFORE_SHA" \
@@ -39,14 +64,28 @@ jobs:
             --commit-tree "$commit_tree" \
             --source-tree "$source_tree" \
             --parents-line "$parents_line"
+          fi
+
+  source_validate:
+    runs-on: ubuntu-latest
+    needs: guard
+    if: needs.guard.outputs.source_only == 'true'
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.13'
+      - run: python -m unittest discover -s tests -p "test_*.py"
 
   validate:
+    if: needs.guard.outputs.source_only != 'true'
     runs-on: ubuntu-latest
     needs: guard
     outputs:
       artifact_id: ${{ steps.upload.outputs.artifact-id }}
       artifact_name: ${{ steps.artifact_metadata.outputs.name }}
       manifest_digest: ${{ steps.manifest.outputs.digest }}
+      authority_digest: ${{ steps.authority.outputs.digest }}
     permissions:
       contents: read
     env:
@@ -70,14 +109,20 @@ jobs:
         env:
           BEFORE_SHA: ${{ github.event.before }}
           SOURCE_BRANCH: dev
+          GH_TOKEN: ${{ github.token }}
+          ACTIVATION_SELECTION_JSON: ${{ vars.AUTHORING_TEST_ACTIVATION_SELECTION_JSON }}
         run: |
           set -euo pipefail
           git fetch --no-tags origin "refs/heads/${SOURCE_BRANCH}:refs/remotes/origin/${SOURCE_BRANCH}"
           commit="$(git rev-parse HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then BEFORE_SHA="$(git rev-parse HEAD^1)"; fi
           source_tip="$(git rev-parse "refs/remotes/origin/${SOURCE_BRANCH}")"
           commit_tree="$(git rev-parse "${commit}^{tree}")"
           source_tree="$(git rev-parse "${source_tip}^{tree}")"
           parents_line="$(git rev-list --parents -n 1 HEAD)"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            python tools/verify_source_only_promotion.py --target=test
+          else
           python tools/verify_promotion_provenance.py \
             --commit "$commit" \
             --before-sha "$BEFORE_SHA" \
@@ -85,6 +130,7 @@ jobs:
             --commit-tree "$commit_tree" \
             --source-tree "$source_tree" \
             --parents-line "$parents_line"
+          fi
       - name: Test and build exact artifact without AWS credentials
         shell: bash
         run: |
@@ -101,6 +147,12 @@ jobs:
           python tools/build_lambda_artifact.py \
             --verify-sam-build .aws-sam/build \
             --expected-source-commit "$GITHUB_SHA"
+      - name: Seal reviewed authority tooling separately from Lambda bytes
+        id: authority
+        run: |
+          set -euo pipefail
+          cp tools/native_release_authority.py .aws-sam/native_release_authority.py
+          printf 'digest=%s\n' "$(sha256sum .aws-sam/native_release_authority.py | cut -d ' ' -f1)" >> "$GITHUB_OUTPUT"
       - name: Write exact outer build manifest
         id: manifest
         shell: bash
@@ -129,6 +181,7 @@ jobs:
           path: |
             .aws-sam/build/
             .aws-sam/build-manifest.sha256
+            .aws-sam/native_release_authority.py
           if-no-files-found: error
           include-hidden-files: true
           retention-days: 30
@@ -141,6 +194,10 @@ jobs:
       id-token: write
       contents: read
     env:
+      EXPECTED_AUTHORITY_DIGEST: ${{ needs.validate.outputs.authority_digest }}
+      EXECUTION: ${{ inputs.execution }}
+      REVIEW_DIGEST: ${{ inputs.review_digest }}
+      REVIEW_CHANGE_SET_ARN: ${{ inputs.review_change_set_arn }}
       AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
       AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
       SAM_CLI_TELEMETRY: 0
@@ -181,6 +238,8 @@ jobs:
             echo "artifact_link_invalid"
             exit 1
           fi
+          [[ "$EXPECTED_AUTHORITY_DIGEST" =~ ^[a-f0-9]{64}$ ]]
+          printf '%s  %s\n' "$EXPECTED_AUTHORITY_DIGEST" .aws-sam/native_release_authority.py | sha256sum --check --strict -
           test -f .aws-sam/build-manifest.sha256
           printf '%s  %s\n' "$EXPECTED_MANIFEST_DIGEST" '.aws-sam/build-manifest.sha256' \
             | sha256sum --check --strict -
@@ -212,7 +271,8 @@ jobs:
             './build/ConfigAuthoringFunction/server_policy_validation.py' \
             './build/ConfigAuthoringFunction/zoolanding_lambda_common.py' \
             './build/config-authoring-manifest.json' \
-            './build/template.yaml' > "$RUNNER_TEMP/expected-artifact-files.txt"
+            './build/template.yaml' \
+            './native_release_authority.py' > "$RUNNER_TEMP/expected-artifact-files.txt"
           (cd .aws-sam && LC_ALL=C find . \( -type f -o -type l \) -print | LC_ALL=C sort) \
             > "$RUNNER_TEMP/all-artifact-paths.txt"
           diff -u "$RUNNER_TEMP/expected-artifact-files.txt" "$RUNNER_TEMP/all-artifact-paths.txt"
@@ -229,7 +289,12 @@ jobs:
         env:
           EXPECTED_SHA: ${{ github.sha }}
           SOURCE_BRANCH: dev
+          GH_TOKEN: ${{ github.token }}
+          ACTIVATION_SELECTION_JSON: ${{ vars.AUTHORING_TEST_ACTIVATION_SELECTION_JSON }}
           TARGET_BRANCH: test
+          EXECUTION: ${{ inputs.execution }}
+          REVIEW_DIGEST: ${{ inputs.review_digest }}
+          REVIEW_CHANGE_SET_ARN: ${{ inputs.review_change_set_arn }}
         with:
           github-token: ${{ github.token }}
           script: |
@@ -240,10 +305,10 @@ jobs:
             const sourceBranch = process.env.SOURCE_BRANCH;
             const targetBranch = process.env.TARGET_BRANCH;
             const event = context.payload;
-            if (!repository || !isSha(sha) || context.eventName !== 'push'
+            if (!repository || !isSha(sha) || !['push','workflow_dispatch'].includes(context.eventName)
               || process.env.GITHUB_REF !== `refs/heads/${targetBranch}`
-              || event.forced === true || event.created === true || event.deleted === true
-              || event.after !== sha || !isSha(event.before) || /^0+$/.test(event.before)) {
+              || (context.eventName === 'push' && (event.forced === true || event.created === true || event.deleted === true
+              || event.after !== sha || !isSha(event.before) || /^0+$/.test(event.before)))) {
               fail('promotion_context_invalid');
             }
             const [owner, repo] = repository.split('/');
@@ -253,7 +318,7 @@ jobs:
             if (parents.length !== 2 || parents.some(parent => !isSha(parent))) {
               fail('promotion_merge_commit_required');
             }
-            if (parents[0] !== event.before) fail('promotion_first_parent_mismatch');
+            if (context.eventName === 'push' && parents[0] !== event.before) fail('promotion_first_parent_mismatch');
             const { data: source } = await github.rest.repos.getBranch({ owner, repo, branch: sourceBranch });
             if (!isSha(source.commit?.sha) || parents[1] !== source.commit.sha) {
               fail('promotion_source_tip_mismatch');
@@ -263,12 +328,30 @@ jobs:
               repo,
               commit_sha: source.commit.sha,
             });
-            if (!isSha(commit.tree?.sha) || commit.tree.sha !== sourceCommit.tree?.sha) {
+            if (!isSha(commit.tree?.sha) || (context.eventName !== 'workflow_dispatch' && commit.tree.sha !== sourceCommit.tree?.sha)) {
               fail('promotion_tree_mismatch');
             }
             const { data: target } = await github.rest.repos.getBranch({ owner, repo, branch: targetBranch });
             if (target.commit?.sha !== sha) fail('promotion_target_tip_mismatch');
             core.info('promotion_provenance_verified');
+            if (context.eventName === 'workflow_dispatch') {
+            const activationFail = () => { throw new Error('activation_selection_rejected'); };
+            if (context.eventName !== 'workflow_dispatch' || !['review','execute'].includes(process.env.EXECUTION)
+              || (process.env.EXECUTION === 'execute' && !/^[a-f0-9]{64}$/.test(process.env.REVIEW_DIGEST ?? ''))
+              || (process.env.EXECUTION === 'review' && (process.env.REVIEW_DIGEST || process.env.REVIEW_CHANGE_SET_ARN))
+              || (process.env.EXECUTION === 'execute' && !/^arn:aws:cloudformation:us-east-1:765932874577:changeSet\/zoolanding-[1-9][0-9]*-[1-9][0-9]*\/[a-f0-9-]+$/.test(process.env.REVIEW_CHANGE_SET_ARN ?? ''))) activationFail();
+            const selection = JSON.parse(require('node:child_process').execFileSync('python3', ['-c', 'import json,os;import sys;sys.path.insert(0,".aws-sam");from native_release_authority import parse_selection;print(json.dumps(parse_selection(os.getenv("ACTIVATION_SELECTION_JSON","null"))))'], {encoding:'utf8'}));
+            if (!selection || Object.keys(selection).sort().join(',') !== 'mode,schemaVersion,sha,tree,workflowSha256'
+              || selection.schemaVersion !== 1 || selection.mode !== 'thn-reviewed-activation'
+              || selection.sha !== context.sha || !/^[a-f0-9]{40}$/.test(selection.tree ?? '')
+              || !/^[a-f0-9]{64}$/.test(selection.workflowSha256 ?? '')) activationFail();
+            const activationRepository = context.repo;
+            const {data:activationCommit} = await github.rest.git.getCommit({...activationRepository,commit_sha:context.sha});
+            const {data:workflow} = await github.rest.repos.getContent({...activationRepository,path:'.github/workflows/deploy-test.yml',ref:context.sha});
+            if (activationCommit.tree.sha !== selection.tree || workflow.encoding !== 'base64' || typeof workflow.content !== 'string') activationFail();
+            const digest = require('node:crypto').createHash('sha256').update(Buffer.from(workflow.content,'base64').toString('utf8').replace(/\r\n/g,'\n')).digest('hex');
+            if (digest !== selection.workflowSha256) activationFail();
+            }
       - uses: aws-actions/configure-aws-credentials@517a711dbcd0e402f90c77e7e2f81e849156e31d # v6
         with:
           role-to-assume: ${{ vars.AWS_ROLE_ARN }}
@@ -283,14 +366,73 @@ jobs:
           EXPECTED_BUCKET: zoolanding-config-payloads-test
         run: |
           set -euo pipefail
-          packaged="$RUNNER_TEMP/packaged-template.yaml"
+          packaged="$RUNNER_TEMP/packaged-template.json"
           description="$RUNNER_TEMP/reviewed-change-set.json"
+          collect_native_baseline() {
+            python3 - "$STACK_NAME" "$1" <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+          def aws(*args):
+              result=subprocess.run(["aws",*args,"--output","json","--no-cli-pager"],capture_output=True,text=True)
+              if result.returncode: raise SystemExit("native_baseline_unavailable")
+              return json.loads(result.stdout)
+          if os.getenv("AWS_REGION") != "us-east-1" or aws("sts","get-caller-identity").get("Account") != "765932874577":
+              raise SystemExit("native_identity_invalid")
+          stack=aws("cloudformation","describe-stacks","--stack-name",sys.argv[1])["Stacks"]
+          if len(stack)!=1 or stack[0].get("StackStatus") not in ("CREATE_COMPLETE","UPDATE_COMPLETE"):
+              raise SystemExit("native_stack_unavailable")
+          resources=aws("cloudformation","list-stack-resources","--stack-name",sys.argv[1])["StackResourceSummaries"]
+          identities=sorted([{key:item.get(key) for key in ("LogicalResourceId","PhysicalResourceId","ResourceType")} for item in resources],key=lambda item:item["LogicalResourceId"])
+          functions=[aws("lambda","get-function-configuration","--function-name",item["PhysicalResourceId"]) for item in identities if item["ResourceType"]=="AWS::Lambda::Function"]
+          baseline={"stackId":stack[0]["StackId"],"parameters":sorted(stack[0].get("Parameters",[]),key=lambda item:item["ParameterKey"]),
+            "outputs":sorted(stack[0].get("Outputs",[]),key=lambda item:item["OutputKey"]),"identities":identities,"functions":functions,
+            "original":aws("cloudformation","get-template","--stack-name",sys.argv[1],"--template-stage","Original")["TemplateBody"],
+            "processed":aws("cloudformation","get-template","--stack-name",sys.argv[1],"--template-stage","Processed")["TemplateBody"]}
+          Path(sys.argv[2]).write_text(json.dumps(baseline,sort_keys=True,separators=(",",":")),encoding="utf-8")
+          PY
+          }
+          baseline="$RUNNER_TEMP/native-review-baseline.json"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then collect_native_baseline "$baseline"; fi
+          if [[ "$EXECUTION" == "execute" ]]; then
+            change_set_arn="$REVIEW_CHANGE_SET_ARN"
+            CHANGE_SET_NAME="${change_set_arn#*:changeSet/}"
+            CHANGE_SET_NAME="${CHANGE_SET_NAME%%/*}"
+          else
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+            bucket_versioning="$(aws s3api get-bucket-versioning --bucket "$EXPECTED_BUCKET" --expected-bucket-owner 765932874577 --query Status --output text --no-cli-pager)"
+            test "$bucket_versioning" = Enabled
+          fi
           sam package \
             --template-file .aws-sam/build/template.yaml \
             --s3-bucket "$EXPECTED_BUCKET" \
             --s3-prefix "system/deploy-artifacts/${GITHUB_SHA}/${GITHUB_RUN_ID}/${GITHUB_RUN_ATTEMPT}" \
             --output-template-file "$packaged" \
+            --use-json \
             --region "$AWS_REGION"
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+          python3 - "$packaged" "$EXPECTED_BUCKET" <<'PY'
+          import json, subprocess, sys, os, re
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          path=Path(sys.argv[1]); template=json.loads(path.read_text())
+          code=template["Resources"]["ConfigAuthoringFunction"]["Properties"]["CodeUri"]
+          if isinstance(code,str):
+              parsed=urlsplit(code)
+              if parsed.scheme!="s3" or parsed.query or parsed.fragment or "%" in parsed.path or not parsed.path.startswith("/"):
+                  raise SystemExit("test_code_coordinates_invalid")
+              code={"Bucket":parsed.netloc,"Key":parsed.path[1:]}
+          prefix="system/deploy-artifacts/"+os.environ["GITHUB_SHA"]+"/"+os.environ["GITHUB_RUN_ID"]+"/"+os.environ["GITHUB_RUN_ATTEMPT"]
+          if not isinstance(code,dict) or set(code)!={"Bucket","Key"} or code["Bucket"]!=sys.argv[2] or not re.fullmatch(re.escape(prefix)+r"/[A-Za-z0-9._-]{16,128}",str(code.get("Key",""))):
+              raise SystemExit("test_code_coordinates_invalid")
+          head=subprocess.run(["aws","s3api","head-object","--bucket",code["Bucket"],"--key",code["Key"],"--output","json","--no-cli-pager"],capture_output=True,text=True)
+          if head.returncode: raise SystemExit("test_code_version_unavailable")
+          version=json.loads(head.stdout).get("VersionId")
+          if not isinstance(version,str) or not version or version=="null": raise SystemExit("test_code_version_unavailable")
+          code["Version"]=version
+          template["Resources"]["ConfigAuthoringFunction"]["Properties"]["CodeUri"]=code
+          path.write_text(json.dumps(template,sort_keys=True,separators=(",",":")),encoding="utf-8")
+          PY
+          fi
           change_set_arn="$(aws cloudformation create-change-set \
             --stack-name "$STACK_NAME" \
             --change-set-name "$CHANGE_SET_NAME" \
@@ -309,6 +451,7 @@ jobs:
             --query 'Id' \
             --output text \
             --no-cli-pager)"
+          fi
           set +e
           aws cloudformation wait change-set-create-complete \
             --stack-name "$STACK_NAME" \
@@ -415,6 +558,34 @@ jobs:
           fi
           test "$decision" = "execute"
           test "$wait_status" -eq 0
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]]; then
+          aws cloudformation get-template --stack-name "$STACK_NAME" --change-set-name "$change_set_arn" --template-stage Original --output json --no-cli-pager > "$RUNNER_TEMP/review-original.json"
+          aws cloudformation get-template --stack-name "$STACK_NAME" --change-set-name "$change_set_arn" --template-stage Processed --output json --no-cli-pager > "$RUNNER_TEMP/review-processed.json"
+          review_inventory_digest="$(python3 - "$description" "$RUNNER_TEMP/review-original.json" .aws-sam/build-manifest.sha256 "$baseline" "$GITHUB_SHA" "$RUNNER_TEMP/review-processed.json" <<'PY'
+          # inline-review-digest:start
+          import hashlib, json, sys
+          from pathlib import Path
+          change_set=json.loads(Path(sys.argv[1]).read_text())
+          inventory={"changeSetId":change_set.get("ChangeSetId"),"stackId":change_set.get("StackId"),"sourceSha":sys.argv[5],"originalSha256":hashlib.sha256(Path(sys.argv[2]).read_bytes()).hexdigest(),
+            "sealedManifestSha256":hashlib.sha256(Path(sys.argv[3]).read_bytes()).hexdigest(),
+            "nativeBaselineSha256":hashlib.sha256(Path(sys.argv[4]).read_bytes()).hexdigest(),
+            "processedSha256":hashlib.sha256(Path(sys.argv[6]).read_bytes()).hexdigest(),
+            "parameters":sorted(change_set.get("Parameters",[]),key=lambda item:item.get("ParameterKey","")),
+            "changes":sorted(change_set["Changes"],key=lambda item:item["ResourceChange"]["LogicalResourceId"])}
+          print(hashlib.sha256(json.dumps(inventory,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest())
+          # inline-review-digest:end
+          PY
+          )"
+          printf 'review_inventory_digest=%s\n' "$review_inventory_digest" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$EXECUTION" == "review" ]]; then
+            printf 'review_change_set_arn=%s\n' "$change_set_arn" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          test "$EXECUTION" = "execute"
+          test "$REVIEW_DIGEST" = "$review_inventory_digest"
+          collect_native_baseline "$RUNNER_TEMP/native-execute-baseline.json"
+          cmp -s "$baseline" "$RUNNER_TEMP/native-execute-baseline.json"
+          fi
           aws cloudformation execute-change-set \
             --stack-name "$STACK_NAME" \
             --change-set-name "$change_set_arn" \
@@ -428,6 +599,7 @@ jobs:
             --no-cli-pager)"
           test "$final_status" = "UPDATE_COMPLETE"
       - name: Post-deploy smoke
+        if: github.event_name == 'push' || inputs.execution == 'execute'
         shell: bash
         env:
           STACK_NAME: zoolanding-config-authoring-test
@@ -446,6 +618,7 @@ jobs:
             test "$update_status" = "Successful"
           done
       - name: Record immutable release coordinates
+        if: github.event_name == 'push' || inputs.execution == 'execute'
         shell: bash
         env:
           ARTIFACT_ID: ${{ needs.validate.outputs.artifact_id }}
