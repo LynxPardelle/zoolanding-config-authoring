@@ -589,6 +589,7 @@ jobs:
       - name: Bind current live test Lambda bytes to the exact promoted artifact
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2016 # JMESPath backticks are literal JSON strings.
           test_function_arn="$(aws cloudformation describe-stacks \
             --stack-name zoolanding-config-authoring-test \
             --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue | [0]' \
@@ -1158,6 +1159,7 @@ jobs:
           fi
           test "$decision" = "execute"
           test "$wait_status" -eq 0
+          # shellcheck disable=SC2016 # JMESPath backticks are literal JSON strings.
           current_test_code_sha="$(aws lambda get-function-configuration \
             --function-name "$(aws cloudformation describe-stacks \
               --stack-name zoolanding-config-authoring-test \
@@ -1218,11 +1220,13 @@ jobs:
         if: inputs.execution == 'execute'
         run: |
           set -euo pipefail
+          # shellcheck disable=SC2016 # JMESPath backticks are literal JSON strings.
           test_function_arn="$(aws cloudformation describe-stacks \
             --stack-name zoolanding-config-authoring-test \
             --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue | [0]' \
             --output text \
             --no-cli-pager)"
+          # shellcheck disable=SC2016 # JMESPath backticks are literal JSON strings.
           production_function_arn="$(aws cloudformation describe-stacks \
             --stack-name zoolanding-config-authoring \
             --query 'Stacks[0].Outputs[?OutputKey==`FunctionArn`].OutputValue | [0]' \

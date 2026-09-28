@@ -9,3 +9,7 @@ worktree instead of the committed LF blob. The test now normalizes only CRLF
 to LF and pins the committed schema bytes. A regression exercises both checkout
 line endings and still rejects schema mutations and lone-CR changes. Application
 validation and deployed package, S3 and recovery byte hashes are unchanged.
+
+The real ShellCheck gate now recognizes intentional literal JMESPath backtick queries through narrowly documented per-statement annotations.
+No global lint exclusions were added; release coordinates, query arguments and
+summary bytes remain unchanged.
