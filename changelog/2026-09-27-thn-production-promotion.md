@@ -21,3 +21,9 @@ summary bytes remain unchanged.
 - Reproduce the previous missing-module failure in an isolated artifact directory; verify successful parsing and rejection of duplicate selectors, missing helpers and substituted helper bytes before credentials.
 
 - CI dependency correction: the new transport regressions extract unique literal workflow blocks using only the Python standard library. They no longer inherit PyYAML from a local development environment. Both modules pass with site-packages disabled (`python -S`), preserving the actual isolated parser/operator commands and hash-substitution rejection.
+
+## Successful TEST run selection
+
+- Filter exact successful Deploy Test runs through their actual completed deployment and immutable smoke jobs before requiring one unique deployed run. Code-only pushes and review-only runs do not compete with deployed evidence.
+- Preserve exact workflow/repository/source/branch/event/attempt metadata, fail closed on unavailable job evidence, and reject zero or multiple genuine deployments. The unchanged artifact resolver stays bound to the selected run.
+- Reproduce the three-run source-only/review/execute sequence using the actual production inline command with a closed offline GitHub subprocess fixture; verify wrong source/job/artifact coordinates and ambiguous deployments are rejected.
