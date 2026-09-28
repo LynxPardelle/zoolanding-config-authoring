@@ -1076,6 +1076,7 @@ jobs:
           decision="$(python3 - "$description" "$STACK_NAME" "$CHANGE_SET_NAME" "$change_set_arn" "$expected_parameters" <<'PY'
           # inline-change-set-review:start
           import json
+          import os
           from pathlib import Path
           import re
           import sys
@@ -1152,6 +1153,30 @@ jobs:
                   fail("change_set_resource_invalid")
               if resource.get("Replacement") not in (None, "False"):
                   fail("change_set_replacement_invalid")
+          if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
+              if len(changes) != 1:
+                  fail("change_set_code_scope_invalid")
+              resource = changes[0]["ResourceChange"]
+              if (
+                  resource.get("Action") != "Modify"
+                  or resource.get("LogicalResourceId") != "ConfigAuthoringFunction"
+                  or resource.get("ResourceType") != "AWS::Lambda::Function"
+                  or resource.get("Replacement") != "False"
+                  or resource.get("Scope") != ["Properties"]
+              ):
+                  fail("change_set_code_scope_invalid")
+              details = resource.get("Details")
+              if not isinstance(details, list) or not details:
+                  fail("change_set_code_details_invalid")
+              for detail in details:
+                  target = detail.get("Target") if isinstance(detail, dict) else None
+                  if (
+                      not isinstance(target, dict)
+                      or target.get("Attribute") != "Properties"
+                      or target.get("Name") != "Code"
+                      or target.get("RequiresRecreation") != "Never"
+                  ):
+                      fail("change_set_code_details_invalid")
           print("execute")
           # inline-change-set-review:end
           PY

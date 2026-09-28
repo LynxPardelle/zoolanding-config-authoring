@@ -27,3 +27,15 @@ summary bytes remain unchanged.
 - Filter exact successful Deploy Test runs through their actual completed deployment and immutable smoke jobs before requiring one unique deployed run. Code-only pushes and review-only runs do not compete with deployed evidence.
 - Preserve exact workflow/repository/source/branch/event/attempt metadata, fail closed on unavailable job evidence, and reject zero or multiple genuine deployments. The unchanged artifact resolver stays bound to the selected run.
 - Reproduce the three-run source-only/review/execute sequence using the actual production inline command with a closed offline GitHub subprocess fixture; verify wrong source/job/artifact coordinates and ambiguous deployments are rejected.
+## Protected manual code-only review
+
+- Reproduced the actual TEST and production inline reviewers accepting unrelated
+  resource additions and Lambda Tags, Environment, Role and Metadata changes.
+- Manual review and execution now admit only a nonreplacement Code modification
+  of ConfigAuthoringFunction, with an exact native resource scope and nonempty
+  Code-only details. Direct and reference-based Code causes remain accepted.
+- Preserved legacy push decisions, parameter and change-set identity checks,
+  exact no-op handling, retained preview/digest, source provenance and fresh
+  baseline checks. No template, runtime ZIP, IAM permission or AWS resource changed.
+- Seven standard-library regression tests execute both real workflow blocks; the
+  failing cases first reproduced the gap and passed after the narrow guard fix.
