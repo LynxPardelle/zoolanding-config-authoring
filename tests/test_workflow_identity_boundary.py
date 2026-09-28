@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 import zipfile
 
 
@@ -27,6 +29,7 @@ RUNTIME_FILES = (
     "schemas/server-features/data-spaces.schema.json",
     "schemas/server-features/integration-bindings.schema.json",
     "schemas/server-features/notification-policies.schema.json",
+    "schemas/server-features/protected-feature-bindings-v2.schema.json",
     "server_policy_validation.py",
     "zoolanding_lambda_common.py",
 )
@@ -52,6 +55,7 @@ def run_inline_python(code: str, *args: str) -> subprocess.CompletedProcess[str]
     return subprocess.run(
         [sys.executable, "-c", code, *args],
         cwd=ROOT,
+        env={**os.environ, "GITHUB_EVENT_NAME": "push"},
         capture_output=True,
         text=True,
         check=False,
@@ -59,6 +63,14 @@ def run_inline_python(code: str, *args: str) -> subprocess.CompletedProcess[str]
 
 
 class WorkflowIdentityBoundaryTest(unittest.TestCase):
+    def test_legacy_reviewer_fixture_is_independent_of_parent_workflow_event(self):
+        for parent_event in ("push", "workflow_dispatch"):
+            with self.subTest(parent_event=parent_event), patch.dict(
+                os.environ, {"GITHUB_EVENT_NAME": parent_event}
+            ):
+                self.test_inline_change_set_reviewer_is_executable_and_fail_closed()
+                self.assertEqual(os.environ["GITHUB_EVENT_NAME"], parent_event)
+
     def test_documentation_records_the_artifact_identity_boundary(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ROOT / "changelog" / "2026-07.md").read_text(encoding="utf-8")
@@ -307,6 +319,68 @@ class WorkflowIdentityBoundaryTest(unittest.TestCase):
             accepted_noop = review(noop)
             self.assertEqual(accepted_noop.returncode, 0, accepted_noop.stderr)
             self.assertEqual(accepted_noop.stdout.strip(), "noop")
+
+    def test_production_selects_one_real_deployment_among_source_only_and_review_runs(self):
+        production = workflow("deploy-production.yml")
+        marker = '          python - "$runs" "$workflow" "$second_parent" "$GITHUB_REPOSITORY" "$GITHUB_OUTPUT" <<\'PY\'\n'
+        self.assertEqual(production.count(marker), 1)
+        code = textwrap.dedent(production.split(marker, 1)[1].split('          PY\n', 1)[0])
+        source_sha = "a" * 40
+        repository = "LynxPardelle/zoolanding-config-authoring"
+        metadata = {"id": 42, "name": "Deploy Test", "path": ".github/workflows/deploy-test.yml", "state": "active"}
+        def run(run_id, event="workflow_dispatch"):
+            return {"id": run_id, "head_sha": source_sha, "head_branch": "test", "event": event,
+                    "status": "completed", "conclusion": "success", "name": "Deploy Test",
+                    "path": ".github/workflows/deploy-test.yml", "workflow_id": 42, "run_attempt": 1,
+                    "repository": {"full_name": repository}}
+        def job(run_id, smoke=True):
+            return {"name": "deploy", "status": "completed", "conclusion": "success",
+                    "head_sha": source_sha, "run_id": run_id, "steps": [
+                        {"name": name, "status": "completed", "conclusion": "success" if smoke else "skipped"}
+                        for name in ("Post-deploy smoke", "Record immutable release coordinates")]}
+        runs = [run(1, "push"), run(2), run(3)]
+        jobs = {1: {"jobs": [], "total_count": 0}, 2: {"jobs": [job(2, False)], "total_count": 1},
+                3: {"jobs": [job(3)], "total_count": 1}}
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            runs_path, metadata_path, output_path = root / "runs.json", root / "workflow.json", root / "output"
+            metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+            def select(candidates, responses):
+                runs_path.write_text(json.dumps({"workflow_runs": candidates}), encoding="utf-8")
+                output_path.unlink(missing_ok=True)
+                # Mock only the exact gh jobs lookup; every other command is forbidden.
+                stub = ("import subprocess,json,re\nresponses=" + repr(responses) + "\n"
+                        "def lookup(args,**kwargs):\n"
+                        " assert args[0:2]==['gh','api'] and args[3:]==['-f','per_page=100','--method','GET']\n"
+                        " found=re.fullmatch(r'repos/" + repository + "/actions/runs/([0-9]+)/attempts/1/jobs',args[2])\n"
+                        " assert found is not None\n"
+                        " return subprocess.CompletedProcess(args,0,json.dumps(responses[int(found.group(1))]),'')\n"
+                        "subprocess.run=lookup\n")
+                return run_inline_python(stub + code, str(runs_path), str(metadata_path), source_sha, repository, str(output_path))
+            accepted = select(runs, jobs)
+            self.assertEqual(accepted.returncode, 0, accepted.stderr)
+            self.assertEqual(output_path.read_text(encoding="utf-8"), f"test_run_id=3\ntest_run_attempt=1\ntest_source_sha={source_sha}\n")
+            no_deployment = {**jobs, 3: {"jobs": [job(3, False)], "total_count": 1}}
+            self.assertNotEqual(select(runs, no_deployment).returncode, 0)
+            self.assertNotEqual(select(runs + [run(4)], {**jobs, 4: {"jobs": [job(4)], "total_count": 1}}).returncode, 0)
+            for field, value in [("head_sha", "b" * 40), ("path", ".github/workflows/ci.yml"), ("head_branch", "main"), ("event", "pull_request"), ("run_attempt", 0)]:
+                invalid = json.loads(json.dumps(runs)); invalid[2][field] = value
+                self.assertNotEqual(select(invalid, jobs).returncode, 0)
+            for field, value in [("head_sha", "b" * 40), ("conclusion", "failure"), ("run_id", 2)]:
+                invalid = {int(key): value for key, value in json.loads(json.dumps(jobs)).items()}; invalid[3]["jobs"][0][field] = value
+                self.assertNotEqual(select(runs, invalid).returncode, 0)
+            duplicated = {**jobs, 3: {"jobs": [job(3), job(3)], "total_count": 2}}
+            self.assertNotEqual(select(runs, duplicated).returncode, 0)
+            # Feed the selected run into the unchanged exact-artifact resolver.
+            resolver = marked_blocks(production, "inline-test-artifact-resolver")[0]
+            artifact_path = root / "artifacts.json"
+            artifact = {"id": 70, "name": f"config-authoring-test-3-1-{source_sha}", "size_in_bytes": 100, "expired": False,
+                        "workflow_run": {"id": 3, "head_branch": "test", "head_sha": source_sha}}
+            for bound_id in (3, 1):
+                candidate = json.loads(json.dumps(artifact)); candidate["workflow_run"]["id"] = bound_id
+                artifact_path.write_text(json.dumps({"artifacts": [candidate]}), encoding="utf-8")
+                result = run_inline_python(resolver, str(artifact_path), "3", "1", source_sha, str(output_path))
+                self.assertEqual(result.returncode == 0, bound_id == 3, result.stderr)
 
     def test_inline_test_artifact_resolver_handles_deploy_only_reruns(self):
         production = workflow("deploy-production.yml")

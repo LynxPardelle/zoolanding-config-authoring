@@ -4,6 +4,7 @@ import importlib
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,6 +16,19 @@ SCHEMA_NAMES = (
     "integration-bindings.schema.json",
     "notification-policies.schema.json",
 )
+
+THN_PROTECTED_FEATURE_BINDING = {
+    "bindingId": "journal-v2",
+    "domain": "thehairnarrative.com",
+    "environment": "test",
+    "authProfileId": "journal-owner",
+    "featureId": "journal",
+    "hubId": "thehairnarrative-com-journal",
+    "serviceBindingId": "thn-journal-test-v2",
+    "authBasePath": "/auth-v2",
+    "contentHubBasePath": "/features/content-hub-v2",
+    "status": "active",
+}
 
 
 def load_json(path):
@@ -71,6 +85,102 @@ class ServerPolicyValidationTest(unittest.TestCase):
             "content": load_json(auth_registry),
         })
         self.validator.validate_server_policy_files("example.com", "test", files)
+
+    def test_schema_pin_accepts_checkout_line_endings_and_rejects_schema_mutation(self):
+        schema_path = SCHEMA_DIR / "protected-feature-bindings-v2.schema.json"
+        original_read_bytes = Path.read_bytes
+        lf_bytes = original_read_bytes(schema_path).replace(b"\r\n", b"\n")
+        for ending, fixture_bytes in (("LF", lf_bytes), ("CRLF", lf_bytes.replace(b"\n", b"\r\n"))):
+            with self.subTest(ending=ending), patch.object(
+                Path, "read_bytes",
+                lambda path: fixture_bytes if path == schema_path else original_read_bytes(path),
+            ):
+                self.test_protected_feature_binding_v2_schema_is_closed_and_exact()
+
+        mutated = lf_bytes.replace(b'"additionalProperties": false', b'"additionalProperties": true', 1)
+        self.assertNotEqual(mutated, lf_bytes)
+        for fixture_bytes in (mutated, mutated.replace(b"\n", b"\r\n"), lf_bytes.replace(b"\n", b"\r", 1)):
+            with self.subTest(rejected_hash=hashlib.sha256(fixture_bytes).hexdigest()), patch.object(
+                Path, "read_bytes",
+                lambda path: fixture_bytes if path == schema_path else original_read_bytes(path),
+            ), self.assertRaises(AssertionError):
+                self.test_protected_feature_binding_v2_schema_is_closed_and_exact()
+
+    def test_protected_feature_binding_v2_schema_is_closed_and_exact(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        schema_path = SCHEMA_DIR / "protected-feature-bindings-v2.schema.json"
+        self.assertTrue(schema_path.is_file(), schema_path.name)
+        schema = load_json(schema_path)
+
+        self.validator.assert_supported_schema(schema)
+        self.assertEqual(
+            hashlib.sha256(schema_path.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
+            "9275e184d94c7fd75c92b9359699ec2d693a2378e524910e4d3d0f93be3079ab",
+        )
+        self.assertFalse(schema["additionalProperties"])
+        self.assertEqual(set(THN_PROTECTED_FEATURE_BINDING), set(schema["required"]))
+        self.assertEqual(
+            set(THN_PROTECTED_FEATURE_BINDING),
+            set(schema["properties"]),
+        )
+        self.assertEqual(
+            self.validator.SERVER_SCHEMA_FILES.get("protected-feature-bindings-v2.json"),
+            "protected-feature-bindings-v2.schema.json",
+        )
+        self.assertEqual(
+            self.validator.validate_schema(schema, THN_PROTECTED_FEATURE_BINDING),
+            [],
+        )
+
+        invalid_bindings = []
+        for field in THN_PROTECTED_FEATURE_BINDING:
+            missing = copy.deepcopy(THN_PROTECTED_FEATURE_BINDING)
+            missing.pop(field)
+            invalid_bindings.append((f"missing-{field}", missing))
+        for field, value in THN_PROTECTED_FEATURE_BINDING.items():
+            changed = copy.deepcopy(THN_PROTECTED_FEATURE_BINDING)
+            changed[field] = f"{value}-changed"
+            invalid_bindings.append((f"changed-{field}", changed))
+        with_extra = copy.deepcopy(THN_PROTECTED_FEATURE_BINDING)
+        with_extra["unexpected"] = True
+        invalid_bindings.append(("unexpected-field", with_extra))
+
+        for name, candidate in invalid_bindings:
+            with self.subTest(name=name):
+                self.assertNotEqual(self.validator.validate_schema(schema, candidate), [])
+
+    def test_protected_feature_binding_v2_is_bound_to_thn_test_without_legacy_registry(self):
+        self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
+        files = [{
+            "path": "thehairnarrative.com/server/protected-feature-bindings-v2.json",
+            "content": copy.deepcopy(THN_PROTECTED_FEATURE_BINDING),
+        }]
+
+        self.validator.validate_server_policy_files(
+            "thehairnarrative.com",
+            "test",
+            files,
+            expected_scope={
+                "tenantId": "thehairnarrative-com",
+                "draftId": "draft-thehairnarrative-com",
+            },
+        )
+
+        for domain, environment in (
+            ("other.example.com", "test"),
+            ("thehairnarrative.com", "production"),
+        ):
+            with self.subTest(domain=domain, environment=environment):
+                with self.assertRaises(self.validator.PolicyValidationError):
+                    self.validator.validate_server_policy_files(
+                        domain,
+                        environment,
+                        files,
+                        expected_scope={
+                            "tenantId": "thehairnarrative-com",
+                            "draftId": "draft-thehairnarrative-com",
+                        },
+                    )
 
     def test_validator_enforces_all_supported_keyword_families(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
@@ -138,6 +248,10 @@ class ServerPolicyValidationTest(unittest.TestCase):
         self.assertNotIn(sentinel, repr(raised.exception))
 
     def test_legacy_descriptors_are_closed_to_three_verified_canonical_hashes(self):
+        self.assertEqual(
+            {"auth-profile-registry.json", "integrations.json"},
+            self.validator.LEGACY_SERVER_FILES,
+        )
         self.assertEqual(
             {
                 ("music.lynxpardelle.com", "integrations.json"): {

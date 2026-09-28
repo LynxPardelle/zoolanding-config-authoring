@@ -14,6 +14,19 @@ from pathlib import Path
 SYNTHETIC_STRIPE_TEST_TOKEN = "sk_" + "test_SYNTHETIC1234"
 SYNTHETIC_STRIPE_LIVE_TOKEN = "sk_" + "live_SYNTHETIC1234"
 
+THN_PROTECTED_FEATURE_BINDING = {
+    "bindingId": "journal-v2",
+    "domain": "thehairnarrative.com",
+    "environment": "test",
+    "authProfileId": "journal-owner",
+    "featureId": "journal",
+    "hubId": "thehairnarrative-com-journal",
+    "serviceBindingId": "thn-journal-test-v2",
+    "authBasePath": "/auth-v2",
+    "contentHubBasePath": "/features/content-hub-v2",
+    "status": "active",
+}
+
 
 class Context:
     aws_request_id = "test-request"
@@ -239,6 +252,33 @@ class AuthoringHandlerTest(unittest.TestCase):
         })
         commerce["shipping"].pop("allowedCountries")
         return files
+
+    def thn_protected_feature_files(self):
+        return [
+            {
+                "path": "thehairnarrative.com/site-config.json",
+                "content": {
+                    "defaultPageId": "home",
+                    "routes": [{"path": "/", "pageId": "home"}],
+                },
+            },
+            {
+                "path": "thehairnarrative.com/home/page-config.json",
+                "content": {"rootIds": []},
+            },
+            {
+                "path": "thehairnarrative.com/server/protected-feature-bindings-v2.json",
+                "content": copy.deepcopy(THN_PROTECTED_FEATURE_BINDING),
+            },
+        ]
+
+    def authorize_thn(self):
+        self.test_authz_rule.update({
+            "roleArn": role_arn("draft-thn-test-deploy"),
+            "domains": ["thehairnarrative.com"],
+            "tenantId": "thehairnarrative-com",
+            "draftId": "draft-thehairnarrative-com",
+        })
 
     def seed_stored_package(self, version_id, files):
         prefix = self.handler.default_version_prefix(
@@ -626,6 +666,7 @@ class AuthoringHandlerTest(unittest.TestCase):
             "commerce.json": "server-commerce",
             "integration-bindings.json": "server-integration-bindings",
             "notification-policies.json": "server-notification-policies",
+            "protected-feature-bindings-v2.json": "server-protected-feature-bindings-v2",
         }
         for name, kind in expected.items():
             self.assertEqual(
@@ -653,6 +694,88 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "kind_mismatch")
         self.assertEqual(self.objects, {})
+
+    def test_protected_feature_binding_v2_is_stored_with_scope_kind_and_hash(self):
+        self.authorize_thn()
+        response = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "thehairnarrative.com",
+            "environment": "test",
+            "versionId": "journal-v2",
+            "files": self.thn_protected_feature_files(),
+        }, "draft-thn-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 200, response["body"])
+        metadata = self.items[("SITE#thehairnarrative.com", "METADATA")]
+        self.assertEqual(metadata["serverScope"], {
+            "tenantId": "thehairnarrative-com",
+            "draftId": "draft-thehairnarrative-com",
+        })
+        prefix = "sites/thehairnarrative.com/versions/journal-v2/"
+        descriptor_path = "thehairnarrative.com/server/protected-feature-bindings-v2.json"
+        self.assertEqual(
+            self.objects[f"{prefix}{descriptor_path}"],
+            THN_PROTECTED_FEATURE_BINDING,
+        )
+        manifest_entry = next(
+            entry
+            for entry in self.objects[f"{prefix}_manifest.json"]["files"]
+            if entry["path"] == descriptor_path
+        )
+        self.assertEqual(
+            manifest_entry["kind"],
+            "server-protected-feature-bindings-v2",
+        )
+        self.assertEqual(
+            manifest_entry["sha256"],
+            hashlib.sha256(
+                json.dumps(
+                    THN_PROTECTED_FEATURE_BINDING,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+        )
+
+    def test_publish_revalidates_protected_feature_binding_v2_before_pointer_movement(self):
+        self.authorize_thn()
+        upserted = self.handler.lambda_handler(event({
+            "action": "upsertDraft",
+            "domain": "thehairnarrative.com",
+            "environment": "test",
+            "versionId": "journal-v2",
+            "files": self.thn_protected_feature_files(),
+        }, "draft-thn-test-deploy"), Context())
+        self.assertEqual(upserted["statusCode"], 200, upserted["body"])
+
+        prefix = "sites/thehairnarrative.com/versions/journal-v2/"
+        descriptor_path = "thehairnarrative.com/server/protected-feature-bindings-v2.json"
+        stored = self.objects[f"{prefix}{descriptor_path}"]
+        stored["serviceBindingId"] = "unreviewed-binding"
+        manifest_entry = next(
+            entry
+            for entry in self.objects[f"{prefix}_manifest.json"]["files"]
+            if entry["path"] == descriptor_path
+        )
+        manifest_entry["sha256"] = hashlib.sha256(
+            json.dumps(stored, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        metadata_before = copy.deepcopy(self.items)
+
+        response = self.handler.lambda_handler(event({
+            "action": "publishDraft",
+            "domain": "thehairnarrative.com",
+            "environment": "test",
+            "versionId": "journal-v2",
+        }, "draft-thn-test-deploy"), Context())
+
+        self.assertEqual(response["statusCode"], 400)
+        self.assertEqual(parse(response)["error"], "stored_package_invalid")
+        self.assertEqual(self.items, metadata_before)
+        self.assertNotIn(
+            "publishedEnvironments",
+            self.items[("SITE#thehairnarrative.com", "METADATA")],
+        )
 
     def test_duplicate_package_paths_are_rejected_before_writes(self):
         files = self.draft_files()

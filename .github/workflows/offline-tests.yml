@@ -1,0 +1,48 @@
+name: Offline tests (no AWS)
+
+on:
+  push:
+    branches: ['codex/thn-cicd-offline']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  offline-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.13'
+      - name: Install test dependencies before disconnecting the network
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/offline-python"
+          "$RUNNER_TEMP/offline-python/bin/python" -m pip install --disable-pip-version-check boto3==1.43.84 tzdata==2026.3
+          "$RUNNER_TEMP/offline-python/bin/python" -m pip check
+      - name: Run the full unit suite with no network or inherited credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/offline-home"
+          sudo -- unshare --net -- env -i \
+            PATH="$PATH" HOME="$RUNNER_TEMP/offline-home" \
+            AWS_CONFIG_FILE=/dev/null AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+            AWS_EC2_METADATA_DISABLED=true AWS_DEFAULT_REGION=us-east-1 AWS_REGION=us-east-1 \
+            LOG_LEVEL=ERROR PYTHONDONTWRITEBYTECODE=1 \
+            "$RUNNER_TEMP/offline-python/bin/python" -m unittest discover -s tests -p 'test_*.py'
+      - name: Record validation scope
+        run: |
+          echo 'Full unit suite passed in an isolated network namespace, without cloud credentials.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'No deployment, AWS integration test, cache, or uploaded artifact was produced.' >> "$GITHUB_STEP_SUMMARY"

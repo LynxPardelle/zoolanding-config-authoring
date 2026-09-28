@@ -52,7 +52,7 @@ Each bucket contains rules for only its own environment. Production uses the cor
 
 ## Deploy
 
-`ConfigAuthoringFunction` uses the generated `.build/config-authoring` `CodeUri`. Run `python tools/build_lambda_artifact.py` before `sam validate` or `sam build`; the builder copies exactly three Python modules and four code-owned JSON schemas. CI verifies the same seven-file inventory. The builder rejects symbolic links, Windows junctions, and build paths whose resolved location escapes the repository before cleanup or inventory traversal. `.aws-samignore` is defense in depth, not artifact evidence.
+`ConfigAuthoringFunction` uses the generated `.build/config-authoring` `CodeUri`. Run `python tools/build_lambda_artifact.py` before `sam validate` or `sam build`; the builder copies exactly three Python modules and five code-owned JSON schemas. CI verifies the same eight-file inventory. The builder rejects symbolic links, Windows junctions, and build paths whose resolved location escapes the repository before cleanup or inventory traversal. `.aws-samignore` is defense in depth, not artifact evidence.
 
 Each credential-free validation job checks promotion provenance, runs tests, builds and normalizes the allowlisted SAM artifact, verifies its source-bound manifest, and publishes an immutable artifact ID, coordinated name, and outer-manifest SHA-256 as job outputs. The dependent OIDC job validates those outputs first, downloads only that artifact ID, independently verifies the outer digest, strict inner hashes, and exact transported file set, and then uses inline, fail-closed CloudFormation and Lambda-package checks. It does not check out the repository, install Python, or execute repository scripts. The complete GitHub API promotion-provenance check runs inline immediately before AWS credentials, and every action is commit-pinned; SAM CLI is fixed at `1.163.0`. A failed deploy-job rerun consumes the same validation-job outputs, so it does not rebuild or replace the reviewed artifact boundary.
 
@@ -66,6 +66,29 @@ The checked-in `samconfig.toml` includes only explicit `test` and `prod` deploym
 - `prod` uses the existing production table and bucket names.
 
 The checked-in deploy profiles use the parallel `system/deploy-authz-v2.json` key. Bootstrap and validate that object in the environment's private config bucket before deploying the new Lambda; missing or malformed authorization configuration denies every request. The legacy `system/deploy-authz.json` object remains untouched so the currently deployed role-name runtime and a protected code rollback keep their original contract.
+
+### Explicit AWS-observed TEST recovery
+
+`tools/aws_live_snapshot.py` provides the separate `AWS-live-snapshot/v1` operator contract. It does not replace an expired GitHub release, rebuild a ZIP, or weaken the current eight-file artifact verifier. Historical compatibility accepts only the reviewed seven-file ZIP, its fixed full source SHA, exact object/version digests, size, and per-file hashes. The original GitHub artifact is not claimed to exist.
+
+`Rollback Test` requires an explicit provenance mode and a reviewed current TEST tooling SHA plus the SHA-256 of the LF-normalized rollback workflow. `GitHub-release` remains the default and requires the original successful run, unexpired artifact by immutable ID, source SHA, and manifest digest. Both modes execute current tooling. The GitHub path reads historical source blobs only as data through `tools/verify_recorded_release.py`, then runs the unchanged eight-file verifier; it never checks out or executes historical release helpers. Missing historical files or provenance fail closed.
+
+The AWS mode has four operator operations; run `python tools/aws_live_snapshot.py --help` for the safe arguments:
+
+1. `observe` performs two complete read-only collections. It binds the account, region, exact existing TEST stack, logical/physical function mapping, Original and Processed templates, all six parameters, complete resource inventory, Lambda checksum/revision/configuration, version-specific S3 ZIP bytes and safe file inventory. Only fixed labels, counts and hashes are printed.
+2. `capture` requires the reviewed observation hash and an in-memory selection containing only `snapshotKey`. It conditionally creates one AES256-encrypted metadata record in the existing private run-scoped release prefix, reads back that exact object version, and repeats the baseline proof. It never uploads or rebuilds code. A post-write failure may leave an unaccepted metadata record; the tool neither retries nor deletes it.
+3. `plan` requires the approved private record hash and a selection containing exactly `snapshotKey` and `snapshotVersionId`. It re-reads that immutable record and the original ZIP, preserves the current configuration, and changes only the prior function's version-pinned `CodeUri`. Parameters use `UsePreviousValue`. Template, parameter, resource identity, IAM or non-code Lambda-configuration drift blocks recovery. A plan approved before a new deployment is not the fresh plan for recovering that deployment.
+4. `recover` additionally requires the fresh reviewed plan hash and a unique `recovery-{run}-{attempt}` name. It creates only an UPDATE change set, reuses the owning identity/parameter/no-removal/no-replacement reviewer, additionally permits only the approved Lambda's Code property, rechecks the exact live baseline and change-set ARN, then executes. Postchecks repeat exact version/ZIP verification and stack/Lambda readiness. A failed postcheck is a failure, never an automatic retry or restoration of authorization objects.
+
+AWS can update its managed runtime patch when function code is updated ([AWS runtime update modes](https://docs.aws.amazon.com/lambda/latest/dg/runtimes-update.html)). Recovery therefore distinguishes the provider-owned `RuntimeVersionConfig.RuntimeVersionArn` from user-controlled configuration. A patch difference between deployments is accepted only for the existing Python 3.13 ZIP function, valid same-region runtime ARNs with no error or extra metadata, and a live `GetRuntimeManagementConfig` result that exactly matches the unchanged processed template's `Auto` or `FunctionUpdate` mode. An omitted template setting means AWS's default `Auto` mode. A manual pin never receives this exception. Runtime family, architecture, role, environment, all other function fields, templates, parameters and resources must still match.
+
+The original private snapshot is not rewritten. Every full observation and fresh plan retains the actual current runtime ARN; a patch change during observation, review or immediately before execution still fails closed. The plan also binds the live runtime-management setting, rechecks it before execution and validates it after recovery. This restores only code, not an older AWS runtime patch. Missing read permission, an out-of-band runtime-management change, unknown provider fields or errors deny the operation without falling back to a looser comparison. No new permission is granted by this tool.
+
+Raw templates, operational selectors, object VersionIds, Lambda environment values and the private record remain in memory or the existing private S3 channel. Supply the closed selection through `CONFIG_TEST_RECOVERY_SELECTION_JSON`; the workflow consumes the TEST Environment secret of that name. Never put this selection in public workflow inputs, command-line arguments, files, logs, issue comments or GitHub artifacts. Capture prints the record version's hash, not its value; pass the exact version into the secret only through the approved private operator channel. Snapshot hashes are review bindings, not signatures or permission grants.
+
+The SDK and YAML parser are lazy-loaded operator-only dependencies (`boto3==1.43.81`, `botocore==1.43.81`, `PyYAML==6.0.2`); they are not packaged with the Lambda. Source/tooling pins are checked against committed bytes before the CLI contacts AWS. Network failures are sanitized, SDK requests use one total attempt, and wire/debug logging must remain disabled.
+
+Operational readiness requires the actual principal to read the exact prior object version and private snapshot version (`s3:GetObjectVersion`), inspect Original/Processed templates (`cloudformation:GetTemplate`), enumerate the existing stack (`cloudformation:ListStackResources`) and read runtime management for its exact function (`lambda:GetRuntimeManagementConfig`), in addition to the existing stack/Lambda reads and reviewed change-set permissions. Capture also needs the already-owned private-prefix conditional `PutObject` permission. Optional bucket-control introspection is not an added gate: the approved owning private bucket contract is reused, with exact owner/version readback. This tool never grants permissions, modifies IAM, touches production or authorization objects, changes retention/protection, or publishes a draft. Do not deploy the new code until the private capture, fresh consumer readiness and owning release approvals are complete.
 
 ### Private server-scope bootstrap
 
@@ -83,7 +106,7 @@ Plan from the authoring repository without writing AWS state:
 ```powershell
 python tools/bootstrap_server_scopes.py plan `
   --registry ..\zoolandingpage\docs\drafts-registry.json `
-  --expected-draft-count 12 `
+  --expected-draft-count 13 `
   --tenant-override zoositioweb.com.mx=zoosite `
   --profile ADMIN-AIM-CLI `
   --region us-east-1 `
@@ -91,7 +114,7 @@ python tools/bootstrap_server_scopes.py plan `
   --production-bucket zoolanding-config-payloads
 ```
 
-Review and retain only the plan's safe metadata: counts, SHA-256 values, bucket state, ETags, version IDs, lengths, and timestamps. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values. The initial plan must prove exactly 12 test scopes and rules, exactly 11 production scopes and rules, production as an exact subset of test, enforced bucket ownership, all four S3 public-access blocks, and the reviewed current scope and v2 authorization ETag/version/SHA-256 values when present. The expected draft count remains 12 because it reviews the complete registry before environment filtering. The plan reports `productionScopesSubsetOfTest`, whether the scope bytes happen to be stable across environments, and each environment's `scopeUpdateMode` as `create`, `idempotent`, or `append`.
+Review and retain only the plan's safe metadata: counts, SHA-256 values, bucket state, ETags, version IDs, lengths, and timestamps. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values. The initial plan must prove exactly 13 test scopes and rules, exactly 12 production scopes and rules, production as an exact subset of test, enforced bucket ownership, all four S3 public-access blocks, and the reviewed current scope and v2 authorization ETag/version/SHA-256 values when present. The expected draft count remains 13 because it reviews the complete registry before environment filtering. The plan reports `productionScopesSubsetOfTest`, whether the scope bytes happen to be stable across environments, and each environment's `scopeUpdateMode` as `create`, `idempotent`, or `append`.
 
 Use `apply --help` for the conditional write arguments. Apply test first with the exact plan hashes and reviewed current metadata. Use the literal `MISSING` triplet when the planned current scope does not exist, and the literal `MISSING` ETag/version pair when the planned v2 authorization object does not exist. Missing objects use `If-None-Match: *`; an unchanged scope is idempotent; an update uses `If-Match` only when it strictly appends canonical drafts without changing or removing any existing mapping. The scope is written first, the complete v2 authorization object is generated second, and both current and version-specific objects are read back exactly. A partial failure can therefore leave a new scope without a grant, never a grant without its scope. The tool reports prior v2 versions and hashes when they exist; the separate legacy authorization key is never a bootstrap or rollback target. It refuses an unknown or environment-mismatched bucket, disabled versioning, non-enforced ownership, incomplete public-access block, changed object metadata, unreviewed hashes, scope mutation/deletion, duplicate bindings, or non-exact OIDC trust.
 
@@ -102,13 +125,27 @@ Production requires this evidence chain, in order:
 3. Let `Deploy Test` finish successfully. Its credential-free validation job emits the exact artifact ID/name/digest handoff described above. The OIDC deploy job consumes only that handoff, packages the verified normalized bytes under a unique run prefix in the environment's private payload bucket, creates one deterministically named CloudFormation change set, waits for and describes that exact ARN, rejects removals and every `Replacement` value other than `False` or absent, then executes only that reviewed ARN. An exact CloudFormation no-change response is deleted and treated as a no-op.
 4. Dispatch `Deploy test draft` in one canonical draft repository after the authoring test run. This is the positive signed authorization canary; the unsigned endpoint probe must independently return `403`. The dispatch must run the current protected `test` tip, and that tip must remain an exact two-parent merge from the current `dev` tip with one merged `dev -> test` pull request and a merge tree identical to the `dev` tree.
 5. Run `verify-test` with the exact attempt-1 authoring test commit/run and canonical attempt-1 draft canary repository/run. The verifier re-collects and binds the active workflow paths and IDs, run IDs/attempts/status/conclusion/commit/path/event/timestamps, dispatch ref, merge commit/parents/tree, associated pull request repositories/branches/SHAs, current `dev` tip, stack `FunctionUrl`, its exact Lambda ARN plus `AWS_IAM`/`BUFFERED` URL configuration, current scope/authz S3 version IDs and hashes, canary timing, unsigned `403`, workflow artifact manifest, deployed Lambda ZIP bytes, and Lambda `CodeSha256`/revision to the source commit. Authoring completion, pull-request merge, the GitHub Environment `AUTHORING_ENDPOINT` update, and scope/authz last-modified times must all be strictly earlier than the canary run's `created_at`; equality fails closed because timestamp resolution does not prove ordering within the same instant. `AUTHORING_ENDPOINT` must equal the exact stack `FunctionUrl`. After all artifact work, the verifier immediately re-reads both run objects, the authoring and canary workflows, authoring `test` ref, canary `test`/`dev` refs and commit trees, associated pull request, endpoint value/timestamp, stack/resource, Lambda code and Function URL configuration, bucket controls, current scope/authz metadata and bytes, and unsigned denial; every final value must equal the initially validated snapshot. A concurrent rerun or any other drift aborts evidence emission. Correcting the variable after an old run cannot validate that run. Retain the safe evidence object and `evidenceSha256` outside the repository. Production `apply` requires those identifiers and the exact approved evidence hash, then re-collects the live evidence instead of trusting a saved claim. A canary-run artifact that records the endpoint at execution time is a stronger future binding and requires a separately promoted draft-workflow change.
-6. Only after that gate, enable production bucket versioning, read back `Enabled`, and apply the production bundle. Promote code only through `test -> main`; production requires the same exact tree rule, a unique successful `Deploy Test` run for the second parent, and that run's exact manifest-bound SAM artifact resolved by immutable artifact ID. Before creating production exposure, the OIDC job downloads the current live test Lambda ZIP and proves its `CodeSha256` and seven bytes equal the promoted artifact using the inline standard-library verifier. After packaging production, it parses the JSON template with duplicate-key rejection, validates the exact run-scoped S3 bucket and key, downloads that exact production ZIP, and requires its full `CodeSha256` and contents to equal the bound live test artifact before it creates the change set. It re-reads the test `CodeSha256` immediately before executing the reviewed change set. The post-deploy test/production `CodeSha256` comparison remains defense in depth.
+6. Only after that gate, enable production bucket versioning, read back `Enabled`, and apply the production bundle. Promote code only through `test -> main`; production requires the same exact tree rule, a unique successful `Deploy Test` run for the second parent, and that run's exact manifest-bound SAM artifact resolved by immutable artifact ID. Before creating production exposure, the OIDC job downloads the current live test Lambda ZIP and proves its `CodeSha256` and all eight files' bytes equal the promoted artifact using the inline standard-library verifier. After packaging production, it parses the JSON template with duplicate-key rejection, validates the exact run-scoped S3 bucket and key, downloads that exact production ZIP, and requires its full `CodeSha256` and contents to equal the bound live test artifact before it creates the change set. It re-reads the test `CodeSha256` immediately before executing the reviewed change set. The post-deploy test/production `CodeSha256` comparison remains defense in depth.
 
-Do not add lifecycle rules and do not delete versions. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values in evidence. GitHub workflow artifacts are retained for seven days so the production gate can inspect the exact tested build. S3 packaging uses a unique `system/deploy-artifacts/{commit}/{run}/{attempt}` prefix and currently has no automatic cleanup: the present seven raw source files total about 116,350 bytes, or about 0.116 GB per 1,000 runs before ZIP compression (excluding request charges and template overhead). Measure actual stored versions before budgeting; a prefix-scoped lifecycle policy remains a separate cost/rollback decision. The deployment workflows are the supported path; do not bypass their deterministic reviewed change-set flow with a direct `sam deploy` command.
+Do not add lifecycle rules and do not delete versions. Do not capture generated object bodies, GitHub variable dumps, IAM responses, credentials, or environment values in evidence. GitHub workflow artifacts are retained for seven days so the production gate can inspect the exact tested build. S3 packaging uses a unique `system/deploy-artifacts/{commit}/{run}/{attempt}` prefix and currently has no automatic cleanup: the present eight raw source files total about 132,353 bytes, or about 0.132 GB per 1,000 runs before ZIP compression (excluding request charges and template overhead). Measure actual stored versions before budgeting; a prefix-scoped lifecycle policy remains a separate cost/rollback decision. The deployment workflows are the supported path; do not bypass their deterministic reviewed change-set flow with a direct `sam deploy` command.
 
 Rollback uses `rollback --help` to copy an explicitly approved prior version back as a new conditional version. It never deletes or mutates historical versions. A scope-registry rollback is allowed only when the prior bytes are identical to the current canonical registry. An authorization rollback may restore earlier role ARNs, but its rules must still exactly cover every current canonical scope, AWS account, environment, domain, tenant/draft ID, and code-owned action. Legacy `roleName` or differently shaped authorization versions are intentionally not restorable. If only the Lambda/runtime release is faulty, roll back the stack or Lambda release while retaining the canonical authorization object. S3 versioning cost is driven by the full bytes retained for every version plus the associated S3 requests; calculate it from measured object sizes and version counts rather than assuming a fixed monthly amount.
 
 Scope removals, canonical ID changes, and tenant split/merge migrations are outside Phase 1. They require a separately reviewed migration and must not be represented as an append or rollback.
+
+### Isolated additive test onboarding
+
+For an explicitly reviewed single-draft onboarding, `plan` and `apply` accept `--add-domain` with exactly one canonical registry domain. This opt-in mode is test-only: it rejects production, multiple selectors and tenant overrides. Global commands without this flag retain their full-inventory verification and cross-owner failure; `verify-test` and rollback are unchanged.
+
+The operator validates the local registry and expected count, but reads GitHub Environment/OIDC metadata and IAM evidence only for the selected draft. It rejects a mismatched role before querying IAM. Both private test objects must already exist as exact canonical JSON with valid scope/grant mappings. Existing grants are structurally validated and preserved in memory, not re-certified against their repositories. The selected draft receives repository-derived IDs and the existing four canonical actions; collisions or conflicting/one-sided entries fail closed. No IAM/GitHub permissions or existing grants are changed.
+
+Use a separate ignored operator environment with `boto3==1.43.81` and `botocore==1.43.81` installed from HTTPS PyPI. These are lazy-loaded operator dependencies, not Lambda or CI dependencies. The isolated S3 body transport uses in-memory SDK bytes/streams and explicitly permits only one total SDK attempt; existing CLI metadata checks are reused. The global AWS CLI transport is unchanged. Do not enable SDK wire/debug logging, save private bodies or dump environment variables.
+
+For isolated plan, supply the existing registry, expected count, profile, region and test-bucket arguments plus `--add-domain`; omit `--production-bucket`. Review only the emitted safe counts, hashes, ETags, VersionIds and preservation results. For isolated apply, retain all existing approval arguments, use `--environment test`, repeat the same selector, and additionally pass `--expected-current-authz-sha256`. Both baseline ETag/VersionId/SHA-256 triples and both candidate hashes must match the reviewed plan. `MISSING` is not an isolated-onboarding baseline.
+
+An exact existing target produces a true no-op: neither object is written and no version is created. An addition inserts only the new sorted scope and appends the new authorization rule without reordering or reconstructing existing arrays. It writes scope first, rechecks the pair, then conditionally writes authz and reads both current/versioned results back. `If-Match` conditions ETag, not VersionId; version/hash rechecks do not make two S3 keys atomic. A race or failure can leave the new scope without its grant. Errors are sanitized and stop without automatic retry or repair; a one-sided state requires a separately reviewed recovery decision. Never restore or delete shared objects to force onboarding through.
+
+This tool is outside the Lambda artifact. Release its source through a feature-to-dev PR with successful CI and reviewed changes, then execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator, because that push starts a service deployment. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
 
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
@@ -165,6 +202,14 @@ The four generic policy descriptors are schema-validated and must share the exac
 {domain}/server/integration-bindings.json
 {domain}/server/notification-policies.json
 ```
+
+The closed TEST-only protected-feature descriptor is separate from those generic v1 policies:
+
+```text
+thehairnarrative.com/server/protected-feature-bindings-v2.json
+```
+
+It contains exactly the ten reviewed The Hair Narrative Journal binding fields, rejects unknown or omitted fields, and intentionally does not reuse or modify the grandfathered Zoosite auth registry. Config Authoring binds the package to the signed request's server scope, requires the descriptor's exact `domain=thehairnarrative.com` and `environment=test`, stores its immutable content hash in the version manifest, and repeats the same validation before publication. Its schema is byte-identical to the hub-owned canonical schema at SHA-256 `e2a3990fcd929377ef3dd8d4ffca411598ed410d8d1a0a7f1b0d61a51220c1ec`.
 
 The Commerce descriptor matches the published Commerce consumer contract. Its
 `payments` object requires `planChangePolicy` and `pausePolicy`; the legacy
@@ -257,3 +302,58 @@ sites/{domain}/versions/{versionId}/
 ```
 
 That layout is intentionally symmetrical with `drafts/{domain}/...` in the Angular workspace, which is served locally at `/drafts/...`. Shared domain-level variables, combos, and i18n act like shared components: they provide defaults for all pages and can be overridden per page.
+
+
+## THN production promotion and reviewed activation
+
+THN source promotion is separate from activation. The repository-scoped production
+selection has exactly `schemaVersion`, `mode`, `sourceSha`, `sourceTree`,
+`targetBaseSha`, and `mergeTree`; mode is `thn-source-only` and schema version is 1.
+The verifier checks the current source branch, both native merge parents, event
+before/after SHA, source tree and native merge tree. An absent, malformed or stale
+production selector fails before credentials. A selected promotion runs mandatory
+validation and omits AWS. Main-only source changes remain in the merged tree.
+
+The TEST selector suppresses AWS only for the exact reviewed THN promotion. With
+no TEST selector, the established automatic TEST merge/provenance path remains.
+A present invalid TEST selector fails. Production never uses that fallback.
+
+Manual activation requires the protected branch and a separate repository-scoped
+selection with exactly `schemaVersion: 1`, `mode: thn-reviewed-activation`, `sha`,
+`tree`, and `workflowSha256` (LF-normalized workflow bytes). This selection only
+binds source and operation; it does not approve AWS changes. `review` retains a
+native change set and reports its ARN and full inventory digest. `execute` must
+consume that same ARN and explicitly approved digest, with a fresh baseline and
+original/processed templates; it does not repackage or create another change set.
+
+A source-only, skipped deploy or review-only successful TEST run is not release
+provenance. Production requires the exact current TEST source and immutable
+artifact from a successful TEST deploy plus its post-deploy verification. No TEST
+account, QA writer mode or article data is copied to production.
+
+The production descriptor schema accepts the closed pair
+`environment=production` and `serviceBindingId=thn-journal-production-v2`; the
+existing TEST pair remains unchanged. No extra public descriptor field or new
+Lambda package member is introduced. Production uses canonical `production` in
+this repository; other services may map their SAM `prod` value explicitly.
+
+Production continues to require the exact merged TEST ancestry, a successful real
+Deploy Test deploy/smoke and its immutable manifest, then reads the live TEST Lambda
+ZIP. It publishes those identical bytes, never a new production build, and verifies
+the TEST/production code checksums afterwards. Manual TEST packaging accepts SAM's
+string or object CodeUri only for its exact bucket/current-run prefix and pins the
+object version. The native preview retains the existing nonreplacement reviewer.
+
+Activation remains blocked until the environment-specific private authorization
+object exists and exact operator role ARNs/scopes are verified, including the
+production owner binding and server descriptors. Authz configuration remains
+read-only. Compare real templates, stack status, package versions, deploy role,
+execution role/boundaries and authorization prerequisites using AWS CLI before any
+credential run. No generic production deploy permission is inferred from a green
+source-only check.
+
+### Retained production preview authority and expiry
+
+The protected production operation seals fresh live MAIN/TEST source, actual deployment/execution role identity and inline-policy hashes, and the native preview CreationTime. Execute is allowed for24hours from that native timestamp and repeats the authority checks at its mutation boundary. Authority tooling is transported and hashed separately from the unchanged trusted TEST Lambda ZIP. Current production execution-role identity is preserved. Newly attached managed policies or permissions boundaries require review before this closed role profile can activate.
+
+An expired or abandoned preview is cleaned by a separately approved operator. Capture `aws cloudformation describe-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn> --include-property-values`; compare the exact StackId, ChangeSetId, owned name prefix `zoolanding-`, CreationTime, reviewed full native inventory and AVAILABLE execution state with the saved review. Then delete that same reviewed ARN using `aws cloudformation delete-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn>`. Record the approval, inspected inventory and deletion result privately. Production stack/resources retain their identities.

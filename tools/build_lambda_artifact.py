@@ -33,6 +33,7 @@ RUNTIME_FILES = (
     Path("schemas/server-features/data-spaces.schema.json"),
     Path("schemas/server-features/integration-bindings.schema.json"),
     Path("schemas/server-features/notification-policies.schema.json"),
+    Path("schemas/server-features/protected-feature-bindings-v2.schema.json"),
     Path("zoolanding_lambda_common.py"),
 )
 
@@ -206,7 +207,7 @@ def verify_sam_build(build_root: Path, expected_source_commit: str) -> None:
     parsed = _strict_json_object(manifest_path)
     expected = artifact_manifest(build_root / "ConfigAuthoringFunction", expected_source_commit)
     if parsed != expected or manifest_path.read_bytes() != _canonical_json_bytes(expected):
-        raise ArtifactError("SAM build manifest differs from the exact seven-file artifact")
+        raise ArtifactError("SAM build manifest differs from the exact eight-file artifact")
 
 
 def verify_deployed_zip(artifact_root: Path, deployed_zip_path: Path, expected_code_sha256: str) -> None:
@@ -369,7 +370,7 @@ def parse_args() -> argparse.Namespace:
     mode.add_argument(
         "--write-sam-manifest",
         type=Path,
-        help="Write the exact seven-file manifest into a completed SAM build directory.",
+        help="Write the exact eight-file manifest into a completed SAM build directory.",
     )
     mode.add_argument(
         "--verify-sam-build",
