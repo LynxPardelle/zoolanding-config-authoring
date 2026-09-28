@@ -4,6 +4,7 @@ import importlib
 import json
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -85,6 +86,26 @@ class ServerPolicyValidationTest(unittest.TestCase):
         })
         self.validator.validate_server_policy_files("example.com", "test", files)
 
+    def test_schema_pin_accepts_checkout_line_endings_and_rejects_schema_mutation(self):
+        schema_path = SCHEMA_DIR / "protected-feature-bindings-v2.schema.json"
+        original_read_bytes = Path.read_bytes
+        lf_bytes = original_read_bytes(schema_path).replace(b"\r\n", b"\n")
+        for ending, fixture_bytes in (("LF", lf_bytes), ("CRLF", lf_bytes.replace(b"\n", b"\r\n"))):
+            with self.subTest(ending=ending), patch.object(
+                Path, "read_bytes",
+                lambda path: fixture_bytes if path == schema_path else original_read_bytes(path),
+            ):
+                self.test_protected_feature_binding_v2_schema_is_closed_and_exact()
+
+        mutated = lf_bytes.replace(b'"additionalProperties": false', b'"additionalProperties": true', 1)
+        self.assertNotEqual(mutated, lf_bytes)
+        for fixture_bytes in (mutated, mutated.replace(b"\n", b"\r\n"), lf_bytes.replace(b"\n", b"\r", 1)):
+            with self.subTest(rejected_hash=hashlib.sha256(fixture_bytes).hexdigest()), patch.object(
+                Path, "read_bytes",
+                lambda path: fixture_bytes if path == schema_path else original_read_bytes(path),
+            ), self.assertRaises(AssertionError):
+                self.test_protected_feature_binding_v2_schema_is_closed_and_exact()
+
     def test_protected_feature_binding_v2_schema_is_closed_and_exact(self):
         self.assertIsNotNone(self.validator, "server_policy_validation.py must exist")
         schema_path = SCHEMA_DIR / "protected-feature-bindings-v2.schema.json"
@@ -93,8 +114,8 @@ class ServerPolicyValidationTest(unittest.TestCase):
 
         self.validator.assert_supported_schema(schema)
         self.assertEqual(
-            hashlib.sha256(schema_path.read_bytes()).hexdigest(),
-            "e2a3990fcd929377ef3dd8d4ffca411598ed410d8d1a0a7f1b0d61a51220c1ec",
+            hashlib.sha256(schema_path.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
+            "9275e184d94c7fd75c92b9359699ec2d693a2378e524910e4d3d0f93be3079ab",
         )
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(set(THN_PROTECTED_FEATURE_BINDING), set(schema["required"]))

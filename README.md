@@ -302,3 +302,58 @@ sites/{domain}/versions/{versionId}/
 ```
 
 That layout is intentionally symmetrical with `drafts/{domain}/...` in the Angular workspace, which is served locally at `/drafts/...`. Shared domain-level variables, combos, and i18n act like shared components: they provide defaults for all pages and can be overridden per page.
+
+
+## THN production promotion and reviewed activation
+
+THN source promotion is separate from activation. The repository-scoped production
+selection has exactly `schemaVersion`, `mode`, `sourceSha`, `sourceTree`,
+`targetBaseSha`, and `mergeTree`; mode is `thn-source-only` and schema version is 1.
+The verifier checks the current source branch, both native merge parents, event
+before/after SHA, source tree and native merge tree. An absent, malformed or stale
+production selector fails before credentials. A selected promotion runs mandatory
+validation and omits AWS. Main-only source changes remain in the merged tree.
+
+The TEST selector suppresses AWS only for the exact reviewed THN promotion. With
+no TEST selector, the established automatic TEST merge/provenance path remains.
+A present invalid TEST selector fails. Production never uses that fallback.
+
+Manual activation requires the protected branch and a separate repository-scoped
+selection with exactly `schemaVersion: 1`, `mode: thn-reviewed-activation`, `sha`,
+`tree`, and `workflowSha256` (LF-normalized workflow bytes). This selection only
+binds source and operation; it does not approve AWS changes. `review` retains a
+native change set and reports its ARN and full inventory digest. `execute` must
+consume that same ARN and explicitly approved digest, with a fresh baseline and
+original/processed templates; it does not repackage or create another change set.
+
+A source-only, skipped deploy or review-only successful TEST run is not release
+provenance. Production requires the exact current TEST source and immutable
+artifact from a successful TEST deploy plus its post-deploy verification. No TEST
+account, QA writer mode or article data is copied to production.
+
+The production descriptor schema accepts the closed pair
+`environment=production` and `serviceBindingId=thn-journal-production-v2`; the
+existing TEST pair remains unchanged. No extra public descriptor field or new
+Lambda package member is introduced. Production uses canonical `production` in
+this repository; other services may map their SAM `prod` value explicitly.
+
+Production continues to require the exact merged TEST ancestry, a successful real
+Deploy Test deploy/smoke and its immutable manifest, then reads the live TEST Lambda
+ZIP. It publishes those identical bytes, never a new production build, and verifies
+the TEST/production code checksums afterwards. Manual TEST packaging accepts SAM's
+string or object CodeUri only for its exact bucket/current-run prefix and pins the
+object version. The native preview retains the existing nonreplacement reviewer.
+
+Activation remains blocked until the environment-specific private authorization
+object exists and exact operator role ARNs/scopes are verified, including the
+production owner binding and server descriptors. Authz configuration remains
+read-only. Compare real templates, stack status, package versions, deploy role,
+execution role/boundaries and authorization prerequisites using AWS CLI before any
+credential run. No generic production deploy permission is inferred from a green
+source-only check.
+
+### Retained production preview authority and expiry
+
+The protected production operation seals fresh live MAIN/TEST source, actual deployment/execution role identity and inline-policy hashes, and the native preview CreationTime. Execute is allowed for24hours from that native timestamp and repeats the authority checks at its mutation boundary. Authority tooling is transported and hashed separately from the unchanged trusted TEST Lambda ZIP. Current production execution-role identity is preserved. Newly attached managed policies or permissions boundaries require review before this closed role profile can activate.
+
+An expired or abandoned preview is cleaned by a separately approved operator. Capture `aws cloudformation describe-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn> --include-property-values`; compare the exact StackId, ChangeSetId, owned name prefix `zoolanding-`, CreationTime, reviewed full native inventory and AVAILABLE execution state with the saved review. Then delete that same reviewed ARN using `aws cloudformation delete-change-set --stack-name <exact-owned-production-stack> --change-set-name <reviewed-native-arn>`. Record the approval, inspected inventory and deletion result privately. Production stack/resources retain their identities.

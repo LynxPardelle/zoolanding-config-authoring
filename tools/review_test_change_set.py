@@ -60,6 +60,17 @@ def review_change_set(
     if expected_change_set_type not in {"CREATE", "UPDATE"}:
         raise ChangeSetReviewError("change_set_type_invalid")
     _require_change_set_arn(expected_change_set_arn, expected_change_set_name)
+    # Review the complete root response. IncludeNestedStacks is only a request
+    # flag: a flat CDK preview can set it without containing any child changes.
+    if (change_set.get("NextToken") or change_set.get("ParentChangeSetId")
+            or change_set.get("RootChangeSetId")):
+        raise ChangeSetReviewError("change_set_description_incomplete_or_nested")
+    if "StackId" in change_set:
+        namespace = ":".join(expected_change_set_arn.split(":")[:5])
+        stack_pattern = rf"{re.escape(namespace)}:stack/{re.escape(expected_stack_name)}/[A-Za-z0-9-]+"
+        stack_id = change_set["StackId"]
+        if not isinstance(stack_id, str) or re.fullmatch(stack_pattern, stack_id) is None:
+            raise ChangeSetReviewError("change_set_identity_invalid")
     if (
         change_set.get("StackName") != expected_stack_name
         or change_set.get("ChangeSetName") != expected_change_set_name
@@ -99,6 +110,9 @@ def review_change_set(
         resource = change.get("ResourceChange")
         if not isinstance(resource, dict):
             raise ChangeSetReviewError("change_set_resource_invalid")
+        if (resource.get("ChangeSetId") is not None
+                or resource.get("ResourceType") == "AWS::CloudFormation::Stack"):
+            raise ChangeSetReviewError("nested_resource_change_forbidden")
         if resource.get("Action") not in {"Add", "Modify"}:
             raise ChangeSetReviewError("stateful_resource_change_forbidden")
         if resource.get("Replacement") not in (None, "False"):
