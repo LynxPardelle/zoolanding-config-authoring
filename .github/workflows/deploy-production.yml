@@ -126,23 +126,28 @@ jobs:
               and isinstance(run.get("id"), int)
               and run.get("id") >= 1
           ]
-          if len(matches) != 1 or not re.fullmatch(r"[a-f0-9]{40}", expected_sha):
+          if not re.fullmatch(r"[a-f0-9]{40}", expected_sha):
               raise SystemExit("exact promoted test commit has no unique successful Deploy Test run")
           # A green code-only promotion or review-only run is not deployed evidence.
           import subprocess
-          selected=matches[0]
-          job_response=subprocess.run(["gh","api",f"repos/{expected_repository}/actions/runs/{selected['id']}/attempts/{selected['run_attempt']}/jobs","-f","per_page=100","--method","GET"],capture_output=True,text=True)
-          if job_response.returncode: raise SystemExit("test_deployment_job_unavailable")
-          job_payload=json.loads(job_response.stdout)
-          jobs=job_payload.get("jobs")
-          if not isinstance(jobs,list) or job_payload.get("total_count") != len(jobs):
-              raise SystemExit("test_deployment_job_unavailable")
-          deployed=[job for job in jobs if job.get("name")=="deploy" and job.get("status")=="completed"
-              and job.get("conclusion")=="success" and job.get("head_sha")==expected_sha
-              and job.get("run_id")==selected["id"] and isinstance(job.get("steps"),list)
-              and all(any(step.get("name")==name and step.get("status")=="completed" and step.get("conclusion")=="success"
-                for step in job["steps"]) for name in ("Post-deploy smoke","Record immutable release coordinates"))]
-          if len(deployed)!=1: raise SystemExit("test_deployment_job_unavailable")
+          deployed_matches = []
+          for selected in matches:
+              job_response=subprocess.run(["gh","api",f"repos/{expected_repository}/actions/runs/{selected['id']}/attempts/{selected['run_attempt']}/jobs","-f","per_page=100","--method","GET"],capture_output=True,text=True)
+              if job_response.returncode: raise SystemExit("test_deployment_job_unavailable")
+              job_payload=json.loads(job_response.stdout)
+              jobs=job_payload.get("jobs")
+              if not isinstance(jobs,list) or job_payload.get("total_count") != len(jobs):
+                  raise SystemExit("test_deployment_job_unavailable")
+              deployed=[job for job in jobs if job.get("name")=="deploy" and job.get("status")=="completed"
+                  and job.get("conclusion")=="success" and job.get("head_sha")==expected_sha
+                  and job.get("run_id")==selected["id"] and isinstance(job.get("steps"),list)
+                  and all(any(step.get("name")==name and step.get("status")=="completed" and step.get("conclusion")=="success"
+                    for step in job["steps"]) for name in ("Post-deploy smoke","Record immutable release coordinates"))]
+              if len(deployed)>1: raise SystemExit("test_deployment_job_unavailable")
+              if len(deployed)==1: deployed_matches.append(selected)
+          matches = deployed_matches
+          if len(matches) != 1:
+              raise SystemExit("exact promoted test commit has no unique successful deployed Deploy Test run")
           output_path.write_text(
               f"test_run_id={matches[0]['id']}\n"
               f"test_run_attempt={matches[0]['run_attempt']}\n"
