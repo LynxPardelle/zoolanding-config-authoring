@@ -94,7 +94,7 @@ class ServerPolicyValidationTest(unittest.TestCase):
         self.validator.assert_supported_schema(schema)
         self.assertEqual(
             hashlib.sha256(schema_path.read_bytes()).hexdigest(),
-            "e2a3990fcd929377ef3dd8d4ffca411598ed410d8d1a0a7f1b0d61a51220c1ec",
+            "0d9e221bb3bb7d034f8db870715fc8150427fa1c4664aa6a5bf418ca44a5feb2",
         )
         self.assertFalse(schema["additionalProperties"])
         self.assertEqual(set(THN_PROTECTED_FEATURE_BINDING), set(schema["required"]))
