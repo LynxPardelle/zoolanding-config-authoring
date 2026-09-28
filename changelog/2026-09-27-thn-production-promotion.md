@@ -39,3 +39,14 @@ summary bytes remain unchanged.
   baseline checks. No template, runtime ZIP, IAM permission or AWS resource changed.
 - Seven standard-library regression tests execute both real workflow blocks; the
   failing cases first reproduced the gap and passed after the narrow guard fix.
+
+## Explicit legacy review fixture event
+
+- A protected manual review exposed a legacy test inheriting workflow_dispatch
+  from its runner. Its generic nonreplacement fixture was correctly rejected by
+  the strict Code-only guard before any AWS deployment.
+- The legacy inline test helper now explicitly uses push. A regression runs the
+  real legacy review cases under both parent events and preserves the caller's
+  environment; separate manual Code-only tests retain their explicit events.
+- All 298 tests pass in a clean declared-dependency environment under both push
+  and workflow_dispatch. Workflow, runtime handler and template bytes are unchanged.

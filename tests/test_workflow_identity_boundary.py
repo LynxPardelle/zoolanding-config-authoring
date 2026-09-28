@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -8,6 +9,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 import zipfile
 
 
@@ -53,6 +55,7 @@ def run_inline_python(code: str, *args: str) -> subprocess.CompletedProcess[str]
     return subprocess.run(
         [sys.executable, "-c", code, *args],
         cwd=ROOT,
+        env={**os.environ, "GITHUB_EVENT_NAME": "push"},
         capture_output=True,
         text=True,
         check=False,
@@ -60,6 +63,14 @@ def run_inline_python(code: str, *args: str) -> subprocess.CompletedProcess[str]
 
 
 class WorkflowIdentityBoundaryTest(unittest.TestCase):
+    def test_legacy_reviewer_fixture_is_independent_of_parent_workflow_event(self):
+        for parent_event in ("push", "workflow_dispatch"):
+            with self.subTest(parent_event=parent_event), patch.dict(
+                os.environ, {"GITHUB_EVENT_NAME": parent_event}
+            ):
+                self.test_inline_change_set_reviewer_is_executable_and_fail_closed()
+                self.assertEqual(os.environ["GITHUB_EVENT_NAME"], parent_event)
+
     def test_documentation_records_the_artifact_identity_boundary(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         changelog = (ROOT / "changelog" / "2026-07.md").read_text(encoding="utf-8")
