@@ -19,3 +19,5 @@ summary bytes remain unchanged.
 - Transport and hash-check the strict activation parser outside the unchanged eight-file Lambda payload. The deploy job uses this sealed helper without requiring a checkout.
 - Keep the exact twelve-file outer transport and the unchanged ten-file build inventory; production verifies the promoted TEST helper against reviewed source.
 - Reproduce the previous missing-module failure in an isolated artifact directory; verify successful parsing and rejection of duplicate selectors, missing helpers and substituted helper bytes before credentials.
+
+- CI dependency correction: the new transport regressions extract unique literal workflow blocks using only the Python standard library. They no longer inherit PyYAML from a local development environment. Both modules pass with site-packages disabled (`python -S`), preserving the actual isolated parser/operator commands and hash-substitution rejection.

@@ -46,11 +46,16 @@ class NativeAuthorityTests(unittest.TestCase):
    valid=subprocess.run([sys.executable,'-c',script],cwd=root,env=env,capture_output=True,text=True);self.assertEqual(valid.returncode,0,valid.stderr)
 
  def test_test_transport_runs_actual_precredential_parser_without_checkout(self):
-  import os,re,shutil,subprocess,sys,tempfile,yaml
-  workflow=yaml.safe_load((ROOT/'.github/workflows/deploy-test.yml').read_text(encoding='utf-8'))
-  upload=next(step for step in workflow['jobs']['validate']['steps'] if step.get('id')=='upload')
-  names={Path(line.strip()).name for line in upload['with']['path'].splitlines() if line.strip().endswith('.py')}
-  script=next(step['with']['script'] for step in workflow['jobs']['deploy']['steps'] if 'ACTIVATION_SELECTION_JSON' in step.get('env',{}))
+  import os,re,shutil,subprocess,sys,tempfile
+  workflow=(ROOT/'.github/workflows/deploy-test.yml').read_text(encoding='utf-8')
+  self.assertEqual(workflow.count('      - name: Upload exact validated artifact'),1)
+  self.assertEqual(workflow.count('\n  deploy:'),1)
+  upload=workflow.split('      - name: Upload exact validated artifact',1)[1].split('\n      - name:',1)[0].split('\n  deploy:',1)[0]
+  names={Path(name).name for name in re.findall(r'^\s+(\.aws-sam/[A-Za-z0-9_.-]+\.py)$',upload,re.MULTILINE)}
+  expected={'native_release_authority.py'}
+  self.assertEqual(names,expected)
+  script=workflow.split('\n  deploy:',1)[1]
+  self.assertEqual(len(re.findall(r"execFileSync\('python3', \['-c', '([^']+)'\]",script)),1)
   command=re.search(r"execFileSync\('python3', \['-c', '([^']+)'\]",script).group(1)
   with tempfile.TemporaryDirectory() as temp:
    root=Path(temp);(root/'.aws-sam').mkdir()
@@ -69,12 +74,15 @@ class NativeAuthorityTests(unittest.TestCase):
    (root/'.aws-sam/native_release_authority.py').unlink();self.assertNotEqual(run().returncode,0)
 
  def test_test_authority_digest_rejects_substituted_helper_before_credentials(self):
-  import hashlib,os,shutil,subprocess,tempfile,yaml
-  workflow=yaml.safe_load((ROOT/'.github/workflows/deploy-test.yml').read_text(encoding='utf-8'))
-  steps=workflow['jobs']['deploy']['steps']
-  verify=next(step for step in steps if step.get('name') in ['Verify validated build artifact','Verify and normalize exact validated artifact'])
-  seal=next(line.strip() for line in verify['run'].splitlines() if 'EXPECTED_AUTHORITY_DIGEST' in line and 'sha256sum --check' in line)
-  self.assertLess(steps.index(verify),next(i for i,step in enumerate(steps) if 'configure-aws-credentials' in step.get('uses','')))
+  import hashlib,os,shutil,subprocess,tempfile
+  workflow=(ROOT/'.github/workflows/deploy-test.yml').read_text(encoding='utf-8').split('\n  deploy:',1)[1]
+  marker='      - name: Verify validated build artifact' if '      - name: Verify validated build artifact' in workflow else '      - name: Verify and normalize exact validated artifact'
+  self.assertEqual(workflow.count(marker),1)
+  verify=workflow.split(marker,1)[1].split('\n      - ',1)[0]
+  seals=[line.strip() for line in verify.splitlines() if 'EXPECTED_AUTHORITY_DIGEST' in line and 'sha256sum --check' in line]
+  self.assertEqual(len(seals),1)
+  seal=seals[0]
+  self.assertLess(workflow.index(marker),workflow.index('aws-actions/configure-aws-credentials'))
   with tempfile.TemporaryDirectory() as temp:
    root=Path(temp);(root/'.aws-sam').mkdir();helper=root/'.aws-sam/native_release_authority.py';helper.write_bytes((ROOT/'tools/native_release_authority.py').read_bytes())
    env={**os.environ,'EXPECTED_AUTHORITY_DIGEST':hashlib.sha256(helper.read_bytes()).hexdigest()}
