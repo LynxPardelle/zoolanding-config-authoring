@@ -60,16 +60,16 @@ class AuthoringHandlerTest(unittest.TestCase):
         os.environ["DEPLOY_AUTHZ_CONFIG_S3_KEY"] = "system/deploy-authz-v2.json"
         os.environ["ENVIRONMENT_NAME"] = "test"
         self.test_authz_rule = {
-            "roleArn": role_arn("draft-pamela-test-deploy"),
-            "domains": ["pamelabetancourt.com"],
+            "roleArn": role_arn("draft-example-test-deploy"),
+            "domains": ["example.com"],
             "environments": ["test"],
             "tenantId": "tenant-example",
             "draftId": "draft-example",
             "actions": ["createSite", "upsertDraft", "publishDraft", "getSite"],
         }
         self.production_authz_rule = {
-            "roleArn": role_arn("draft-pamela-production-deploy"),
-            "domains": ["pamelabetancourt.com"],
+            "roleArn": role_arn("draft-example-production-deploy"),
+            "domains": ["example.com"],
             "environments": ["production"],
             "tenantId": "tenant-example",
             "draftId": "draft-example",
@@ -120,15 +120,15 @@ class AuthoringHandlerTest(unittest.TestCase):
     def draft_files(self):
         return [
             {
-                "path": "pamelabetancourt.com/site-config.json",
+                "path": "example.com/site-config.json",
                 "content": {
                     "defaultPageId": "default",
-                    "aliases": ["pamelabetancourt.com"],
+                    "aliases": ["example.com"],
                     "environments": {
                         "test": {
                             "aliases": [
-                                "test.pamelabetancourt.com",
-                                "test.pamelabetancourt.zoolandingpage.com.mx",
+                                "test.example.com",
+                                "test.example.zoolandingpage.com.mx",
                             ]
                         }
                     },
@@ -136,7 +136,7 @@ class AuthoringHandlerTest(unittest.TestCase):
                 },
             },
             {
-                "path": "pamelabetancourt.com/default/page-config.json",
+                "path": "example.com/default/page-config.json",
                 "content": {"rootIds": []},
             },
         ]
@@ -163,7 +163,7 @@ class AuthoringHandlerTest(unittest.TestCase):
         return [
             {
                 "hubId": f"hub-{index}",
-                "ownerDraftDomain": "pamelabetancourt.com",
+                "ownerDraftDomain": "example.com",
                 "source": "primary",
                 "routeBasePath": f"/blog-{index}",
                 "listPath": f"/blog-{index}",
@@ -181,14 +181,14 @@ class AuthoringHandlerTest(unittest.TestCase):
             / "fixtures/server-features/valid/example.com/server/notification-policies.json"
         )
         notification = json.loads(fixture_path.read_text(encoding="utf-8"))
-        notification["scope"]["domain"] = "pamelabetancourt.com"
+        notification["scope"]["domain"] = "example.com"
         notification["policies"][0]["status"] = "active"
         binding_path = (
             Path(__file__).resolve().parent
             / "fixtures/server-features/valid/example.com/server/integration-bindings.json"
         )
         bindings = json.loads(binding_path.read_text(encoding="utf-8"))
-        bindings["scope"]["domain"] = "pamelabetancourt.com"
+        bindings["scope"]["domain"] = "example.com"
         bindings["bindings"].append({
             "id": "smtp-primary",
             "provider": "email.smtp",
@@ -200,11 +200,11 @@ class AuthoringHandlerTest(unittest.TestCase):
         })
         return self.draft_files() + [
             {
-                "path": "pamelabetancourt.com/server/integration-bindings.json",
+                "path": "example.com/server/integration-bindings.json",
                 "content": bindings,
             },
             {
-                "path": "pamelabetancourt.com/server/notification-policies.json",
+                "path": "example.com/server/notification-policies.json",
                 "content": notification,
             },
         ]
@@ -217,21 +217,21 @@ class AuthoringHandlerTest(unittest.TestCase):
         bindings = json.loads(
             (fixture_dir / "integration-bindings.json").read_text(encoding="utf-8")
         )
-        bindings["scope"]["domain"] = "pamelabetancourt.com"
+        bindings["scope"]["domain"] = "example.com"
         commerce = json.loads(
             (fixture_dir / "commerce.json").read_text(encoding="utf-8")
         )
-        commerce["scope"]["domain"] = "pamelabetancourt.com"
+        commerce["scope"]["domain"] = "example.com"
         # Keep this integration test on the generic descriptor boundary. Legacy
         # auth registries have a separate closed compatibility manifest.
         commerce["commerce"]["adminAccess"] = {"mode": "none"}
         return self.draft_files() + [
             {
-                "path": "pamelabetancourt.com/server/integration-bindings.json",
+                "path": "example.com/server/integration-bindings.json",
                 "content": bindings,
             },
             {
-                "path": "pamelabetancourt.com/server/commerce.json",
+                "path": "example.com/server/commerce.json",
                 "content": commerce,
             },
         ]
@@ -282,7 +282,7 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def seed_stored_package(self, version_id, files):
         prefix = self.handler.default_version_prefix(
-            "pamelabetancourt.com", version_id
+            "example.com", version_id
         )
         manifest_files = []
         for file in sorted(files, key=lambda item: item["path"]):
@@ -297,16 +297,16 @@ class AuthoringHandlerTest(unittest.TestCase):
             })
         self.objects[f"{prefix}_manifest.json"] = {
             "version": 1,
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": version_id,
             "files": manifest_files,
         }
 
-    def upsert(self, role_name="draft-pamela-test-deploy", version_id="v1", environment_name="test"):
+    def upsert(self, role_name="draft-example-test-deploy", version_id="v1", environment_name="test"):
         return self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": environment_name,
             "versionId": version_id,
             "files": self.draft_files(),
@@ -315,7 +315,7 @@ class AuthoringHandlerTest(unittest.TestCase):
     def test_rejects_unsigned_write(self):
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "files": self.draft_files(),
         }), Context())
@@ -326,8 +326,8 @@ class AuthoringHandlerTest(unittest.TestCase):
         os.environ.pop("DEPLOY_AUTHZ_CONFIG_S3_KEY", None)
         os.environ["DEPLOY_AUTHZ_CONFIG_JSON"] = json.dumps([
             {
-                "roleArn": role_arn("draft-pamela-test-deploy"),
-                "domains": ["pamelabetancourt.com"],
+                "roleArn": role_arn("draft-example-test-deploy"),
+                "domains": ["example.com"],
                 "environments": ["test"],
                 "tenantId": "tenant-example",
                 "draftId": "draft-example",
@@ -345,8 +345,8 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.handler = importlib.reload(self.handler)
         self.handler.load_json_from_s3 = lambda _bucket, _key: [
             {
-                "roleArn": role_arn("draft-pamela-test-deploy"),
-                "domains": ["pamelabetancourt.com"],
+                "roleArn": role_arn("draft-example-test-deploy"),
+                "domains": ["example.com"],
                 "environments": ["test"],
                 "tenantId": "tenant-example",
                 "draftId": "draft-example",
@@ -356,7 +356,7 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         rules = self.handler._load_deploy_authz_config()
 
-        self.assertEqual(rules[0]["roleArn"], role_arn("draft-pamela-test-deploy"))
+        self.assertEqual(rules[0]["roleArn"], role_arn("draft-example-test-deploy"))
 
     def test_upsert_does_not_mutate_public_alias_metadata_or_records(self):
         response = self.upsert()
@@ -364,39 +364,39 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         self.assertEqual(response["statusCode"], 200)
         self.assertTrue(body["ok"])
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
-        self.assertEqual(metadata["updatedBy"], "draft-pamela-test-deploy")
+        metadata = self.items[("SITE#example.com", "METADATA")]
+        self.assertEqual(metadata["updatedBy"], "draft-example-test-deploy")
         self.assertNotIn("aliases", metadata)
         self.assertNotIn("environmentAliases", metadata)
         self.assertFalse(any(pk.startswith("ALIAS#") for pk, _sk in self.items))
 
     def test_upsert_preserves_existing_public_alias_metadata(self):
-        self.items[("SITE#pamelabetancourt.com", "METADATA")] = {
-            "pk": "SITE#pamelabetancourt.com",
+        self.items[("SITE#example.com", "METADATA")] = {
+            "pk": "SITE#example.com",
             "sk": "METADATA",
             "type": "site-metadata",
             "version": 1,
-            "domain": "pamelabetancourt.com",
-            "aliases": ["www.pamelabetancourt.com"],
-            "environmentAliases": {"test": ["old-test.pamelabetancourt.com"]},
+            "domain": "example.com",
+            "aliases": ["www.example.com"],
+            "environmentAliases": {"test": ["old-test.example.com"]},
             "lifecycle": {"status": "active"},
         }
 
         response = self.upsert()
 
         self.assertEqual(response["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
-        self.assertEqual(metadata["aliases"], ["www.pamelabetancourt.com"])
-        self.assertEqual(metadata["environmentAliases"], {"test": ["old-test.pamelabetancourt.com"]})
+        metadata = self.items[("SITE#example.com", "METADATA")]
+        self.assertEqual(metadata["aliases"], ["www.example.com"])
+        self.assertEqual(metadata["environmentAliases"], {"test": ["old-test.example.com"]})
 
     def test_publish_on_create_is_rejected_before_storage(self):
         response = self.handler.lambda_handler(event({
             "action": "createSite",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "publishOnCreate": True,
             "files": self.draft_files(),
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(self.objects, {})
@@ -404,8 +404,8 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_authorization_rules_require_every_scope(self):
         complete_rule = {
-            "roleArn": role_arn("draft-pamela-test-deploy"),
-            "domains": ["pamelabetancourt.com"],
+            "roleArn": role_arn("draft-example-test-deploy"),
+            "domains": ["example.com"],
             "environments": ["test"],
             "tenantId": "tenant-example",
             "draftId": "draft-example",
@@ -422,10 +422,10 @@ class AuthoringHandlerTest(unittest.TestCase):
     def test_authorization_rejects_same_role_name_from_another_account(self):
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "files": self.draft_files(),
-        }, "draft-pamela-test-deploy", account_id="999999999999"), Context())
+        }, "draft-example-test-deploy", account_id="999999999999"), Context())
 
         self.assertEqual(response["statusCode"], 401)
 
@@ -443,7 +443,7 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_authorization_rejects_all_wildcards(self):
         self.authz_rules = [{
-            "roleArn": role_arn("draft-pamela-test-deploy"),
+            "roleArn": role_arn("draft-example-test-deploy"),
             "domains": ["*"],
             "environments": ["*"],
             "tenantId": "tenant-example",
@@ -462,7 +462,7 @@ class AuthoringHandlerTest(unittest.TestCase):
         scenarios = []
 
         extra = copy.deepcopy(valid)
-        extra["roleName"] = "draft-pamela-test-deploy"
+        extra["roleName"] = "draft-example-test-deploy"
         scenarios.append([extra])
 
         plural_role = copy.deepcopy(valid)
@@ -472,7 +472,7 @@ class AuthoringHandlerTest(unittest.TestCase):
         for field, value in (
             ("actions", ["upsertDraft", "*"]),
             ("actions", ["upsertDraft", "deleteEverything"]),
-            ("domains", ["pamelabetancourt.com", "other.example.com"]),
+            ("domains", ["example.com", "other.example.com"]),
             ("environments", ["test", "production"]),
         ):
             malformed = copy.deepcopy(valid)
@@ -497,12 +497,12 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_rejects_noncanonical_domain_forms(self):
         for domain in (
-            "pamelabetancourt.com:443",
-            "pamelabetancourt.com/",
-            "PAMELABETANCOURT.COM",
-            "pamelabetancourt.com.",
-            " pamelabetancourt.com",
-            "pamelabetancourt.com ",
+            "example.com:443",
+            "example.com/",
+            "EXAMPLE.COM",
+            "example.com.",
+            " example.com",
+            "example.com ",
             "con.example.com",
         ):
             with self.subTest(domain=domain):
@@ -513,35 +513,35 @@ class AuthoringHandlerTest(unittest.TestCase):
                     "domain": domain,
                     "environment": "test",
                     "files": self.draft_files(),
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(self.objects, {})
                 self.assertEqual(self.items, {})
 
     def test_rejects_paths_that_are_not_strict_posix_json_children(self):
         invalid_paths = (
-            "pamelabetancourt.com/../escape.json",
-            "pamelabetancourt.com/./page.json",
-            "pamelabetancourt.com//page.json",
-            "pamelabetancourt.com\\page.json",
-            "pamelabetancourt.com/page:stream.json",
-            "pamelabetancourt.com/\x00page.json",
-            "pamelabetancourt.com/page.txt",
-            "/pamelabetancourt.com/page.json",
-            "C:/pamelabetancourt.com/page.json",
-            "pamelabetancourt.com/CON.json",
-            "pamelabetancourt.com/COM¹.json",
-            "pamelabetancourt.com/page?.json",
-            "pamelabetancourt.com/page.json.",
-            "pamelabetancourt.com/folder /page.json",
-            "pamelabetancourt.com/\x7fpage.json",
-            "pamelabetancourt.com/\u200bpage.json",
-            "pamelabetancourt.com/cafe\u0301.json",
-            "pamelabetancourt.com/ai_notes/private.json",
-            "pamelabetancourt.com/AI_NOTES/private.json",
-            "pamelabetancourt.com/Findings/private.json",
-            "pamelabetancourt.com/draft-repo.config.json",
-            "pamelabetancourt.com/DRAFT-REPO.CONFIG.JSON",
+            "example.com/../escape.json",
+            "example.com/./page.json",
+            "example.com//page.json",
+            "example.com\\page.json",
+            "example.com/page:stream.json",
+            "example.com/\x00page.json",
+            "example.com/page.txt",
+            "/example.com/page.json",
+            "C:/example.com/page.json",
+            "example.com/CON.json",
+            "example.com/COM¹.json",
+            "example.com/page?.json",
+            "example.com/page.json.",
+            "example.com/folder /page.json",
+            "example.com/\x7fpage.json",
+            "example.com/\u200bpage.json",
+            "example.com/cafe\u0301.json",
+            "example.com/ai_notes/private.json",
+            "example.com/AI_NOTES/private.json",
+            "example.com/Findings/private.json",
+            "example.com/draft-repo.config.json",
+            "example.com/DRAFT-REPO.CONFIG.JSON",
         )
         for path in invalid_paths:
             with self.subTest(path=path):
@@ -549,10 +549,10 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "files": [{"path": path, "content": {}}],
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(self.objects, {})
                 self.assertEqual(self.items, {})
@@ -577,11 +577,11 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": version_id,
                     "files": self.draft_files(),
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(self.objects, {})
                 self.assertEqual(self.items, {})
@@ -605,14 +605,14 @@ class AuthoringHandlerTest(unittest.TestCase):
             "tools",
         )
         paths = [
-            f"pamelabetancourt.com/{directory}/nested/config.json"
+            f"example.com/{directory}/nested/config.json"
             for directory in local_only_directories
         ] + [
-            f"pamelabetancourt.com/{directory.upper()}/nested/config.json"
+            f"example.com/{directory.upper()}/nested/config.json"
             for directory in local_only_directories
         ] + [
-            "pamelabetancourt.com/node%5fmodules/pkg/package.json",
-            "pamelabetancourt.com/%2esuperpowers/private.json",
+            "example.com/node%5fmodules/pkg/package.json",
+            "example.com/%2esuperpowers/private.json",
         ]
 
         for path in paths:
@@ -621,11 +621,11 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
                     "files": [{"path": path, "content": {}}],
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(self.objects, {})
                 self.assertEqual(self.items, {})
@@ -637,11 +637,11 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": request_environment,
                     "versionId": "v1",
                     "files": self.draft_files(),
-                }, "draft-pamela-production-deploy" if request_environment == "production" else "draft-pamela-test-deploy"), Context())
+                }, "draft-example-production-deploy" if request_environment == "production" else "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(self.objects, {})
                 self.assertEqual(self.items, {})
@@ -649,11 +649,11 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.handler.ENVIRONMENT_NAME = "prod"
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "production",
             "versionId": "v1",
             "files": self.draft_files(),
-        }, "draft-pamela-production-deploy"), Context())
+        }, "draft-example-production-deploy"), Context())
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(self.objects, {})
         self.assertEqual(self.items, {})
@@ -670,27 +670,27 @@ class AuthoringHandlerTest(unittest.TestCase):
         }
         for name, kind in expected.items():
             self.assertEqual(
-                self.handler._infer_kind(f"pamelabetancourt.com/server/{name}"),
+                self.handler._infer_kind(f"example.com/server/{name}"),
                 kind,
             )
             self.assertIsNone(
-                self.handler._infer_page_id("pamelabetancourt.com", f"pamelabetancourt.com/server/{name}")
+                self.handler._infer_page_id("example.com", f"example.com/server/{name}")
             )
         with self.assertRaisesRegex(ValueError, "unknown_server_descriptor"):
-            self.handler._infer_kind("pamelabetancourt.com/server/unknown.json")
+            self.handler._infer_kind("example.com/server/unknown.json")
 
         files = self.draft_files() + [{
-            "path": "pamelabetancourt.com/server/integrations.json",
+            "path": "example.com/server/integrations.json",
             "kind": "server-commerce",
             "content": {},
         }]
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "kind_mismatch")
         self.assertEqual(self.objects, {})
@@ -782,21 +782,21 @@ class AuthoringHandlerTest(unittest.TestCase):
         files.append(dict(files[0]))
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "duplicate_path")
         self.assertEqual(self.objects, {})
 
     def test_server_path_casing_or_nesting_cannot_bypass_server_validation(self):
         invalid_paths = (
-            "pamelabetancourt.com/SERVER/integration-bindings.json",
-            "pamelabetancourt.com/Server/integration-bindings.json",
-            "pamelabetancourt.com/page/server/integration-bindings.json",
-            "pamelabetancourt.com/server/nested/integration-bindings.json",
+            "example.com/SERVER/integration-bindings.json",
+            "example.com/Server/integration-bindings.json",
+            "example.com/page/server/integration-bindings.json",
+            "example.com/server/nested/integration-bindings.json",
         )
         for path in invalid_paths:
             with self.subTest(path=path):
@@ -804,11 +804,11 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
                     "files": [{"path": path, "content": {}}],
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "invalid_server_path")
                 self.assertEqual(self.objects, {})
@@ -822,18 +822,18 @@ class AuthoringHandlerTest(unittest.TestCase):
         sentinel = "private-provider-response-must-not-echo"
         integration["bindings"][0]["unexpected"] = sentinel
         files = self.draft_files() + [{
-            "path": "pamelabetancourt.com/server/integration-bindings.json",
+            "path": "example.com/server/integration-bindings.json",
             "content": integration,
         }]
-        integration["scope"]["domain"] = "pamelabetancourt.com"
+        integration["scope"]["domain"] = "example.com"
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -929,14 +929,14 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
                     "files": self.draft_files() + [{
-                        "path": f"pamelabetancourt.com/server/{file_name}",
+                        "path": f"example.com/server/{file_name}",
                         "content": content,
                     }],
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "server_policy_invalid")
                 self.assertEqual(self.objects, {})
@@ -944,7 +944,7 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_new_or_modified_legacy_descriptor_must_migrate_to_closed_server_feature_contract(self):
         files = self.draft_files() + [{
-            "path": "pamelabetancourt.com/server/integrations.json",
+            "path": "example.com/server/integrations.json",
             "content": {
                 "version": 1,
                 "sources": [{
@@ -956,11 +956,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -1004,14 +1004,14 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
                     "files": self.draft_files() + [{
-                        "path": "pamelabetancourt.com/server/auth-profile-registry.json",
+                        "path": "example.com/server/auth-profile-registry.json",
                         "content": registry,
                     }],
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
 
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -1045,14 +1045,14 @@ class AuthoringHandlerTest(unittest.TestCase):
                 }
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
                     "files": self.draft_files() + [{
-                        "path": "pamelabetancourt.com/server/auth-profile-registry.json",
+                        "path": "example.com/server/auth-profile-registry.json",
                         "content": registry,
                     }],
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], expected_status)
                 if expected_status == 400:
                     self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -1078,14 +1078,14 @@ class AuthoringHandlerTest(unittest.TestCase):
                 }
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
                     "files": self.draft_files() + [{
-                        "path": "pamelabetancourt.com/server/auth-profile-registry.json",
+                        "path": "example.com/server/auth-profile-registry.json",
                         "content": registry,
                     }],
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "server_policy_invalid")
                 self.assertEqual(self.objects, {})
@@ -1094,7 +1094,7 @@ class AuthoringHandlerTest(unittest.TestCase):
     def test_request_body_rejects_non_finite_numbers_and_cycles_before_writes(self):
         base_payload = {
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": self.draft_files(),
@@ -1103,23 +1103,23 @@ class AuthoringHandlerTest(unittest.TestCase):
         for token in ("NaN", "Infinity", "-Infinity"):
             payload = copy.deepcopy(base_payload)
             payload["files"][0]["content"]["synthetic"] = "NON_FINITE"
-            request = event(payload, "draft-pamela-test-deploy")
+            request = event(payload, "draft-example-test-deploy")
             request["body"] = request["body"].replace('"NON_FINITE"', token)
             requests.append((token, request))
 
         dict_payload = copy.deepcopy(base_payload)
         dict_payload["files"][0]["content"]["synthetic"] = float("nan")
-        dict_request = event({}, "draft-pamela-test-deploy")
+        dict_request = event({}, "draft-example-test-deploy")
         dict_request["body"] = dict_payload
         requests.append(("dict-nan", dict_request))
 
         cyclic_payload = copy.deepcopy(base_payload)
         cyclic_payload["files"][0]["content"]["cycle"] = cyclic_payload
-        cyclic_request = event({}, "draft-pamela-test-deploy")
+        cyclic_request = event({}, "draft-example-test-deploy")
         cyclic_request["body"] = cyclic_payload
         requests.append(("dict-cycle", cyclic_request))
 
-        invalid_base64_request = event(base_payload, "draft-pamela-test-deploy")
+        invalid_base64_request = event(base_payload, "draft-example-test-deploy")
         invalid_base64_request["body"] = base64.b64encode(
             invalid_base64_request["body"].encode("utf-8")
         ).decode("ascii") + "!"
@@ -1142,20 +1142,20 @@ class AuthoringHandlerTest(unittest.TestCase):
             / "fixtures/server-features/valid/example.com/server/integration-bindings.json"
         )
         integration = json.loads(fixture_path.read_text(encoding="utf-8"))
-        integration["scope"]["domain"] = "pamelabetancourt.com"
+        integration["scope"]["domain"] = "example.com"
         integration["scope"]["tenantId"] = "another-tenant"
         files = self.draft_files() + [{
-            "path": "pamelabetancourt.com/server/integration-bindings.json",
+            "path": "example.com/server/integration-bindings.json",
             "content": integration,
         }]
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -1165,7 +1165,7 @@ class AuthoringHandlerTest(unittest.TestCase):
     def test_server_owned_scope_is_pinned_and_authz_changes_cannot_rebind_a_draft(self):
         first = self.upsert(version_id="v1")
         self.assertEqual(first["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata["serverScope"], {
             "tenantId": "tenant-example",
             "draftId": "draft-example",
@@ -1181,20 +1181,20 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(parse(response)["error"], "server_policy_invalid")
         self.assertEqual(self.objects, objects_before)
         self.assertEqual(
-            self.items[("SITE#pamelabetancourt.com", "METADATA")],
+            self.items[("SITE#example.com", "METADATA")],
             metadata_before,
         )
 
         publish = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(publish["statusCode"], 400)
         self.assertEqual(parse(publish)["error"], "server_policy_invalid")
         self.assertEqual(
-            self.items[("SITE#pamelabetancourt.com", "METADATA")],
+            self.items[("SITE#example.com", "METADATA")],
             metadata_before,
         )
 
@@ -1233,11 +1233,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -1247,20 +1247,20 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_publish_revalidates_historical_package_against_current_authorized_scope(self):
         self.upsert(version_id="v1")
-        prefix = "sites/pamelabetancourt.com/versions/v-scope/"
-        integration_path = "pamelabetancourt.com/server/integration-bindings.json"
+        prefix = "sites/example.com/versions/v-scope/"
+        integration_path = "example.com/server/integration-bindings.json"
         fixture_path = (
             Path(__file__).resolve().parent
             / "fixtures/server-features/valid/example.com/server/integration-bindings.json"
         )
         integration = json.loads(fixture_path.read_text(encoding="utf-8"))
-        integration["scope"]["domain"] = "pamelabetancourt.com"
+        integration["scope"]["domain"] = "example.com"
         integration["scope"]["tenantId"] = "another-tenant"
         content_bytes = json.dumps(integration, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         self.objects[f"{prefix}{integration_path}"] = integration
         self.objects[f"{prefix}_manifest.json"] = {
             "version": 1,
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v-scope",
             "files": [{
@@ -1275,10 +1275,10 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v-scope",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "stored_package_invalid")
@@ -1288,11 +1288,11 @@ class AuthoringHandlerTest(unittest.TestCase):
     def test_version_packages_have_an_exact_hashed_manifest_and_are_immutable(self):
         response = self.upsert(version_id="v1")
         self.assertEqual(response["statusCode"], 200)
-        prefix = "sites/pamelabetancourt.com/versions/v1/"
+        prefix = "sites/example.com/versions/v1/"
         manifest_key = f"{prefix}_manifest.json"
         self.assertIn(manifest_key, self.objects)
         manifest = self.objects[manifest_key]
-        self.assertEqual(manifest["domain"], "pamelabetancourt.com")
+        self.assertEqual(manifest["domain"], "example.com")
         self.assertEqual(manifest["environment"], "test")
         self.assertEqual(manifest["versionId"], "v1")
         self.assertEqual([entry["path"] for entry in manifest["files"]], sorted(file["path"] for file in self.draft_files()))
@@ -1310,35 +1310,35 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(self.objects, before)
 
     def test_version_prefix_has_a_trailing_delimiter_and_excludes_v10(self):
-        prefix = self.handler.default_version_prefix("pamelabetancourt.com", "v1")
-        self.assertEqual(prefix, "sites/pamelabetancourt.com/versions/v1/")
+        prefix = self.handler.default_version_prefix("example.com", "v1")
+        self.assertEqual(prefix, "sites/example.com/versions/v1/")
         canonical_prefixes = {
-            version_id: self.handler.default_version_prefix("pamelabetancourt.com", version_id)
+            version_id: self.handler.default_version_prefix("example.com", version_id)
             for version_id in ("v1", "v1-", "v1.", "v1_")
         }
         self.assertEqual(len(set(canonical_prefixes.values())), len(canonical_prefixes))
         for version_id, version_prefix in canonical_prefixes.items():
-            self.assertEqual(version_prefix, f"sites/pamelabetancourt.com/versions/{version_id}/")
-        self.objects[f"{prefix}pamelabetancourt.com/site-config.json"] = {"version": 1}
-        self.objects["sites/pamelabetancourt.com/versions/v10/pamelabetancourt.com/site-config.json"] = {"version": 10}
+            self.assertEqual(version_prefix, f"sites/example.com/versions/{version_id}/")
+        self.objects[f"{prefix}example.com/site-config.json"] = {"version": 1}
+        self.objects["sites/example.com/versions/v10/example.com/site-config.json"] = {"version": 10}
         package = self.handler._load_package(
-            "pamelabetancourt.com", "draft", "v1", prefix, {"domain": "pamelabetancourt.com"},
+            "example.com", "draft", "v1", prefix, {"domain": "example.com"},
         )
         self.assertEqual(len(package["files"]), 1)
         self.assertEqual(package["files"][0]["content"], {"version": 1})
 
     def test_publish_reloads_and_revalidates_the_exact_stored_manifest(self):
         self.upsert(version_id="v1")
-        key = "sites/pamelabetancourt.com/versions/v1/pamelabetancourt.com/site-config.json"
+        key = "sites/example.com/versions/v1/example.com/site-config.json"
         self.objects[key]["tampered"] = True
         before = copy.deepcopy(self.items)
 
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "stored_package_invalid")
@@ -1350,20 +1350,20 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.objects.clear()
                 self.items.clear()
                 self.upsert(version_id="v1")
-                prefix = "sites/pamelabetancourt.com/versions/v1/"
+                prefix = "sites/example.com/versions/v1/"
                 if scenario == "tampered":
-                    self.objects[f"{prefix}pamelabetancourt.com/site-config.json"]["tamperedByProbe"] = True
+                    self.objects[f"{prefix}example.com/site-config.json"]["tamperedByProbe"] = True
                 elif scenario == "extra-object":
-                    self.objects[f"{prefix}pamelabetancourt.com/extra.json"] = {"unexpected": True}
+                    self.objects[f"{prefix}example.com/extra.json"] = {"unexpected": True}
                 else:
                     del self.objects[f"{prefix}_manifest.json"]
 
                 response = self.handler.lambda_handler(event({
                     "action": "getSite",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "stage": "draft",
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
 
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "stored_package_invalid")
@@ -1373,10 +1373,10 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "getSite",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "stage": "draft",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(parse(response)["versionId"], "v1")
@@ -1393,18 +1393,18 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         created = self.handler.lambda_handler(event({
             "action": "createSite",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "route-languages-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(created["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata["routes"], authored_site_config["routes"])
         stored_site_config = self.objects[
-            "sites/pamelabetancourt.com/versions/route-languages-v1/"
-            "pamelabetancourt.com/site-config.json"
+            "sites/example.com/versions/route-languages-v1/"
+            "example.com/site-config.json"
         ]
         self.assertEqual(stored_site_config, authored_site_config)
 
@@ -1412,24 +1412,24 @@ class AuthoringHandlerTest(unittest.TestCase):
             if stage == "published":
                 published = self.handler.lambda_handler(event({
                     "action": "publishDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "route-languages-v1",
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(published["statusCode"], 200)
 
             response = self.handler.lambda_handler(event({
                 "action": "getSite",
-                "domain": "pamelabetancourt.com",
+                "domain": "example.com",
                 "environment": "test",
                 "stage": stage,
-            }, "draft-pamela-test-deploy"), Context())
+            }, "draft-example-test-deploy"), Context())
             self.assertEqual(response["statusCode"], 200)
             body = parse(response)
             returned_site_config = next(
                 entry["content"]
                 for entry in body["files"]
-                if entry["path"] == "pamelabetancourt.com/site-config.json"
+                if entry["path"] == "example.com/site-config.json"
             )
             returned_bytes = json.dumps(
                 returned_site_config,
@@ -1450,31 +1450,31 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "route-language-objects-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata["routes"], authored_site_config["routes"])
         stored_site_config = self.objects[
-            "sites/pamelabetancourt.com/versions/route-language-objects-v1/"
-            "pamelabetancourt.com/site-config.json"
+            "sites/example.com/versions/route-language-objects-v1/"
+            "example.com/site-config.json"
         ]
         self.assertEqual(stored_site_config, authored_site_config)
         pulled = self.handler.lambda_handler(event({
             "action": "getSite",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "stage": "draft",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(pulled["statusCode"], 200)
         returned_site_config = next(
             entry["content"]
             for entry in parse(pulled)["files"]
-            if entry["path"] == "pamelabetancourt.com/site-config.json"
+            if entry["path"] == "example.com/site-config.json"
         )
         self.assertEqual(returned_site_config, authored_site_config)
 
@@ -1489,23 +1489,23 @@ class AuthoringHandlerTest(unittest.TestCase):
 
                 response = self.handler.lambda_handler(event({
                     "action": action,
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": version_id,
                     "files": files,
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 200)
 
                 published = self.handler.lambda_handler(event({
                     "action": "publishDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": version_id,
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(published["statusCode"], 200)
                 stored_site_config = self.objects[
-                    f"sites/pamelabetancourt.com/versions/{version_id}/"
-                    "pamelabetancourt.com/site-config.json"
+                    f"sites/example.com/versions/{version_id}/"
+                    "example.com/site-config.json"
                 ]
                 self.assertEqual(stored_site_config, original_site_config)
 
@@ -1532,11 +1532,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
                     response = self.handler.lambda_handler(event({
                         "action": action,
-                        "domain": "pamelabetancourt.com",
+                        "domain": "example.com",
                         "environment": "test",
                         "versionId": "invalid-route-language-v1",
                         "files": files,
-                    }, "draft-pamela-test-deploy"), Context())
+                    }, "draft-example-test-deploy"), Context())
 
                     self.assertEqual(response["statusCode"], 400)
                     self.assertEqual(parse(response)["error"], "invalid_route_language")
@@ -1568,16 +1568,16 @@ class AuthoringHandlerTest(unittest.TestCase):
 
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": f"runtime-locale-{index}-v1",
                     "files": files,
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
 
                 self.assertEqual(response["statusCode"], 200)
                 stored = self.objects[
-                    f"sites/pamelabetancourt.com/versions/runtime-locale-{index}-v1/"
-                    "pamelabetancourt.com/site-config.json"
+                    f"sites/example.com/versions/runtime-locale-{index}-v1/"
+                    "example.com/site-config.json"
                 ]
                 self.assertEqual(stored, authored_site_config)
 
@@ -1606,11 +1606,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
                 response = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "runtime-locale-rejected-v1",
                     "files": files,
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
 
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "invalid_route_language")
@@ -1638,17 +1638,17 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.items.clear()
                 files = self.route_language_files()
                 files.insert(0, {
-                    "path": "pamelabetancourt.com/nested/site-config.json",
+                    "path": "example.com/nested/site-config.json",
                     "content": copy.deepcopy(nested_site_config),
                 })
 
                 response = self.handler.lambda_handler(event({
                     "action": action,
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "nested-site-config-v1",
                     "files": files,
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
 
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "invalid_site_config_path")
@@ -1659,7 +1659,7 @@ class AuthoringHandlerTest(unittest.TestCase):
         files = self.route_language_files()
         exact_root = copy.deepcopy(files[0]["content"])
         files.insert(0, {
-            "path": "pamelabetancourt.com/nested/site-config.json",
+            "path": "example.com/nested/site-config.json",
             "content": {
                 "defaultPageId": "nested-campaign",
                 "routes": [{"path": "/nested", "pageId": "nested-campaign"}],
@@ -1667,7 +1667,7 @@ class AuthoringHandlerTest(unittest.TestCase):
             },
         })
 
-        derived = self.handler._derive_site_fields("pamelabetancourt.com", files)
+        derived = self.handler._derive_site_fields("example.com", files)
 
         self.assertEqual(derived["defaultPageId"], exact_root["defaultPageId"])
         self.assertEqual(derived["routes"], exact_root["routes"])
@@ -1677,15 +1677,15 @@ class AuthoringHandlerTest(unittest.TestCase):
         files = self.route_language_files()
         upserted = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "historical-nested-site-config-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(upserted["statusCode"], 200)
 
-        prefix = "sites/pamelabetancourt.com/versions/historical-nested-site-config-v1/"
-        nested_path = "pamelabetancourt.com/nested/site-config.json"
+        prefix = "sites/example.com/versions/historical-nested-site-config-v1/"
+        nested_path = "example.com/nested/site-config.json"
         nested_content = {
             "defaultPageId": "nested-campaign",
             "routes": [{"path": "/nested", "pageId": "nested-campaign", "language": "fr"}],
@@ -1706,10 +1706,10 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "historical-nested-site-config-v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "stored_package_invalid")
@@ -1717,7 +1717,7 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(self.objects, objects_before)
         self.assertNotIn(
             "publishedEnvironments",
-            self.items[("SITE#pamelabetancourt.com", "METADATA")],
+            self.items[("SITE#example.com", "METADATA")],
         )
 
     def test_duplicate_route_page_language_pair_fails_before_writes(self):
@@ -1732,11 +1732,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
                 response = self.handler.lambda_handler(event({
                     "action": action,
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "duplicate-route-language-v1",
                     "files": files,
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
 
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "duplicate_route_language")
@@ -1751,11 +1751,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "missing-supported-languages-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "invalid_route_language")
@@ -1766,22 +1766,22 @@ class AuthoringHandlerTest(unittest.TestCase):
         version_id = "commerce-current-v1"
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": version_id,
             "files": self.commerce_files(),
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
-        metadata_key = ("SITE#pamelabetancourt.com", "METADATA")
+        metadata_key = ("SITE#example.com", "METADATA")
         self.assertEqual(self.items[metadata_key]["draft"]["versionId"], version_id)
 
         published = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": version_id,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(published["statusCode"], 200)
         self.assertEqual(
@@ -1792,11 +1792,11 @@ class AuthoringHandlerTest(unittest.TestCase):
     def test_legacy_commerce_contract_is_rejected_before_storage(self):
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "commerce-legacy-v1",
             "files": self.legacy_commerce_files(),
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -1815,11 +1815,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "commerce-invalid-inventory-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "server_policy_invalid")
@@ -1831,15 +1831,15 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(baseline["statusCode"], 200)
         version_id = "commerce-legacy-v1"
         self.seed_stored_package(version_id, self.legacy_commerce_files())
-        metadata_key = ("SITE#pamelabetancourt.com", "METADATA")
+        metadata_key = ("SITE#example.com", "METADATA")
         metadata_before = copy.deepcopy(self.items[metadata_key])
 
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": version_id,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "stored_package_invalid")
@@ -1850,15 +1850,15 @@ class AuthoringHandlerTest(unittest.TestCase):
         files = self.route_language_files()
         upserted = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "historical-route-language-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(upserted["statusCode"], 200)
 
-        prefix = "sites/pamelabetancourt.com/versions/historical-route-language-v1/"
-        site_config_path = "pamelabetancourt.com/site-config.json"
+        prefix = "sites/example.com/versions/historical-route-language-v1/"
+        site_config_path = "example.com/site-config.json"
         stored_site_config = self.objects[f"{prefix}{site_config_path}"]
         stored_site_config["routes"][1]["language"] = "fr"
         manifest_entry = next(
@@ -1878,16 +1878,16 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "historical-route-language-v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "stored_package_invalid")
         self.assertEqual(self.items, metadata_before)
         self.assertEqual(self.objects, objects_before)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertNotIn("publishedEnvironments", metadata)
 
     def test_publish_can_roll_back_to_an_immutable_version_without_s3_writes(self):
@@ -1897,18 +1897,18 @@ class AuthoringHandlerTest(unittest.TestCase):
         for version_id in ("v2", "v1"):
             response = self.handler.lambda_handler(event({
                 "action": "publishDraft",
-                "domain": "pamelabetancourt.com",
+                "domain": "example.com",
                 "environment": "test",
                 "versionId": version_id,
-            }, "draft-pamela-test-deploy"), Context())
+            }, "draft-example-test-deploy"), Context())
             self.assertEqual(response["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata["publishedEnvironments"]["test"]["versionId"], "v1")
         self.assertEqual(self.objects, objects_before_publish)
 
     def test_publish_returns_success_after_loading_dynamodb_decimal_metadata(self):
         self.upsert(version_id="decimal-v1")
-        key = ("SITE#pamelabetancourt.com", "METADATA")
+        key = ("SITE#example.com", "METADATA")
         self.items[key]["revision"] = Decimal("1")
         self.items[key]["draft"]["manifestVersion"] = Decimal("1")
         cas_calls = []
@@ -1921,10 +1921,10 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.handler.put_item_if_revision = counting_put_item_if_revision
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "decimal-v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
         body = parse(response)
@@ -1938,7 +1938,7 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_publish_does_not_commit_when_response_metadata_is_not_json_safe(self):
         self.upsert(version_id="invalid-decimal-v1")
-        key = ("SITE#pamelabetancourt.com", "METADATA")
+        key = ("SITE#example.com", "METADATA")
         self.items[key]["draft"]["manifestVersion"] = Decimal("1.5")
         before = copy.deepcopy(self.items)
         cas_calls = []
@@ -1951,10 +1951,10 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.handler.put_item_if_revision = counting_put_item_if_revision
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "invalid-decimal-v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 500)
         self.assertEqual(len(cas_calls), 0)
@@ -1963,7 +1963,7 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_upsert_does_not_store_files_when_historical_response_metadata_is_not_json_safe(self):
         self.upsert(version_id="safe-v1")
-        key = ("SITE#pamelabetancourt.com", "METADATA")
+        key = ("SITE#example.com", "METADATA")
         self.items[key]["published"] = {"manifestVersion": Decimal("1.5")}
         items_before = copy.deepcopy(self.items)
         objects_before = copy.deepcopy(self.objects)
@@ -1984,10 +1984,10 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.handler.put_item_if_revision = stale_write
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 409)
         self.assertEqual(parse(response)["error"], "registry_revision_conflict")
@@ -2007,7 +2007,7 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.assertEqual(parse(response)["error"], "registry_revision_conflict")
         self.assertEqual(self.items, before)
         self.assertEqual(
-            self.items[("SITE#pamelabetancourt.com", "METADATA")]["draft"]["versionId"],
+            self.items[("SITE#example.com", "METADATA")]["draft"]["versionId"],
             "v1",
         )
 
@@ -2016,20 +2016,20 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.upsert(version_id="v1")
         response = self.handler.lambda_handler(event({
             "action": "setSiteStatus",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "status": "maintenance",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(response["statusCode"], 200)
 
         before = copy.deepcopy(self.items)
         self.handler.put_item_if_revision = lambda *_args: (_ for _ in ()).throw(self.handler.RevisionConflictError())
         response = self.handler.lambda_handler(event({
             "action": "setSiteStatus",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "status": "active",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(response["statusCode"], 409)
         self.assertEqual(self.items, before)
 
@@ -2064,19 +2064,19 @@ class AuthoringHandlerTest(unittest.TestCase):
                 self.handler.describe_secret = describe
                 upsert = self.handler.lambda_handler(event({
                     "action": "upsertDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
                     "files": self.active_notification_files(),
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(upsert["statusCode"], 200)
                 before = copy.deepcopy(self.items)
                 response = self.handler.lambda_handler(event({
                     "action": "publishDraft",
-                    "domain": "pamelabetancourt.com",
+                    "domain": "example.com",
                     "environment": "test",
                     "versionId": "v1",
-                }, "draft-pamela-test-deploy"), Context())
+                }, "draft-example-test-deploy"), Context())
                 self.assertEqual(response["statusCode"], 400)
                 self.assertEqual(parse(response)["error"], "notification_secret_unavailable")
                 self.assertNotIn("provider-private-detail", response["body"])
@@ -2113,17 +2113,17 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.handler.describe_secret = describe
         self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
             "files": self.active_notification_files(),
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
         self.assertEqual(described, [
@@ -2225,10 +2225,10 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.handler.ENVIRONMENT_NAME = "production"
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "production",
             "versionId": "v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 401)
 
@@ -2236,46 +2236,46 @@ class AuthoringHandlerTest(unittest.TestCase):
         self.upsert(version_id="test-v1")
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "test-v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata["publishedEnvironments"]["test"]["versionId"], "test-v1")
         self.assertNotIn("published", metadata)
 
     def test_publish_production_sets_legacy_and_environment_pointer(self):
         self.handler.ENVIRONMENT_NAME = "production"
         self.authz_rules = [self.production_authz_rule]
-        self.upsert(role_name="draft-pamela-production-deploy", version_id="prod-v1", environment_name="production")
+        self.upsert(role_name="draft-example-production-deploy", version_id="prod-v1", environment_name="production")
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "production",
             "versionId": "prod-v1",
-        }, "draft-pamela-production-deploy"), Context())
+        }, "draft-example-production-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata["published"]["versionId"], "prod-v1")
         self.assertEqual(metadata["publishedEnvironments"]["production"]["versionId"], "prod-v1")
 
     def test_content_hub_files_are_indexed_in_site_metadata(self):
         files = self.draft_files() + [
             {
-                "path": "pamelabetancourt.com/content-hubs/main/hub.json",
+                "path": "example.com/content-hubs/main/hub.json",
                 "content": {
                     "hubId": "main",
                     "name": "Blog",
                     "defaultLanguage": "es",
-                    "canonicalDraftDomain": "pamelabetancourt.com",
-                    "allowedDraftDomains": ["pamelabetancourt.com", "sulandingpage.com.mx"],
+                    "canonicalDraftDomain": "example.com",
+                    "allowedDraftDomains": ["example.com", "sulandingpage.com.mx"],
                 },
             },
             {
-                "path": "pamelabetancourt.com/content-hubs/main/articles/primer-post/metadata.json",
+                "path": "example.com/content-hubs/main/articles/primer-post/metadata.json",
                 "content": {
                     "articleId": "primer-post",
                     "title": "Primer post",
@@ -2286,14 +2286,14 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "test-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 200)
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata["contentHubs"][0]["hubId"], "main")
         self.assertEqual(metadata["contentHubs"][0]["articleIds"], ["primer-post"])
 
@@ -2305,11 +2305,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "test-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "runtime_content_hub_limit_exceeded")
@@ -2323,15 +2323,15 @@ class AuthoringHandlerTest(unittest.TestCase):
         }
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "historical-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
         self.assertEqual(response["statusCode"], 200)
 
-        prefix = "sites/pamelabetancourt.com/versions/historical-v1/"
-        site_config_path = "pamelabetancourt.com/site-config.json"
+        prefix = "sites/example.com/versions/historical-v1/"
+        site_config_path = "example.com/site-config.json"
         site_config = self.objects[f"{prefix}{site_config_path}"]
         site_config["runtime"]["contentHubs"].append(self.runtime_content_hubs(5)[-1])
         manifest = self.objects[f"{prefix}_manifest.json"]
@@ -2339,25 +2339,25 @@ class AuthoringHandlerTest(unittest.TestCase):
         manifest_entry["sha256"] = hashlib.sha256(
             json.dumps(site_config, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        metadata_before = copy.deepcopy(self.items[("SITE#pamelabetancourt.com", "METADATA")])
+        metadata_before = copy.deepcopy(self.items[("SITE#example.com", "METADATA")])
 
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "historical-v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "stored_package_invalid")
-        metadata_after = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata_after = self.items[("SITE#example.com", "METADATA")]
         self.assertEqual(metadata_after, metadata_before)
         self.assertNotIn("publishedEnvironments", metadata_after)
 
     def test_content_hub_files_reject_server_only_fields(self):
         files = self.draft_files() + [
             {
-                "path": "pamelabetancourt.com/content-hubs/main/articles/primer-post/metadata.json",
+                "path": "example.com/content-hubs/main/articles/primer-post/metadata.json",
                 "content": {
                     "articleId": "primer-post",
                     "clientSecret": "do-not-store",
@@ -2367,11 +2367,11 @@ class AuthoringHandlerTest(unittest.TestCase):
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "test-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "invalid_request")
@@ -2379,34 +2379,34 @@ class AuthoringHandlerTest(unittest.TestCase):
 
     def test_percent_encoded_paths_are_rejected_before_storage(self):
         files = self.draft_files()
-        files[0]["path"] = "pamelabetancourt.com/%73ite-config.json"
+        files[0]["path"] = "example.com/%73ite-config.json"
 
         response = self.handler.lambda_handler(event({
             "action": "upsertDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "encoded-path-v1",
             "files": files,
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(self.objects, {})
 
     def test_non_json_object_in_version_prefix_invalidates_exact_package(self):
         self.upsert(version_id="exact-object-set-v1")
-        prefix = "sites/pamelabetancourt.com/versions/exact-object-set-v1/"
+        prefix = "sites/example.com/versions/exact-object-set-v1/"
         self.objects[f"{prefix}unexpected.bin"] = {"unexpected": True}
 
         response = self.handler.lambda_handler(event({
             "action": "publishDraft",
-            "domain": "pamelabetancourt.com",
+            "domain": "example.com",
             "environment": "test",
             "versionId": "exact-object-set-v1",
-        }, "draft-pamela-test-deploy"), Context())
+        }, "draft-example-test-deploy"), Context())
 
         self.assertEqual(response["statusCode"], 400)
         self.assertEqual(parse(response)["error"], "stored_package_invalid")
-        metadata = self.items[("SITE#pamelabetancourt.com", "METADATA")]
+        metadata = self.items[("SITE#example.com", "METADATA")]
         self.assertNotIn("publishedEnvironments", metadata)
 
 
