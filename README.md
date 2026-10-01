@@ -261,12 +261,12 @@ Example:
 
 ```json
 {
-  "aliases": ["pamelabetancourt.com"],
+  "aliases": ["example.com"],
   "environments": {
     "test": {
       "aliases": [
-        "test.pamelabetancourt.com",
-        "test.pamelabetancourt.zoolandingpage.com.mx"
+        "test.example.com",
+        "test.example.zoolandingpage.com.mx"
       ]
     }
   }
