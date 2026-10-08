@@ -133,7 +133,26 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         except SystemExit as exc:
             self.fail(f"isolated plan should accept a single test target: exit {exc.code}")
         self.assertEqual(parsed.add_domain, "example.com")
+        self.assertEqual(parsed.environment, "test")
         self.assertIsNone(parsed.production_bucket)
+
+    def test_isolated_production_plan_cli_accepts_only_zooberiah_and_production_bucket(self):
+        arguments = [
+            "plan", "--registry", "registry.json", "--expected-draft-count", "2",
+            "--profile", "operator", "--environment", "production",
+            "--production-bucket", bootstrap.ENVIRONMENT_BUCKETS["production"],
+            "--add-domain", "zooberiahsystems.com",
+        ]
+        with contextlib.redirect_stderr(io.StringIO()):
+            parsed = bootstrap.parse_args(arguments)
+            for domain in ("example.com", "zoositioweb.com.mx"):
+                rejected = list(arguments)
+                rejected[-1] = domain
+                with self.assertRaises((SystemExit, bootstrap.BootstrapError)):
+                    bootstrap.parse_args(rejected)
+        self.assertEqual(parsed.environment, "production")
+        self.assertEqual(parsed.production_bucket, bootstrap.ENVIRONMENT_BUCKETS["production"])
+        self.assertIsNone(parsed.test_bucket)
 
     def test_isolated_registry_duplicate_keys_fail_before_any_external_access(self):
         raw = json.dumps(self.registry)
@@ -233,6 +252,47 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             self.fail("binding collector does not yet guard the isolated role")
         self.assertEqual(len(commands), 2)
 
+    def test_isolated_production_binding_reads_only_the_selected_exact_identity(self):
+        production_registry = registry(
+            draft("example.com", "draft-example-com"),
+            draft("zooberiahsystems.com", "draft-zooberiahsystems-com"),
+        )
+        expected = binding("zooberiahsystems.com", "draft-zooberiahsystems-com", "production")
+        commands = []
+
+        def run_json(arguments):
+            commands.append(arguments)
+            if arguments[:3] == ["gh", "api", "repos/LynxPardelle/draft-zooberiahsystems-com/actions/oidc/customization/sub"]:
+                return {"use_default": True, "sub_claim_prefix": "repo:LynxPardelle/draft-zooberiahsystems-com"}
+            if arguments[:7] == ["gh", "variable", "list", "--repo", "LynxPardelle/draft-zooberiahsystems-com", "--env", "production"]:
+                return [
+                    {"name": "DRAFT_DOMAIN", "value": "zooberiahsystems.com"},
+                    {"name": "AWS_ROLE_ARN", "value": expected["roleArn"]},
+                ]
+            if arguments[:3] == ["aws", "iam", "get-role"] and arguments[arguments.index("--role-name") + 1] == "draft-zooberiahsystems-com-production-deploy":
+                return {"Role": {
+                    "Arn": expected["roleArn"],
+                    "RoleName": "draft-zooberiahsystems-com-production-deploy",
+                    "AssumeRolePolicyDocument": {"Statement": [{
+                        "Effect": "Allow", "Action": "sts:AssumeRoleWithWebIdentity",
+                        "Principal": {"Federated": "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"},
+                        "Condition": {"StringEquals": {
+                            "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                            "token.actions.githubusercontent.com:ref": "refs/heads/main",
+                            "token.actions.githubusercontent.com:sub": "repo:LynxPardelle/draft-zooberiahsystems-com:environment:production",
+                        }},
+                    }]},
+                }}
+            self.fail("production isolation attempted an unselected external read")
+
+        result = bootstrap.collect_verified_bindings(
+            production_registry, environment="production", profile="operator",
+            account_id="123456789012", runner=mock.Mock(run_json=run_json),
+            domain="zooberiahsystems.com",
+        )
+        self.assertEqual(result, [expected])
+        self.assertEqual(len(commands), 3)
+
     def _isolated_baseline(self):
         scopes = bootstrap.build_scope_registry(
             self.registry, expected_draft_count=2,
@@ -252,6 +312,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                 scope_bytes=scope_bytes, authz_bytes=authz_bytes, target_scope=target,
                 target_binding=binding(target["domain"], target["repo"], "test"),
                 expected_owner="123456789012",
+                environment="test",
             )
         except AttributeError:
             self.fail("isolated preserved-bundle generation is not implemented")
@@ -267,7 +328,63 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertEqual(new_rules[:-1], old_rules)
         for old, new in zip(old_rules, new_rules):
             self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
+        for old, new in zip(old_scopes["scopes"], [item for item in new_scopes["scopes"] if item != target]):
+            self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
         self.assertEqual(new_rules[-1]["domains"], [target["domain"]])
+
+    def test_isolated_production_candidate_preserves_existing_bytes_and_appends_one_exact_rule(self):
+        scopes, rules, _ = self._isolated_baseline()
+        production_rules = json.loads(rules)
+        for rule in production_rules:
+            repo = next(
+                scope["repo"] for scope in json.loads(scopes)["scopes"]
+                if scope["domain"] == rule["domains"][0]
+            )
+            rule["roleArn"] = binding(rule["domains"][0], repo, "production")["roleArn"]
+            rule["environments"] = ["production"]
+        authz_bytes = bootstrap.canonical_json_bytes(production_rules)
+        target = {
+            "domain": "zooberiahsystems.com", "repo": "draft-zooberiahsystems-com",
+            "tenantId": "draft-zooberiahsystems-com", "draftId": "draft-zooberiahsystems-com",
+        }
+
+        proposed_scope, proposed_authz, mode = bootstrap.build_isolated_bundle(
+            scope_bytes=scopes, authz_bytes=authz_bytes, target_scope=target,
+            target_binding=binding(target["domain"], target["repo"], "production"),
+            expected_owner="123456789012", environment="production",
+        )
+
+        self.assertEqual(mode, "add")
+        self.assertEqual(json.loads(proposed_authz)[:-1], production_rules)
+        self.assertEqual(json.loads(proposed_authz)[-1]["environments"], ["production"])
+        self.assertEqual(
+            [scope for scope in json.loads(proposed_scope)["scopes"] if scope != target],
+            json.loads(scopes)["scopes"],
+        )
+        for old, new in zip(production_rules, json.loads(proposed_authz)):
+            self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
+
+    def test_isolated_production_candidate_rejects_the_reviewed_domain_with_another_repo(self):
+        scopes, rules, _ = self._isolated_baseline()
+        production_rules = json.loads(rules)
+        for rule in production_rules:
+            scope = next(
+                item for item in json.loads(scopes)["scopes"]
+                if item["domain"] == rule["domains"][0]
+            )
+            rule["roleArn"] = binding(scope["domain"], scope["repo"], "production")["roleArn"]
+            rule["environments"] = ["production"]
+        wrong = {
+            "domain": "zooberiahsystems.com", "repo": "draft-wrong-repo",
+            "tenantId": "draft-wrong-repo", "draftId": "draft-wrong-repo",
+        }
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap.build_isolated_bundle(
+                scope_bytes=scopes, authz_bytes=bootstrap.canonical_json_bytes(production_rules),
+                target_scope=wrong,
+                target_binding=binding(wrong["domain"], wrong["repo"], "production"),
+                expected_owner="123456789012", environment="production",
+            )
 
     def test_isolated_candidate_is_exact_noop_when_both_target_entries_exist(self):
         scopes, rules, target = self._isolated_baseline()
@@ -316,10 +433,10 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             with self.subTest(kind="invalid baseline"), self.assertRaises(bootstrap.BootstrapError):
                 self._isolated_candidate(scope_body, rule_body, target)
 
-    def _memory_s3(self, client=None):
+    def _memory_s3(self, client=None, environment="test"):
         adapter = getattr(bootstrap, "InMemoryS3", None)
         self.assertIsNotNone(adapter, "isolated S3 transport is not implemented")
-        return adapter(profile="operator", region="us-east-1", client=client)
+        return adapter(profile="operator", region="us-east-1", environment=environment, client=client)
 
     def test_isolated_sdk_reads_and_writes_bodies_only_in_memory(self):
         body = b'{"synthetic":true}\n'
@@ -336,6 +453,19 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertEqual(client.put_object.call_args.kwargs["Body"], body)
         self.assertEqual(client.put_object.call_args.kwargs["IfMatch"], '"old"')
         self.assertEqual(client.put_object.call_count, 1)
+
+    def test_isolated_sdk_is_bound_to_one_canonical_private_bucket(self):
+        client = mock.Mock()
+        client.get_object.return_value = {"Body": io.BytesIO(b"[]\n")}
+        adapter = self._memory_s3(client, environment="production")
+        adapter.get_object(
+            bootstrap.ENVIRONMENT_BUCKETS["production"], bootstrap.AUTHZ_KEY,
+            "123456789012", "production-version",
+        )
+        with self.assertRaises(bootstrap.BootstrapError):
+            adapter.get_object(bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY, "123456789012")
+        with self.assertRaises(bootstrap.BootstrapError):
+            adapter.get_object("arbitrary-private-bucket", bootstrap.AUTHZ_KEY, "123456789012")
 
     def test_isolated_sdk_factory_disables_automatic_retries(self):
         sdk = mock.Mock()
@@ -377,6 +507,53 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             expected_current_authz_sha256=bootstrap.sha256_hex(rules),
         )
         return store, arguments
+
+    def test_isolated_production_apply_uses_the_same_exact_cas_contract(self):
+        scopes, rules, target = self._isolated_baseline()
+        current_rules = json.loads(rules)
+        for rule in current_rules:
+            repo = next(
+                scope["repo"] for scope in json.loads(scopes)["scopes"]
+                if scope["domain"] == rule["domains"][0]
+            )
+            rule["roleArn"] = binding(rule["domains"][0], repo, "production")["roleArn"]
+            rule["environments"] = ["production"]
+        rules = bootstrap.canonical_json_bytes(current_rules)
+        target = {
+            "domain": "zooberiahsystems.com", "repo": "draft-zooberiahsystems-com",
+            "tenantId": "draft-zooberiahsystems-com", "draftId": "draft-zooberiahsystems-com",
+        }
+        proposed_scopes, proposed_rules, _ = bootstrap.build_isolated_bundle(
+            scope_bytes=scopes, authz_bytes=rules, target_scope=target,
+            target_binding=binding(target["domain"], target["repo"], "production"),
+            expected_owner="123456789012", environment="production",
+        )
+        store = FakeS3()
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["production"], "123456789012"
+        scope_head = store.put_object(bucket, bootstrap.SCOPE_KEY, scopes, account)
+        authz_head = store.put_object(bucket, bootstrap.AUTHZ_KEY, rules, account)
+        store.heads[bootstrap.SCOPE_KEY]["checksumSHA256"] = None
+        store.heads[bootstrap.AUTHZ_KEY]["checksumSHA256"] = None
+
+        bootstrap.apply_private_bundle(
+            store, bucket=bucket, expected_owner=account,
+            scope_bytes=proposed_scopes, authz_bytes=proposed_rules,
+            approved_scope_sha256=bootstrap.sha256_hex(proposed_scopes),
+            approved_authz_sha256=bootstrap.sha256_hex(proposed_rules),
+            expected_current_scope_etag=scope_head["etag"],
+            expected_current_scope_version_id=scope_head["versionId"],
+            expected_current_scope_sha256=bootstrap.sha256_hex(scopes),
+            expected_current_authz_etag=authz_head["etag"],
+            expected_current_authz_version_id=authz_head["versionId"],
+            expected_current_authz_sha256=bootstrap.sha256_hex(rules),
+        )
+        self.assertEqual([item["key"] for item in store.puts[2:]], [bootstrap.SCOPE_KEY, bootstrap.AUTHZ_KEY])
+
+        test_store, test_arguments = self._isolated_apply_fixture()
+        test_store.heads[bootstrap.SCOPE_KEY]["checksumSHA256"] = None
+        test_store.heads[bootstrap.AUTHZ_KEY]["checksumSHA256"] = None
+        with self.assertRaises(bootstrap.BootstrapError):
+            self._apply_isolated_fixture(test_store, test_arguments)
 
     def _apply_isolated_fixture(self, store, arguments):
         try:
@@ -538,7 +715,181 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertFalse(result["authzWritten"])
         self.assertEqual(len(store.puts), 4)
 
-    def test_isolated_apply_cli_requires_authz_baseline_hash_and_test(self):
+    def test_isolated_production_command_requires_and_approves_live_test_evidence(self):
+        scopes, rules, _ = self._isolated_baseline()
+        production_rules = json.loads(rules)
+        scope_contract = json.loads(scopes)
+        for rule in production_rules:
+            repo = next(
+                scope["repo"] for scope in scope_contract["scopes"]
+                if scope["domain"] == rule["domains"][0]
+            )
+            rule["roleArn"] = binding(rule["domains"][0], repo, "production")["roleArn"]
+            rule["environments"] = ["production"]
+        production_rules = bootstrap.canonical_json_bytes(production_rules)
+        selected = draft("zooberiahsystems.com", "draft-zooberiahsystems-com")
+        target_scope = {
+            "domain": selected["domain"], "repo": selected["repo"],
+            "tenantId": selected["repo"], "draftId": selected["repo"],
+        }
+        proposed_scopes, proposed_rules, _ = bootstrap.build_isolated_bundle(
+            scope_bytes=scopes, authz_bytes=production_rules, target_scope=target_scope,
+            target_binding=binding(selected["domain"], selected["repo"], "production"),
+            expected_owner="123456789012", environment="production",
+        )
+        production_store = FakeS3()
+        production_scope_head = production_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["production"], bootstrap.SCOPE_KEY,
+            scopes, "123456789012",
+        )
+        production_authz_head = production_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["production"], bootstrap.AUTHZ_KEY,
+            production_rules, "123456789012",
+        )
+        production_store.heads[bootstrap.SCOPE_KEY]["checksumSHA256"] = None
+        production_store.heads[bootstrap.AUTHZ_KEY]["checksumSHA256"] = None
+        test_contract = json.loads(proposed_scopes)
+        test_rules = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(
+            test_contract,
+            [binding(scope["domain"], scope["repo"], "test") for scope in test_contract["scopes"]],
+            "test",
+        ))
+        test_store = FakeS3()
+        test_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.SCOPE_KEY,
+            proposed_scopes, "123456789012",
+        )
+        test_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY,
+            test_rules, "123456789012",
+        )
+        evidence = {"schemaVersion": 1, "result": "green"}
+        args = bootstrap.argparse.Namespace(
+            registry=Path("synthetic-registry.json"), expected_draft_count=3,
+            tenant_override=[], profile="operator", region="us-east-1",
+            add_domain=selected["domain"], bucket=bootstrap.ENVIRONMENT_BUCKETS["production"],
+            environment="production", approve_scope_sha256=bootstrap.sha256_hex(proposed_scopes),
+            approve_authz_sha256=bootstrap.sha256_hex(proposed_rules),
+            expected_current_scope_etag=production_scope_head["etag"],
+            expected_current_scope_version_id=production_scope_head["versionId"],
+            expected_current_scope_sha256=bootstrap.sha256_hex(scopes),
+            expected_current_authz_etag=production_authz_head["etag"],
+            expected_current_authz_version_id=production_authz_head["versionId"],
+            expected_current_authz_sha256=bootstrap.sha256_hex(production_rules),
+            test_commit="a" * 40, test_run_id=123, canary_repo=selected["repo"],
+            canary_run_id=456,
+            approve_test_evidence_sha256=bootstrap.sha256_hex(bootstrap.canonical_json_bytes(evidence)),
+        )
+        production_registry = registry(*self.registry["drafts"], selected)
+
+        with mock.patch.object(bootstrap, "_load_json_file", return_value=production_registry), \
+             mock.patch.object(bootstrap, "_account_id", return_value="123456789012"), \
+             mock.patch.object(bootstrap, "collect_verified_bindings", return_value=[binding(selected["domain"], selected["repo"], "production")]), \
+             mock.patch.object(bootstrap, "InMemoryS3", side_effect=[production_store, test_store]), \
+             mock.patch.object(bootstrap, "collect_test_green_evidence", return_value=evidence) as collector:
+            result = bootstrap._apply(args)
+
+        collector.assert_called_once()
+        self.assertEqual(collector.call_args.kwargs["expected_scope_bytes"], proposed_scopes)
+        self.assertEqual(collector.call_args.kwargs["expected_authz_bytes"], test_rules)
+        self.assertEqual(result["testEvidenceSha256"], bootstrap.sha256_hex(bootstrap.canonical_json_bytes(evidence)))
+
+    def test_isolated_production_rejects_a_historical_production_only_scope_before_evidence_or_write(self):
+        scopes, _, _ = self._isolated_baseline()
+        production_contract = json.loads(scopes)
+        production_only = {
+            "domain": "historical-production-only.example",
+            "repo": "draft-historical-production-only-example",
+            "tenantId": "draft-historical-production-only-example",
+            "draftId": "draft-historical-production-only-example",
+        }
+        production_contract["scopes"].append(production_only)
+        production_contract["scopes"].sort(key=lambda scope: scope["domain"])
+        production_scopes = bootstrap.canonical_json_bytes(production_contract)
+        production_rules = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(
+            production_contract,
+            [binding(scope["domain"], scope["repo"], "production")
+             for scope in production_contract["scopes"]],
+            "production",
+        ))
+        selected = draft("zooberiahsystems.com", "draft-zooberiahsystems-com")
+        target_scope = {
+            "domain": selected["domain"], "repo": selected["repo"],
+            "tenantId": selected["repo"], "draftId": selected["repo"],
+        }
+        proposed_scopes, proposed_rules, _ = bootstrap.build_isolated_bundle(
+            scope_bytes=production_scopes, authz_bytes=production_rules,
+            target_scope=target_scope,
+            target_binding=binding(selected["domain"], selected["repo"], "production"),
+            expected_owner="123456789012", environment="production",
+        )
+
+        production_store = FakeS3()
+        production_scope_head = production_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["production"], bootstrap.SCOPE_KEY,
+            production_scopes, "123456789012",
+        )
+        production_authz_head = production_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["production"], bootstrap.AUTHZ_KEY,
+            production_rules, "123456789012",
+        )
+        production_store.heads[bootstrap.SCOPE_KEY]["checksumSHA256"] = None
+        production_store.heads[bootstrap.AUTHZ_KEY]["checksumSHA256"] = None
+
+        test_contract = json.loads(proposed_scopes)
+        test_contract["scopes"] = [
+            scope for scope in test_contract["scopes"] if scope != production_only
+        ]
+        test_scopes = bootstrap.canonical_json_bytes(test_contract)
+        test_rules = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(
+            test_contract,
+            [binding(scope["domain"], scope["repo"], "test")
+             for scope in test_contract["scopes"]],
+            "test",
+        ))
+        test_store = FakeS3()
+        test_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.SCOPE_KEY,
+            test_scopes, "123456789012",
+        )
+        test_store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY,
+            test_rules, "123456789012",
+        )
+        evidence = {"schemaVersion": 1, "result": "green"}
+        args = bootstrap.argparse.Namespace(
+            registry=Path("synthetic-registry.json"), expected_draft_count=3,
+            tenant_override=[], profile="operator", region="us-east-1",
+            add_domain=selected["domain"], bucket=bootstrap.ENVIRONMENT_BUCKETS["production"],
+            environment="production", approve_scope_sha256=bootstrap.sha256_hex(proposed_scopes),
+            approve_authz_sha256=bootstrap.sha256_hex(proposed_rules),
+            expected_current_scope_etag=production_scope_head["etag"],
+            expected_current_scope_version_id=production_scope_head["versionId"],
+            expected_current_scope_sha256=bootstrap.sha256_hex(production_scopes),
+            expected_current_authz_etag=production_authz_head["etag"],
+            expected_current_authz_version_id=production_authz_head["versionId"],
+            expected_current_authz_sha256=bootstrap.sha256_hex(production_rules),
+            test_commit="a" * 40, test_run_id=123, canary_repo=selected["repo"],
+            canary_run_id=456,
+            approve_test_evidence_sha256=bootstrap.sha256_hex(bootstrap.canonical_json_bytes(evidence)),
+        )
+        production_registry = registry(*self.registry["drafts"], selected)
+
+        with mock.patch.object(bootstrap, "_load_json_file", return_value=production_registry), \
+             mock.patch.object(bootstrap, "_account_id", return_value="123456789012"), \
+             mock.patch.object(bootstrap, "collect_verified_bindings", return_value=[binding(selected["domain"], selected["repo"], "production")]), \
+             mock.patch.object(bootstrap, "InMemoryS3", side_effect=[production_store, test_store]), \
+             mock.patch.object(bootstrap, "collect_test_green_evidence", return_value=evidence) as collector:
+            with self.assertRaisesRegex(
+                bootstrap.BootstrapError,
+                "production scopes are not an exact subset of test scopes",
+            ):
+                bootstrap._apply(args)
+
+        collector.assert_not_called()
+        self.assertEqual(len(production_store.puts), 2)
+
+    def test_isolated_apply_cli_requires_authz_baseline_hash_and_closes_production_to_zooberiah(self):
         _, arguments = self._isolated_apply_fixture()
         cli = ["apply", "--registry", "registry.json", "--expected-draft-count", "3",
                "--profile", "operator", "--environment", "test", "--bucket", arguments["bucket"],
@@ -562,6 +913,17 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             with self.assertRaises((SystemExit, bootstrap.BootstrapError)):
                 bootstrap.parse_args(production_cli)
         external.assert_not_called()
+
+        production_cli[production_cli.index("--add-domain") + 1] = "zooberiahsystems.com"
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                bootstrap.parse_args(production_cli)
+            parsed = bootstrap.parse_args(production_cli + [
+                "--test-commit", "a" * 40, "--test-run-id", "123",
+                "--canary-repo", "draft-zooberiahsystems-com", "--canary-run-id", "456",
+                "--approve-test-evidence-sha256", "b" * 64,
+            ])
+        self.assertEqual(parsed.environment, "production")
 
     def test_scope_registry_uses_repo_slug_and_explicit_tenant_override(self):
         result = bootstrap.build_scope_registry(
@@ -1429,6 +1791,8 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                 "sourceCommit": commit,
                 "manifestSha256": "c" * 64,
                 "lambdaCodeSha256": "code-sha",
+                "artifactId": 789,
+                "artifactName": f"config-authoring-test-123-1-{commit}",
             },
             "bucketState": {
                 "versioning": "Enabled",
@@ -1529,6 +1893,8 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             (("authzHead", "lastModified"), "2026-07-14T20:05:00+00:00"),
             (("function", "LastUpdateStatus"), "Failed"),
             (("function", "CodeSha256"), "manually-drifted-code"),
+            (("artifactEvidence", "artifactId"), 0),
+            (("artifactEvidence", "artifactName"), f"config-authoring-test-999-1-{commit}"),
             (("functionUrlConfig", "AuthType"), "NONE"),
             (("functionUrlConfig", "FunctionArn"), "arn:aws:lambda:us-east-1:123456789012:function:other"),
             (("functionUrlConfig", "FunctionUrl"), "https://other.lambda-url.us-east-1.on.aws/"),
@@ -1618,6 +1984,141 @@ class ServerScopeBootstrapTests(unittest.TestCase):
 
         with self.assertRaises(bootstrap.BootstrapError):
             bootstrap.require_approved_test_evidence(evidence, "0" * 64)
+
+    def test_artifact_collection_uses_the_workflow_run_attempt_identity_and_exact_artifact_id(self):
+        workflow = (ROOT / ".github" / "workflows" / "deploy-test.yml").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "ARTIFACT_NAME: config-authoring-test-${{ github.run_id }}-"
+            "${{ github.run_attempt }}-${{ github.sha }}",
+            workflow,
+        )
+        source_commit = "a" * 40
+        run_id = 123
+        attempt = 1
+        artifact_id = 789
+        artifact_name = f"config-authoring-test-{run_id}-{attempt}-{source_commit}"
+
+        class ArtifactRunner:
+            def __init__(self):
+                self.download = None
+
+            def run_json(self, arguments):
+                if arguments[:2] == ["gh", "api"]:
+                    return {"total_count": 1, "artifacts": [{
+                        "id": artifact_id,
+                        "name": artifact_name,
+                        "expired": False,
+                        "size_in_bytes": 100,
+                        "workflow_run": {
+                            "id": run_id,
+                            "head_branch": "test",
+                            "head_sha": source_commit,
+                        },
+                    }]}
+                if arguments[:3] == ["aws", "lambda", "get-function"]:
+                    return {
+                        "Configuration": {"CodeSha256": "code-sha"},
+                        "Code": {"Location": "https://example.invalid/deployed.zip"},
+                    }
+                raise AssertionError("unexpected artifact evidence command")
+
+            def run(self, arguments, *, timeout=60):
+                self.download = arguments
+                download_root = Path(arguments[arguments.index("--dir") + 1])
+                (download_root / bootstrap.TEST_FUNCTION_LOGICAL_ID).mkdir()
+
+        runner = ArtifactRunner()
+        verified = {
+            "sourceCommit": source_commit,
+            "manifestSha256": "b" * 64,
+            "lambdaCodeSha256": "code-sha",
+        }
+        with mock.patch.object(bootstrap, "_download_deployed_zip", return_value=b"zip"), \
+             mock.patch.object(bootstrap, "verify_deployed_artifact", return_value=verified):
+            _, evidence = bootstrap.collect_artifact_evidence(
+                runner=runner,
+                owner="LynxPardelle",
+                profile="operator",
+                region="us-east-1",
+                test_commit=source_commit,
+                test_run_id=run_id,
+                test_run_attempt=attempt,
+                function_name="zoolanding-config-authoring-test-function",
+            )
+
+        self.assertEqual(evidence["artifactId"], artifact_id)
+        self.assertEqual(evidence["artifactName"], artifact_name)
+        self.assertEqual(runner.download[runner.download.index("--name") + 1], artifact_name)
+
+    def test_artifact_collection_rejects_prefix_ambiguity_and_unbound_metadata(self):
+        source_commit = "a" * 40
+        run_id = 123
+        artifact_name = f"config-authoring-test-{run_id}-1-{source_commit}"
+        exact = {
+            "id": 789,
+            "name": artifact_name,
+            "expired": False,
+            "size_in_bytes": 100,
+            "workflow_run": {
+                "id": run_id,
+                "head_branch": "test",
+                "head_sha": source_commit,
+            },
+        }
+
+        class MetadataRunner:
+            def __init__(self, artifacts, total_count=None):
+                self.artifacts = artifacts
+                self.total_count = len(artifacts) if total_count is None else total_count
+
+            def run_json(self, arguments):
+                if arguments[:2] != ["gh", "api"]:
+                    raise AssertionError("invalid artifact metadata reached AWS")
+                return {"total_count": self.total_count, "artifacts": self.artifacts}
+
+            def run(self, arguments, *, timeout=60):
+                raise AssertionError("invalid artifact metadata reached download")
+
+        invalid_results = (
+            MetadataRunner([{**exact, "name": artifact_name + "-extra"}]),
+            MetadataRunner([exact, {**exact, "id": 790}]),
+            MetadataRunner([{**exact, "id": 0}]),
+            MetadataRunner([{**exact, "workflow_run": {**exact["workflow_run"], "id": 999}}]),
+            MetadataRunner([{**exact, "workflow_run": {**exact["workflow_run"], "head_branch": "dev"}}]),
+            MetadataRunner([{**exact, "workflow_run": {**exact["workflow_run"], "head_sha": "b" * 40}}]),
+            MetadataRunner([{**exact, "expired": True}]),
+            MetadataRunner([{**exact, "size_in_bytes": 0}]),
+            MetadataRunner([exact], total_count=2),
+        )
+        for runner in invalid_results:
+            with self.subTest(artifacts=runner.artifacts, total_count=runner.total_count):
+                with self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap.collect_artifact_evidence(
+                        runner=runner,
+                        owner="LynxPardelle",
+                        profile="operator",
+                        region="us-east-1",
+                        test_commit=source_commit,
+                        test_run_id=run_id,
+                        test_run_attempt=1,
+                        function_name="zoolanding-config-authoring-test-function",
+                    )
+
+        for invalid_attempt in (True, 2):
+            with self.subTest(invalid_attempt=invalid_attempt):
+                with self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap.collect_artifact_evidence(
+                        runner=MetadataRunner([exact]),
+                        owner="LynxPardelle",
+                        profile="operator",
+                        region="us-east-1",
+                        test_commit=source_commit,
+                        test_run_id=run_id,
+                        test_run_attempt=invalid_attempt,
+                        function_name="zoolanding-config-authoring-test-function",
+                    )
 
     def test_deployed_lambda_artifact_is_exactly_bound_to_the_test_run_source(self):
         source_commit = "a" * 40
