@@ -722,12 +722,17 @@ def validate_test_green_snapshot(
     if (
         not isinstance(artifact_evidence, dict)
         or set(artifact_evidence) != {
-            "sourceCommit", "manifestSha256", "lambdaCodeSha256"
+            "sourceCommit", "manifestSha256", "lambdaCodeSha256",
+            "artifactId", "artifactName",
         }
         or artifact_evidence.get("sourceCommit") != test_commit
         or not isinstance(artifact_evidence.get("manifestSha256"), str)
         or not SHA256_PATTERN.fullmatch(artifact_evidence["manifestSha256"])
         or artifact_evidence.get("lambdaCodeSha256") != function.get("CodeSha256")
+        or type(artifact_evidence.get("artifactId")) is not int
+        or artifact_evidence["artifactId"] < 1
+        or artifact_evidence.get("artifactName")
+        != _test_artifact_name(test_run_id, 1, test_commit)
     ):
         raise BootstrapError("test Lambda is not bound to the exact workflow artifact")
 
@@ -818,6 +823,8 @@ def validate_test_green_snapshot(
             "codeSha256": function["CodeSha256"],
             "revisionId": function["RevisionId"],
             "artifactManifestSha256": artifact_evidence["manifestSha256"],
+            "artifactId": artifact_evidence["artifactId"],
+            "artifactName": artifact_evidence["artifactName"],
             "sourceCommit": artifact_evidence["sourceCommit"],
         },
         "scope": {
@@ -891,6 +898,19 @@ def _download_deployed_zip(location: Any) -> bytes:
     return payload
 
 
+def _test_artifact_name(run_id: Any, run_attempt: Any, source_commit: Any) -> str:
+    if (
+        type(run_id) is not int
+        or run_id < 1
+        or type(run_attempt) is not int
+        or run_attempt != 1
+        or not isinstance(source_commit, str)
+        or not re.fullmatch(r"[a-f0-9]{40}", source_commit)
+    ):
+        raise BootstrapError("test artifact run identity is invalid")
+    return f"config-authoring-test-{run_id}-{run_attempt}-{source_commit}"
+
+
 def collect_artifact_evidence(
     *,
     runner: "CommandRunner",
@@ -899,9 +919,10 @@ def collect_artifact_evidence(
     region: str,
     test_commit: str,
     test_run_id: int,
+    test_run_attempt: int,
     function_name: str,
-) -> tuple[dict[str, Any], dict[str, str]]:
-    artifact_name = f"config-authoring-test-{test_commit}"
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    artifact_name = _test_artifact_name(test_run_id, test_run_attempt, test_commit)
     artifact_result = runner.run_json([
         "gh", "api",
         f"repos/{owner}/{AUTHORING_REPOSITORY}/actions/runs/{test_run_id}/artifacts",
@@ -909,17 +930,27 @@ def collect_artifact_evidence(
         "-f", "per_page=100",
     ])
     artifacts = artifact_result.get("artifacts") if isinstance(artifact_result, dict) else None
+    total_count = artifact_result.get("total_count") if isinstance(artifact_result, dict) else None
     matches = [
         artifact for artifact in artifacts or []
         if isinstance(artifact, dict) and artifact.get("name") == artifact_name
     ]
     if (
         not isinstance(artifacts, list)
+        or type(total_count) is not int
+        or total_count != 1
+        or len(artifacts) != 1
         or len(matches) != 1
         or matches[0].get("expired") is not False
-        or not isinstance(matches[0].get("size_in_bytes"), int)
+        or type(matches[0].get("id")) is not int
+        or matches[0]["id"] < 1
+        or type(matches[0].get("size_in_bytes")) is not int
         or matches[0]["size_in_bytes"] < 1
         or matches[0]["size_in_bytes"] > MAX_DEPLOYED_ZIP_BYTES
+        or not isinstance(matches[0].get("workflow_run"), dict)
+        or matches[0]["workflow_run"].get("id") != test_run_id
+        or matches[0]["workflow_run"].get("head_branch") != "test"
+        or matches[0]["workflow_run"].get("head_sha") != test_commit
     ):
         raise BootstrapError("exact test workflow artifact metadata is unavailable")
     function_result = runner.run_json([
@@ -955,7 +986,11 @@ def collect_artifact_evidence(
             function_configuration=configuration,
             source_commit=test_commit,
         )
-    return configuration, artifact_evidence
+    return configuration, {
+        **artifact_evidence,
+        "artifactId": matches[0]["id"],
+        "artifactName": artifact_name,
+    }
 
 
 def collect_test_green_evidence(
@@ -1061,6 +1096,7 @@ def collect_test_green_evidence(
         region=region,
         test_commit=test_commit,
         test_run_id=test_run_id,
+        test_run_attempt=run.get("runAttempt") if isinstance(run, dict) else None,
         function_name=function_name,
     )
 
@@ -2402,6 +2438,7 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
         _, test_scopes = _validated_scope_contract(test_snapshots["scope"])
         if test_scopes.get(domain) != selected[0]:
             raise BootstrapError("production target is not the exact live TEST scope")
+        require_production_scope_subset(test_snapshots["scope"], scope_bytes)
         validate_restore_contract(
             key=AUTHZ_KEY, restore_body=test_snapshots["authz"],
             canonical_scope_bytes=test_snapshots["scope"], environment="test",
