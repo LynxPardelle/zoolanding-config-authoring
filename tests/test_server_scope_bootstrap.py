@@ -154,6 +154,24 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertEqual(parsed.production_bucket, bootstrap.ENVIRONMENT_BUCKETS["production"])
         self.assertIsNone(parsed.test_bucket)
 
+    def test_isolated_test_evidence_cli_accepts_only_the_closed_zooberiah_target(self):
+        arguments = [
+            "verify-test", "--registry", "registry.json", "--expected-draft-count", "3",
+            "--profile", "operator", "--test-commit", "a" * 40,
+            "--test-run-id", "123", "--canary-repo", "draft-zooberiahsystems-com",
+            "--canary-run-id", "456", "--add-domain", "zooberiahsystems.com",
+        ]
+        with contextlib.redirect_stderr(io.StringIO()):
+            parsed = bootstrap.parse_args(arguments)
+            for rejected in (
+                arguments[:-1] + ["example.com"],
+                arguments + ["--add-domain", "zooberiahsystems.com"],
+                arguments + ["--tenant-override", "zooberiahsystems.com=shared"],
+            ):
+                with self.assertRaises((SystemExit, bootstrap.BootstrapError)):
+                    bootstrap.parse_args(rejected)
+        self.assertEqual(parsed.add_domain, "zooberiahsystems.com")
+
     def test_isolated_registry_duplicate_keys_fail_before_any_external_access(self):
         raw = json.dumps(self.registry)
         for old, duplicated in (
@@ -888,6 +906,70 @@ class ServerScopeBootstrapTests(unittest.TestCase):
 
         collector.assert_not_called()
         self.assertEqual(len(production_store.puts), 2)
+
+    def test_isolated_test_evidence_reads_the_live_bundle_and_no_unselected_repository(self):
+        selected = draft("zooberiahsystems.com", "draft-zooberiahsystems-com")
+        selected_scope = {
+            "domain": selected["domain"], "repo": selected["repo"],
+            "tenantId": selected["repo"], "draftId": selected["repo"],
+        }
+        production_registry = registry(*self.registry["drafts"], selected)
+        scope_contract = bootstrap.build_scope_registry(
+            production_registry, expected_draft_count=3,
+            tenant_overrides={}, environment="test",
+        )
+        scope_bytes = bootstrap.canonical_json_bytes(scope_contract)
+        bindings = [
+            binding(scope["domain"], scope["repo"], "test")
+            for scope in scope_contract["scopes"]
+        ]
+        authz_bytes = bootstrap.canonical_json_bytes(
+            bootstrap.build_authz_rules(scope_contract, bindings, "test")
+        )
+        store = FakeS3()
+        store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.SCOPE_KEY,
+            scope_bytes, "123456789012",
+        )
+        store.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY,
+            authz_bytes, "123456789012",
+        )
+        setup_puts = len(store.puts)
+        evidence = {"schemaVersion": 1, "result": "green"}
+        args = bootstrap.argparse.Namespace(
+            registry=Path("synthetic-registry.json"), expected_draft_count=3,
+            tenant_override=[], profile="operator", region="us-east-1",
+            add_domain=selected["domain"], test_commit="a" * 40,
+            test_run_id=123, canary_repo=selected["repo"], canary_run_id=456,
+        )
+        selected_binding = binding(selected["domain"], selected["repo"], "test")
+
+        with mock.patch.object(bootstrap, "_load_json_file", return_value=production_registry), \
+             mock.patch.object(bootstrap, "_account_id", return_value="123456789012"), \
+             mock.patch.object(bootstrap, "collect_verified_bindings", return_value=[selected_binding]) as binding_collector, \
+             mock.patch.object(bootstrap, "InMemoryS3", return_value=store), \
+             mock.patch.object(bootstrap, "collect_test_green_evidence", return_value=evidence) as collector, \
+             mock.patch.object(bootstrap, "_generated_bundle", side_effect=AssertionError("global inventory was read")):
+            result = bootstrap._verify_test(args)
+
+        binding_collector.assert_called_once()
+        self.assertEqual(binding_collector.call_args.kwargs["domain"], selected["domain"])
+        self.assertEqual(binding_collector.call_args.kwargs["environment"], "test")
+        collector.assert_called_once()
+        self.assertEqual(collector.call_args.kwargs["expected_scope_bytes"], scope_bytes)
+        self.assertEqual(collector.call_args.kwargs["expected_authz_bytes"], authz_bytes)
+        self.assertEqual(collector.call_args.kwargs["canary_owner"], "LynxPardelle")
+        self.assertEqual(len(store.puts), setup_puts)
+        self.assertEqual(result, {
+            "mode": "verify-test",
+            "evidence": evidence,
+            "evidenceSha256": bootstrap.sha256_hex(bootstrap.canonical_json_bytes(evidence)),
+        })
+        bootstrap.require_approved_test_evidence(
+            result["evidence"], result["evidenceSha256"],
+        )
+        self.assertIn(selected_scope, scope_contract["scopes"])
 
     def test_isolated_apply_cli_requires_authz_baseline_hash_and_closes_production_to_zooberiah(self):
         _, arguments = self._isolated_apply_fixture()
