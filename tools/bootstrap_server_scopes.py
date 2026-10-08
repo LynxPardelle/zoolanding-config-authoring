@@ -2333,6 +2333,39 @@ def _safe_head(head: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     }
 
 
+def _read_live_test_private_bundle(
+    s3: Any,
+    *,
+    expected_owner: str,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    bucket = ENVIRONMENT_BUCKETS["test"]
+    state = s3.bucket_state(bucket, expected_owner)
+    if state != {
+        "versioning": "Enabled",
+        "ownership": "BucketOwnerEnforced",
+        "publicAccessBlock": True,
+    }:
+        raise BootstrapError("test evidence requires a private versioned bucket")
+    snapshots: dict[str, bytes] = {}
+    for label, key in (("scope", SCOPE_KEY), ("authz", AUTHZ_KEY)):
+        head = s3.head_object(bucket, key, expected_owner)
+        if head is None:
+            raise BootstrapError("test evidence requires the live private bundle")
+        body = _read_stable_versioned_object(
+            s3, bucket=bucket, key=key, expected_owner=expected_owner, head=head,
+        )
+        _require_exact_object_metadata(head, body)
+        snapshots[label] = body
+    validate_restore_contract(
+        key=AUTHZ_KEY,
+        restore_body=snapshots["authz"],
+        canonical_scope_bytes=snapshots["scope"],
+        environment="test",
+        expected_owner=expected_owner,
+    )
+    return state, snapshots
+
+
 def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any]:
     domain = _strict_domain(args.add_domain)
     environment = args.environment
@@ -2421,29 +2454,15 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
         test_s3 = InMemoryS3(
             profile=args.profile, region=args.region, environment="test", runner=runner,
         )
-        test_state = test_s3.bucket_state(ENVIRONMENT_BUCKETS["test"], account)
+        test_state, test_snapshots = _read_live_test_private_bundle(
+            test_s3, expected_owner=account,
+        )
         if test_state != state:
             raise BootstrapError("production append requires the same private TEST bucket controls")
-        test_snapshots = {}
-        for label, key in (("scope", SCOPE_KEY), ("authz", AUTHZ_KEY)):
-            head = test_s3.head_object(ENVIRONMENT_BUCKETS["test"], key, account)
-            if head is None:
-                raise BootstrapError("production append requires the live TEST private bundle")
-            body = _read_stable_versioned_object(
-                test_s3, bucket=ENVIRONMENT_BUCKETS["test"], key=key,
-                expected_owner=account, head=head,
-            )
-            _require_exact_object_metadata(head, body)
-            test_snapshots[label] = body
         _, test_scopes = _validated_scope_contract(test_snapshots["scope"])
         if test_scopes.get(domain) != selected[0]:
             raise BootstrapError("production target is not the exact live TEST scope")
         require_production_scope_subset(test_snapshots["scope"], scope_bytes)
-        validate_restore_contract(
-            key=AUTHZ_KEY, restore_body=test_snapshots["authz"],
-            canonical_scope_bytes=test_snapshots["scope"], environment="test",
-            expected_owner=account,
-        )
         registry_owner = _strict_owner(registry.get("owner"))
         evidence = collect_test_green_evidence(
             runner=runner, s3=test_s3, owner=registry_owner, account_id=account,
@@ -2604,7 +2623,89 @@ def _apply(args: argparse.Namespace) -> dict[str, Any]:
     return response
 
 
+def _verify_isolated_test(args: argparse.Namespace) -> dict[str, Any]:
+    domain = _strict_domain(args.add_domain)
+    if domain != ISOLATED_PRODUCTION_TARGET["domain"]:
+        raise BootstrapError("isolated test evidence is limited to the reviewed domain")
+    if args.tenant_override:
+        raise BootstrapError("isolated test evidence does not accept tenant overrides")
+    if args.canary_repo != ISOLATED_PRODUCTION_TARGET["repo"]:
+        raise BootstrapError("isolated test evidence requires the reviewed canary repository")
+    registry = _load_json_file(args.registry, reject_duplicate_keys=True)
+    reviewed_scopes = build_scope_registry(
+        registry,
+        expected_draft_count=args.expected_draft_count,
+        tenant_overrides={},
+        environment="test",
+    )
+    selected = [
+        scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain
+    ]
+    if len(selected) != 1 or {
+        "domain": selected[0]["domain"],
+        "repo": selected[0]["repo"],
+    } != ISOLATED_PRODUCTION_TARGET:
+        raise BootstrapError("isolated test evidence target is not exact")
+
+    runner = CommandRunner()
+    account_id = _account_id(runner, args.profile)
+    bindings = collect_verified_bindings(
+        registry,
+        environment="test",
+        profile=args.profile,
+        account_id=account_id,
+        runner=runner,
+        domain=domain,
+    )
+    s3 = InMemoryS3(
+        profile=args.profile,
+        region=args.region,
+        environment="test",
+        runner=runner,
+    )
+    _, test_snapshots = _read_live_test_private_bundle(
+        s3, expected_owner=account_id,
+    )
+    _, live_scopes = _validated_scope_contract(test_snapshots["scope"])
+    if live_scopes.get(domain) != selected[0]:
+        raise BootstrapError("isolated test evidence target is not the exact live scope")
+    rules = json.loads(test_snapshots["authz"])
+    matching_rules = [
+        rule for rule in rules
+        if isinstance(rule, dict) and rule.get("domains") == [domain]
+    ]
+    expected_rule = build_authz_rules(
+        {"version": 1, "scopes": [selected[0]]}, bindings, "test",
+    )[0]
+    if len(matching_rules) != 1 or matching_rules[0] != expected_rule:
+        raise BootstrapError("isolated test authorization is not the reviewed live binding")
+
+    owner = _strict_owner(registry.get("owner"))
+    evidence = collect_test_green_evidence(
+        runner=runner,
+        s3=s3,
+        owner=owner,
+        account_id=account_id,
+        profile=args.profile,
+        region=args.region,
+        test_commit=args.test_commit,
+        test_run_id=args.test_run_id,
+        canary_repo=args.canary_repo,
+        canary_run_id=args.canary_run_id,
+        expected_scope_bytes=test_snapshots["scope"],
+        expected_authz_bytes=test_snapshots["authz"],
+        canary_owner=_registered_repo_owner(registry, args.canary_repo),
+    )
+    return {
+        "mode": "verify-test",
+        "evidence": evidence,
+        "evidenceSha256": sha256_hex(canonical_json_bytes(evidence)),
+    }
+
+
 def _verify_test(args: argparse.Namespace) -> dict[str, Any]:
+    if getattr(args, "add_domain", None) is not None:
+        return _verify_isolated_test(args)
     runner = CommandRunner()
     scope_bytes, authz_bytes, account_id = _generated_bundle(args, "test", runner)
     registry = _load_json_file(args.registry)
@@ -2709,6 +2810,7 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Prove a successful test workflow, stack, private bundle, Lambda, and IAM denial probe.",
     )
     _add_generation_arguments(verify_test)
+    verify_test.add_argument("--add-domain", action="append")
     verify_test.add_argument("--test-commit", required=True)
     verify_test.add_argument("--test-run-id", required=True, type=int)
     verify_test.add_argument("--canary-repo", required=True)
@@ -2736,8 +2838,17 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             other_bucket = args.production_bucket if args.environment == "test" else args.test_bucket
             if selected_bucket is None or other_bucket is not None:
                 parser.error("isolated plan requires only its selected environment bucket")
-        if args.environment == "production" and args.add_domain != ISOLATED_PRODUCTION_TARGET["domain"]:
+        if (
+            args.command in {"plan", "apply"}
+            and args.environment == "production"
+            and args.add_domain != ISOLATED_PRODUCTION_TARGET["domain"]
+        ):
             parser.error("isolated production onboarding is limited to zooberiahsystems.com")
+        if args.command == "verify-test" and (
+            args.add_domain != ISOLATED_PRODUCTION_TARGET["domain"]
+            or args.canary_repo != ISOLATED_PRODUCTION_TARGET["repo"]
+        ):
+            parser.error("isolated test evidence is limited to the reviewed Zooberiah target")
         if args.command == "apply" and args.expected_current_authz_sha256 is None:
             parser.error("isolated apply requires --expected-current-authz-sha256")
         if args.command == "apply" and args.environment == "production" and any(value is None for value in (
