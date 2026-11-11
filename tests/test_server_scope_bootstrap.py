@@ -136,7 +136,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertEqual(parsed.environment, "test")
         self.assertIsNone(parsed.production_bucket)
 
-    def test_isolated_production_plan_cli_accepts_only_zooberiah_and_production_bucket(self):
+    def test_isolated_production_plan_cli_accepts_only_reviewed_domains_and_production_bucket(self):
         arguments = [
             "plan", "--registry", "registry.json", "--expected-draft-count", "2",
             "--profile", "operator", "--environment", "production",
@@ -145,6 +145,8 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         ]
         with contextlib.redirect_stderr(io.StringIO()):
             parsed = bootstrap.parse_args(arguments)
+            dipsy = bootstrap.parse_args(arguments[:-1] + ["dipsydoo.com.mx"])
+            self.assertEqual(dipsy.add_domain, "dipsydoo.com.mx")
             for domain in ("example.com", "zoositioweb.com.mx"):
                 rejected = list(arguments)
                 rejected[-1] = domain
@@ -154,17 +156,27 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertEqual(parsed.production_bucket, bootstrap.ENVIRONMENT_BUCKETS["production"])
         self.assertIsNone(parsed.test_bucket)
 
-    def test_isolated_test_evidence_cli_accepts_only_the_closed_zooberiah_target(self):
+    def test_isolated_test_evidence_cli_accepts_only_exact_reviewed_pairs(self):
         arguments = [
             "verify-test", "--registry", "registry.json", "--expected-draft-count", "3",
             "--profile", "operator", "--test-commit", "a" * 40,
             "--test-run-id", "123", "--canary-repo", "draft-zooberiahsystems-com",
             "--canary-run-id", "456", "--add-domain", "zooberiahsystems.com",
         ]
+        dipsy_arguments = [
+            "dipsydoo.com.mx" if arg == "zooberiahsystems.com"
+            else "draft-dipsydoo-com-mx" if arg == "draft-zooberiahsystems-com"
+            else arg
+            for arg in arguments
+        ]
         with contextlib.redirect_stderr(io.StringIO()):
             parsed = bootstrap.parse_args(arguments)
+            dipsy = bootstrap.parse_args(dipsy_arguments)
+            self.assertEqual(dipsy.canary_repo, "draft-dipsydoo-com-mx")
             for rejected in (
                 arguments[:-1] + ["example.com"],
+                arguments[:-1] + ["dipsydoo.com.mx"],
+                dipsy_arguments[:-1] + ["zooberiahsystems.com"],
                 arguments + ["--add-domain", "zooberiahsystems.com"],
                 arguments + ["--tenant-override", "zooberiahsystems.com=shared"],
             ):
@@ -366,21 +378,28 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             "tenantId": "draft-zooberiahsystems-com", "draftId": "draft-zooberiahsystems-com",
         }
 
-        proposed_scope, proposed_authz, mode = bootstrap.build_isolated_bundle(
-            scope_bytes=scopes, authz_bytes=authz_bytes, target_scope=target,
-            target_binding=binding(target["domain"], target["repo"], "production"),
-            expected_owner="123456789012", environment="production",
-        )
-
-        self.assertEqual(mode, "add")
-        self.assertEqual(json.loads(proposed_authz)[:-1], production_rules)
-        self.assertEqual(json.loads(proposed_authz)[-1]["environments"], ["production"])
-        self.assertEqual(
-            [scope for scope in json.loads(proposed_scope)["scopes"] if scope != target],
-            json.loads(scopes)["scopes"],
-        )
-        for old, new in zip(production_rules, json.loads(proposed_authz)):
-            self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
+        dipsy = {
+            "domain": "dipsydoo.com.mx", "repo": "draft-dipsydoo-com-mx",
+            "tenantId": "draft-dipsydoo-com-mx", "draftId": "draft-dipsydoo-com-mx",
+        }
+        for selected in (target, dipsy):
+            with self.subTest(domain=selected["domain"]):
+                proposed_scope, proposed_authz, mode = bootstrap.build_isolated_bundle(
+                    scope_bytes=scopes, authz_bytes=authz_bytes, target_scope=selected,
+                    target_binding=binding(selected["domain"], selected["repo"], "production"),
+                    expected_owner="123456789012", environment="production",
+                )
+                self.assertEqual(mode, "add")
+                proposed_rules = json.loads(proposed_authz)
+                self.assertEqual(proposed_rules[:-1], production_rules)
+                self.assertEqual(proposed_rules[-1]["environments"], ["production"])
+                self.assertEqual(proposed_rules[-1]["domains"], [selected["domain"]])
+                self.assertEqual(
+                    [scope for scope in json.loads(proposed_scope)["scopes"] if scope != selected],
+                    json.loads(scopes)["scopes"],
+                )
+                for old, new in zip(production_rules, proposed_rules):
+                    self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
 
     def test_isolated_production_candidate_rejects_the_reviewed_domain_with_another_repo(self):
         scopes, rules, _ = self._isolated_baseline()
