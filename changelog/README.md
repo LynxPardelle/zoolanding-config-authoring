@@ -6,3 +6,4 @@ Chronological implementation and verification notes live here. Current behavior 
 - [2026-08.md](./2026-08.md)
 - [2026-09.md](./2026-09.md)
 - [2026-10.md](./2026-10.md)
+- [2026-11.md](./2026-11.md)

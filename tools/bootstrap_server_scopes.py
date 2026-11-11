@@ -38,10 +38,11 @@ ENVIRONMENT_BUCKETS = {
     "test": "zoolanding-config-payloads-test",
     "production": "zoolanding-config-payloads",
 }
-ISOLATED_PRODUCTION_TARGET = {
-    "domain": "zooberiahsystems.com",
-    "repo": "draft-zooberiahsystems-com",
+ISOLATED_PRODUCTION_REPOS = {
+    "zooberiahsystems.com": "draft-zooberiahsystems-com",
+    "dipsydoo.com.mx": "draft-dipsydoo-com-mx",
 }
+
 CANONICAL_ACTIONS = ("createSite", "upsertDraft", "publishDraft", "getSite")
 SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 REPO_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -158,6 +159,10 @@ def verify_deployed_artifact(
         "manifestSha256": sha256_hex(canonical_json_bytes(manifest)),
         "lambdaCodeSha256": deployed_code_sha,
     }
+
+
+def _is_reviewed_production_pair(domain: Any, repo: Any) -> bool:
+    return isinstance(domain, str) and isinstance(repo, str) and ISOLATED_PRODUCTION_REPOS.get(domain) == repo
 
 
 def _strict_domain(value: Any) -> str:
@@ -1546,7 +1551,7 @@ def collect_verified_bindings(
     isolated = domain is not None
     if isolated:
         domain = _strict_domain(domain)
-        if environment == "production" and domain != ISOLATED_PRODUCTION_TARGET["domain"]:
+        if environment == "production" and domain not in ISOLATED_PRODUCTION_REPOS:
             raise BootstrapError("isolated production onboarding is limited to the reviewed domain")
         reviewed = build_scope_registry(
             registry, expected_draft_count=len(drafts), tenant_overrides={}, environment=environment,
@@ -1556,7 +1561,7 @@ def collect_verified_bindings(
         drafts = [entry for entry in drafts if entry["domain"] == domain]
         if len(drafts) != 1:
             raise BootstrapError("isolated domain must select exactly one registered draft")
-        if environment == "production" and drafts[0].get("repo") != ISOLATED_PRODUCTION_TARGET["repo"]:
+        if environment == "production" and not _is_reviewed_production_pair(domain, drafts[0].get("repo")):
             raise BootstrapError("isolated production repository is not the reviewed target")
     bindings: list[dict[str, str]] = []
     for entry in drafts:
@@ -2218,9 +2223,9 @@ def build_isolated_bundle(
 ) -> tuple[bytes, bytes, str]:
     if environment not in ENVIRONMENTS:
         raise BootstrapError("environment must be test or production")
-    if environment == "production" and {
-        "domain": target_scope.get("domain"), "repo": target_scope.get("repo"),
-    } != ISOLATED_PRODUCTION_TARGET:
+    if environment == "production" and not _is_reviewed_production_pair(
+        target_scope.get("domain"), target_scope.get("repo"),
+    ):
         raise BootstrapError("isolated production onboarding is limited to the reviewed target")
     contract, existing = _validated_scope_contract(scope_bytes)
     validate_restore_contract(
@@ -2374,7 +2379,7 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
     )
     if args.tenant_override:
         raise BootstrapError("isolated onboarding does not accept tenant overrides")
-    if environment == "production" and domain != ISOLATED_PRODUCTION_TARGET["domain"]:
+    if environment == "production" and domain not in ISOLATED_PRODUCTION_REPOS:
         raise BootstrapError("isolated production onboarding is limited to the reviewed domain")
     require_environment_bucket(environment, bucket)
     registry = _load_json_file(args.registry, reject_duplicate_keys=True)
@@ -2385,9 +2390,9 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
     selected = [scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain]
     if len(selected) != 1:
         raise BootstrapError("isolated domain must select exactly one registered draft")
-    if environment == "production" and {
-        "domain": selected[0]["domain"], "repo": selected[0]["repo"],
-    } != ISOLATED_PRODUCTION_TARGET:
+    if environment == "production" and not _is_reviewed_production_pair(
+        selected[0]["domain"], selected[0]["repo"],
+    ):
         raise BootstrapError("isolated production repository is not the reviewed target")
     runner = CommandRunner()
     account = _account_id(runner, args.profile)
@@ -2625,11 +2630,11 @@ def _apply(args: argparse.Namespace) -> dict[str, Any]:
 
 def _verify_isolated_test(args: argparse.Namespace) -> dict[str, Any]:
     domain = _strict_domain(args.add_domain)
-    if domain != ISOLATED_PRODUCTION_TARGET["domain"]:
+    if domain not in ISOLATED_PRODUCTION_REPOS:
         raise BootstrapError("isolated test evidence is limited to the reviewed domain")
     if args.tenant_override:
         raise BootstrapError("isolated test evidence does not accept tenant overrides")
-    if args.canary_repo != ISOLATED_PRODUCTION_TARGET["repo"]:
+    if not _is_reviewed_production_pair(domain, args.canary_repo):
         raise BootstrapError("isolated test evidence requires the reviewed canary repository")
     registry = _load_json_file(args.registry, reject_duplicate_keys=True)
     reviewed_scopes = build_scope_registry(
@@ -2641,10 +2646,9 @@ def _verify_isolated_test(args: argparse.Namespace) -> dict[str, Any]:
     selected = [
         scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain
     ]
-    if len(selected) != 1 or {
-        "domain": selected[0]["domain"],
-        "repo": selected[0]["repo"],
-    } != ISOLATED_PRODUCTION_TARGET:
+    if len(selected) != 1 or not _is_reviewed_production_pair(
+        selected[0]["domain"], selected[0]["repo"],
+    ):
         raise BootstrapError("isolated test evidence target is not exact")
 
     runner = CommandRunner()
@@ -2841,14 +2845,13 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         if (
             args.command in {"plan", "apply"}
             and args.environment == "production"
-            and args.add_domain != ISOLATED_PRODUCTION_TARGET["domain"]
+            and args.add_domain not in ISOLATED_PRODUCTION_REPOS
         ):
-            parser.error("isolated production onboarding is limited to zooberiahsystems.com")
-        if args.command == "verify-test" and (
-            args.add_domain != ISOLATED_PRODUCTION_TARGET["domain"]
-            or args.canary_repo != ISOLATED_PRODUCTION_TARGET["repo"]
+            parser.error("isolated production onboarding is limited to reviewed domains")
+        if args.command == "verify-test" and not _is_reviewed_production_pair(
+            args.add_domain, args.canary_repo,
         ):
-            parser.error("isolated test evidence is limited to the reviewed Zooberiah target")
+            parser.error("isolated test evidence is limited to a reviewed domain and its exact repository")
         if args.command == "apply" and args.expected_current_authz_sha256 is None:
             parser.error("isolated apply requires --expected-current-authz-sha256")
         if args.command == "apply" and args.environment == "production" and any(value is None for value in (
