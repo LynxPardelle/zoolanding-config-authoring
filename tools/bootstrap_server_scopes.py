@@ -38,9 +38,60 @@ ENVIRONMENT_BUCKETS = {
     "test": "zoolanding-config-payloads-test",
     "production": "zoolanding-config-payloads",
 }
+LYNX_OFFER_OWNER = "LynxPardelle"
+LYNX_OFFER_REPOS = {
+    "curso-diseno-sonoro.music.lynxpardelle.com": "draft-curso-diseno-sonoro-music-lynxpardelle-com",
+    "curso-music-business.music.lynxpardelle.com": "draft-curso-music-business-music-lynxpardelle-com",
+    "curso-musica-electronica.music.lynxpardelle.com": "draft-curso-musica-electronica-music-lynxpardelle-com",
+    "curso-produccion-audiovisual.music.lynxpardelle.com": "draft-curso-produccion-audiovisual-music-lynxpardelle-com",
+    "masterclass-acordes.music.lynxpardelle.com": "draft-masterclass-acordes-music-lynxpardelle-com",
+    "masterclass-artista-independiente.music.lynxpardelle.com": "draft-masterclass-artista-independiente-music-lynxpardelle-com",
+    "masterclass-drum-rack.music.lynxpardelle.com": "draft-masterclass-drum-rack-music-lynxpardelle-com",
+    "masterclass-edicion-del-sonido.music.lynxpardelle.com": "draft-masterclass-edicion-del-sonido-music-lynxpardelle-com",
+    "masterclass-escalas-mayores.music.lynxpardelle.com": "draft-masterclass-escalas-mayores-music-lynxpardelle-com",
+    "masterclass-escalas-menores.music.lynxpardelle.com": "draft-masterclass-escalas-menores-music-lynxpardelle-com",
+    "masterclass-estructura-musical.music.lynxpardelle.com": "draft-masterclass-estructura-musical-music-lynxpardelle-com",
+    "masterclass-grabacion-de-voz-e-instrumentos.music.lynxpardelle.com": "draft-masterclass-grabacion-de-voz-e-instrumentos-lp-offer",
+    "masterclass-impulse.music.lynxpardelle.com": "draft-masterclass-impulse-music-lynxpardelle-com",
+    "masterclass-industria-musical.music.lynxpardelle.com": "draft-masterclass-industria-musical-music-lynxpardelle-com",
+    "masterclass-instrumentos-y-efectos-midi.music.lynxpardelle.com": "draft-masterclass-instrumentos-y-efectos-midi-lp-offer",
+    "masterclass-intervalos.music.lynxpardelle.com": "draft-masterclass-intervalos-music-lynxpardelle-com",
+    "masterclass-loops-en-vivo.music.lynxpardelle.com": "draft-masterclass-loops-en-vivo-music-lynxpardelle-com",
+    "masterclass-masterizacion-profesional.music.lynxpardelle.com": "draft-masterclass-masterizacion-profesional-lp-offer",
+    "masterclass-mezcla-digital.music.lynxpardelle.com": "draft-masterclass-mezcla-digital-music-lynxpardelle-com",
+    "masterclass-notas-musicales.music.lynxpardelle.com": "draft-masterclass-notas-musicales-music-lynxpardelle-com",
+    "masterclass-procesos-de-audio-1.music.lynxpardelle.com": "draft-masterclass-procesos-de-audio-1-music-lynxpardelle-com",
+    "masterclass-procesos-de-audio-2.music.lynxpardelle.com": "draft-masterclass-procesos-de-audio-2-music-lynxpardelle-com",
+    "masterclass-profesionaliza-tu-proyecto-musical.music.lynxpardelle.com": "draft-masterclass-profesionaliza-tu-proyecto-musical-lp-offer",
+    "masterclass-redes-sociales-para-musicos.music.lynxpardelle.com": "draft-masterclass-redes-sociales-para-musicos-lp-offer",
+    "masterclass-ritmo.music.lynxpardelle.com": "draft-masterclass-ritmo-music-lynxpardelle-com",
+    "masterclass-ruteo-y-grupos.music.lynxpardelle.com": "draft-masterclass-ruteo-y-grupos-music-lynxpardelle-com",
+    "masterclass-sampler.music.lynxpardelle.com": "draft-masterclass-sampler-music-lynxpardelle-com",
+    "masterclass-simpler.music.lynxpardelle.com": "draft-masterclass-simpler-music-lynxpardelle-com",
+    "masterclass-sintesis-aditiva-sustractiva-y-fm.music.lynxpardelle.com": "draft-masterclass-sintesis-aditiva-sustractiva-y-fm-lp-offer",
+    "masterclass-sintesis-de-tabla-de-ondas.music.lynxpardelle.com": "draft-masterclass-sintesis-de-tabla-de-ondas-lp-offer",
+    "masterclass-sintesis-organica-y-granular.music.lynxpardelle.com": "draft-masterclass-sintesis-organica-y-granular-lp-offer",
+    "masterclass-sintesis-por-modelado-fisico.music.lynxpardelle.com": "draft-masterclass-sintesis-por-modelado-fisico-lp-offer",
+    "servicio-animaciones.music.lynxpardelle.com": "draft-servicio-animaciones-music-lynxpardelle-com",
+    "servicio-asesorias.music.lynxpardelle.com": "draft-servicio-asesorias-music-lynxpardelle-com",
+    "servicio-clases-personalizadas.music.lynxpardelle.com": "draft-servicio-clases-personalizadas-music-lynxpardelle-com",
+    "servicio-flyers-digitales.music.lynxpardelle.com": "draft-servicio-flyers-digitales-music-lynxpardelle-com",
+    "servicio-jingles.music.lynxpardelle.com": "draft-servicio-jingles-music-lynxpardelle-com",
+    "servicio-landing-pages.music.lynxpardelle.com": "draft-servicio-landing-pages-music-lynxpardelle-com",
+    "servicio-logos.music.lynxpardelle.com": "draft-servicio-logos-music-lynxpardelle-com",
+    "servicio-masterizacion.music.lynxpardelle.com": "draft-servicio-masterizacion-music-lynxpardelle-com",
+    "servicio-mezcla.music.lynxpardelle.com": "draft-servicio-mezcla-music-lynxpardelle-com",
+    "servicio-portadas-musicales.music.lynxpardelle.com": "draft-servicio-portadas-musicales-music-lynxpardelle-com",
+    "servicio-portafolios-online.music.lynxpardelle.com": "draft-servicio-portafolios-online-music-lynxpardelle-com",
+    "servicio-presskits-online.music.lynxpardelle.com": "draft-servicio-presskits-online-music-lynxpardelle-com",
+    "servicio-sitios-web.music.lynxpardelle.com": "draft-servicio-sitios-web-music-lynxpardelle-com",
+    "servicio-soundtracks.music.lynxpardelle.com": "draft-servicio-soundtracks-music-lynxpardelle-com",
+    "servicio-videoclips.music.lynxpardelle.com": "draft-servicio-videoclips-music-lynxpardelle-com",
+}
 ISOLATED_PRODUCTION_REPOS = {
     "zooberiahsystems.com": "draft-zooberiahsystems-com",
     "dipsydoo.com.mx": "draft-dipsydoo-com-mx",
+    **LYNX_OFFER_REPOS,
 }
 
 CANONICAL_ACTIONS = ("createSite", "upsertDraft", "publishDraft", "getSite")
@@ -49,6 +100,7 @@ REPO_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 GITHUB_OWNER_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 ROLE_ARN_PATTERN = re.compile(r"^arn:(?P<partition>[^:]+):iam::(?P<account>\d{12}):role/(?P<name>[A-Za-z0-9+=,.@_/-]+)$")
+MAX_ROLE_NAME_LENGTH = 64
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 CENTRAL_TIME = ZoneInfo("America/Mexico_City")
 AUTHORING_REPOSITORY = "zoolanding-config-authoring"
@@ -163,6 +215,19 @@ def verify_deployed_artifact(
 
 def _is_reviewed_production_pair(domain: Any, repo: Any) -> bool:
     return isinstance(domain, str) and isinstance(repo, str) and ISOLATED_PRODUCTION_REPOS.get(domain) == repo
+
+
+def _require_isolated_repository(
+    registry: dict[str, Any], domain: str, repo: str, environment: str,
+) -> None:
+    if environment == "production" and not _is_reviewed_production_pair(domain, repo):
+        raise BootstrapError("isolated production repository is not the reviewed target")
+    if domain in LYNX_OFFER_REPOS and (
+        LYNX_OFFER_REPOS[domain] != repo
+        or registry.get("owner") != LYNX_OFFER_OWNER
+        or _registered_repo_owner(registry, repo) != LYNX_OFFER_OWNER
+    ):
+        raise BootstrapError("isolated Lynx offer requires the reviewed GitHub repository identity")
 
 
 def _strict_domain(value: Any) -> str:
@@ -1287,6 +1352,20 @@ def collect_test_green_evidence(
     )
 
 
+def _deployment_role_name(domain: str, environment: str) -> str:
+    # Match the hub's roleNameFor for a strictly validated canonical domain.
+    domain_slug = re.sub(r"[^a-z0-9]+", "-", domain)
+    stem = f"draft-{domain_slug}"
+    suffix = f"-{environment}-deploy"
+    name = f"{stem}{suffix}"
+    if len(name) <= MAX_ROLE_NAME_LENGTH:
+        return name
+
+    digest = sha256_hex(domain.encode("ascii"))[:16]
+    stem_length = MAX_ROLE_NAME_LENGTH - len(suffix) - len(digest) - 1
+    return f"{stem[:stem_length].rstrip('-')}-{digest}{suffix}"
+
+
 def verify_role_evidence(
     *,
     owner: str,
@@ -1308,8 +1387,7 @@ def verify_role_evidence(
         raise BootstrapError("role evidence is incomplete")
     role_arn = _one_string(github.get("AWS_ROLE_ARN"), "GitHub AWS_ROLE_ARN")
     match = ROLE_ARN_PATTERN.fullmatch(role_arn)
-    suffix = "test" if environment == "test" else "production"
-    expected_role_name = f"{repo}-{suffix}-deploy"
+    expected_role_name = _deployment_role_name(domain, environment)
     if (
         github.get("DRAFT_DOMAIN") != domain
         or match is None
@@ -1561,8 +1639,7 @@ def collect_verified_bindings(
         drafts = [entry for entry in drafts if entry["domain"] == domain]
         if len(drafts) != 1:
             raise BootstrapError("isolated domain must select exactly one registered draft")
-        if environment == "production" and not _is_reviewed_production_pair(domain, drafts[0].get("repo")):
-            raise BootstrapError("isolated production repository is not the reviewed target")
+        _require_isolated_repository(registry, domain, drafts[0]["repo"], environment)
     bindings: list[dict[str, str]] = []
     for entry in drafts:
         if not isinstance(entry, dict):
@@ -1582,7 +1659,7 @@ def collect_verified_bindings(
             github.get("DRAFT_DOMAIN") != domain
             or match.group("partition") != "aws"
             or match.group("account") != account_id
-            or match.group("name") != f"{repo}-{environment}-deploy"
+            or match.group("name") != _deployment_role_name(domain, environment)
         ):
             raise BootstrapError("isolated role coordinates do not match the selected draft")
         iam_result = runner.run_json([
@@ -2390,10 +2467,7 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
     selected = [scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain]
     if len(selected) != 1:
         raise BootstrapError("isolated domain must select exactly one registered draft")
-    if environment == "production" and not _is_reviewed_production_pair(
-        selected[0]["domain"], selected[0]["repo"],
-    ):
-        raise BootstrapError("isolated production repository is not the reviewed target")
+    _require_isolated_repository(registry, domain, selected[0]["repo"], environment)
     runner = CommandRunner()
     account = _account_id(runner, args.profile)
     bindings = collect_verified_bindings(
@@ -2650,6 +2724,7 @@ def _verify_isolated_test(args: argparse.Namespace) -> dict[str, Any]:
         selected[0]["domain"], selected[0]["repo"],
     ):
         raise BootstrapError("isolated test evidence target is not exact")
+    _require_isolated_repository(registry, domain, selected[0]["repo"], "test")
 
     runner = CommandRunner()
     account_id = _account_id(runner, args.profile)

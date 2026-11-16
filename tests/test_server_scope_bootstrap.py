@@ -184,6 +184,55 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                     bootstrap.parse_args(rejected)
         self.assertEqual(parsed.add_domain, "zooberiahsystems.com")
 
+    def test_lynx_offer_selection_matches_only_the_reviewed_inventory(self):
+        new_pairs = {
+            domain: f"LynxPardelle/{repo}"
+            for domain, repo in bootstrap.ISOLATED_PRODUCTION_REPOS.items()
+            if domain not in {"zooberiahsystems.com", "dipsydoo.com.mx"}
+        }
+        reviewed_pairs = json.dumps(new_pairs, sort_keys=True, separators=(",", ":")).encode("ascii")
+        self.assertEqual(len(new_pairs), 47)
+        self.assertEqual(
+            hashlib.sha256(reviewed_pairs).hexdigest(),
+            "98c32d41c1dafbf9d50aa7501ca61442f197a46198033d39973103f482c7ab01",
+        )
+
+        domain = "curso-musica-electronica.music.lynxpardelle.com"
+        repo = "draft-curso-musica-electronica-music-lynxpardelle-com"
+        arguments = [
+            "verify-test", "--registry", "registry.json", "--expected-draft-count", "47",
+            "--profile", "operator", "--test-commit", "a" * 40,
+            "--test-run-id", "123", "--canary-repo", repo, "--canary-run-id", "456",
+        ]
+        self.assertEqual(bootstrap.parse_args(arguments + ["--add-domain", domain]).add_domain, domain)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                bootstrap.parse_args(arguments + ["--add-domain", "otro.music.lynxpardelle.com"])
+            with self.assertRaises(SystemExit):
+                bootstrap.parse_args(arguments + [
+                    "--add-domain", "curso-diseno-sonoro.music.lynxpardelle.com",
+                ])
+
+    def test_lynx_offer_registry_identity_mismatch_stops_before_external_reads(self):
+        domain = "curso-musica-electronica.music.lynxpardelle.com"
+        repo = "draft-curso-musica-electronica-music-lynxpardelle-com"
+        for entry in (draft(domain, "draft-wrong-repo"), draft(domain, repo, owner="OtherOwner")):
+            for environment in ("test", "production"):
+                with self.subTest(entry=entry["githubUrl"], environment=environment):
+                    flag = "--test-bucket" if environment == "test" else "--production-bucket"
+                    args = bootstrap.parse_args([
+                        "plan", "--registry", "registry.json", "--expected-draft-count", "1",
+                        "--profile", "operator", "--add-domain", domain, "--environment", environment,
+                        flag, bootstrap.ENVIRONMENT_BUCKETS[environment],
+                    ])
+                    with (
+                        mock.patch.object(bootstrap, "_load_json_file", return_value=registry(entry)),
+                        mock.patch.object(bootstrap, "CommandRunner") as runner,
+                        self.assertRaisesRegex(bootstrap.BootstrapError, "repository"),
+                    ):
+                        bootstrap._isolated_command(args, write=False)
+                    runner.assert_not_called()
+
     def test_isolated_registry_duplicate_keys_fail_before_any_external_access(self):
         raw = json.dumps(self.registry)
         for old, duplicated in (
@@ -281,6 +330,64 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         except TypeError:
             self.fail("binding collector does not yet guard the isolated role")
         self.assertEqual(len(commands), 2)
+
+    def test_long_domain_role_is_verified_independently_of_the_repository_slug(self):
+        owner = "LynxPardelle"
+        account = "123456789012"
+        domain = "curso-musica-electronica.music.lynxpardelle.com"
+        repo = "draft-curso-musica-electronica-music-lynxpardelle-com"
+        prefix = f"repo:{owner}@1234567/{repo}@7654321"
+        source_registry = registry(draft(domain, repo))
+        cases = (
+            ("test", "test", "draft-curso-musica-electronica-musi-e9d3b7a15f28b971-test-deploy"),
+            ("production", "main", "draft-curso-musica-electronic-e9d3b7a15f28b971-production-deploy"),
+        )
+        for environment, branch, role_name in cases:
+            with self.subTest(environment=environment):
+                role_arn = f"arn:aws:iam::{account}:role/{role_name}"
+                trust = {"Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Federated": f"arn:aws:iam::{account}:oidc-provider/token.actions.githubusercontent.com"},
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {"StringEquals": {
+                        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                        "token.actions.githubusercontent.com:ref": f"refs/heads/{branch}",
+                        "token.actions.githubusercontent.com:sub": f"{prefix}:environment:{environment}",
+                    }},
+                }]}
+                iam = {"Arn": role_arn, "RoleName": role_name, "AssumeRolePolicyDocument": trust}
+                expected = {
+                    "domain": domain, "repo": repo, "environment": environment, "roleArn": role_arn,
+                }
+                evidence = {"github": {"DRAFT_DOMAIN": domain, "AWS_ROLE_ARN": role_arn}, "iam": iam}
+                self.assertEqual(bootstrap.verify_role_evidence(
+                    owner=owner, domain=domain, repo=repo, environment=environment,
+                    account_id=account, evidence=evidence, oidc_subject=f"{prefix}:environment:{environment}",
+                ), expected)
+
+                if environment == "test":
+                    def runner_for(arn):
+                        return mock.Mock(run_json=mock.Mock(side_effect=[
+                            {"use_default": True, "sub_claim_prefix": prefix},
+                            [{"name": "DRAFT_DOMAIN", "value": domain}, {"name": "AWS_ROLE_ARN", "value": arn}],
+                            {"Role": iam},
+                        ]))
+
+                    runner = runner_for(role_arn)
+                    self.assertEqual(bootstrap.collect_verified_bindings(
+                        source_registry, environment=environment, profile="operator",
+                        account_id=account, runner=runner, domain=domain,
+                    ), [expected])
+                    self.assertIn(role_name, runner.run_json.call_args.args[0])
+
+                    wrong_arn = role_arn.replace("e9d3b7a15f28b971", "0000000000000000")
+                    runner = runner_for(wrong_arn)
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "isolated role coordinates"):
+                        bootstrap.collect_verified_bindings(
+                            source_registry, environment=environment, profile="operator",
+                            account_id=account, runner=runner, domain=domain,
+                        )
+                    self.assertEqual(runner.run_json.call_count, 2)
 
     def test_isolated_production_binding_reads_only_the_selected_exact_identity(self):
         production_registry = registry(
