@@ -469,6 +469,52 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
         self.assertEqual(new_rules[-1]["domains"], [target["domain"]])
 
+    def test_isolated_candidate_preserves_prior_short_and_hashed_role_bindings(self):
+        baseline_scopes, _, _ = self._isolated_baseline()
+        baseline = json.loads(baseline_scopes)
+        domains = (
+            "curso-musica-electronica.music.lynxpardelle.com",
+            "servicio-logos.music.lynxpardelle.com",
+        )
+
+        for environment in ("test", "production"):
+            with self.subTest(environment=environment):
+                scope_bytes = baseline_scopes
+                authz_bytes = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(
+                    baseline,
+                    [binding(item["domain"], item["repo"], environment) for item in baseline["scopes"]],
+                    environment,
+                ))
+                for domain in domains:
+                    repo = bootstrap.LYNX_OFFER_REPOS[domain]
+                    role_name = bootstrap._deployment_role_name(domain, environment)
+                    legacy_name = f"{repo}-{environment}-deploy"
+                    self.assertEqual(role_name == legacy_name, domain == domains[1])
+                    target = {"domain": domain, "repo": repo, "tenantId": repo, "draftId": repo}
+                    target_binding = {
+                        "domain": domain, "repo": repo, "environment": environment,
+                        "roleArn": f"arn:aws:iam::123456789012:role/{role_name}",
+                    }
+                    inputs = {
+                        "scope_bytes": scope_bytes, "authz_bytes": authz_bytes,
+                        "target_scope": target, "expected_owner": "123456789012", "environment": environment,
+                    }
+
+                    wrong = {**target_binding, "roleArn": f"arn:aws:iam::123456789012:role/{role_name[:-1]}x"}
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "authorization rollback binding is not exact"):
+                        bootstrap.build_isolated_bundle(**inputs, target_binding=wrong)
+
+                    proposed_scope, proposed_authz, mode = bootstrap.build_isolated_bundle(
+                        **inputs, target_binding=target_binding,
+                    )
+                    self.assertEqual(mode, "add")
+                    previous_scopes = [
+                        item for item in json.loads(proposed_scope)["scopes"] if item["domain"] != domain
+                    ]
+                    self.assertEqual(previous_scopes, json.loads(scope_bytes)["scopes"])
+                    self.assertEqual(bootstrap.canonical_json_bytes(json.loads(proposed_authz)[:-1]), authz_bytes)
+                    scope_bytes, authz_bytes = proposed_scope, proposed_authz
+
     def test_isolated_production_candidate_preserves_existing_bytes_and_appends_one_exact_rule(self):
         scopes, rules, _ = self._isolated_baseline()
         production_rules = json.loads(rules)
