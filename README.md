@@ -201,6 +201,23 @@ only those categories in operator logs. For an apply error, classify both
 current and version-specific objects before deciding how to proceed. The SDK
 still makes one attempt for each call.
 
+#### Estructura musical TEST scope-only recovery
+
+Use the same reviewed TEST recovery with `--recover-estructura`,
+`--environment test`, and the exact
+`--add-domain masterclass-estructura-musical.music.lynxpardelle.com`.
+The plan requires 39 scopes and grants at the preceding version, 40 scopes and
+39 grants currently, and a 40-grant candidate that adds only Estructura musical.
+Review the prior scope version and hash, both current ETag/version/SHA-256 triples,
+and both candidate hashes. Apply with the same selector and approvals. Verify
+one authorization write, unchanged scope metadata and bytes, and a normal TEST
+plan returning `updateMode: noop`.
+
+The isolated operator opens a new SDK client and HTTP connection pool for each
+conditional PUT, using the same authenticated session, region, and SDK config
+as its read client. Each write gets one SDK attempt. The operator closes that
+client after the request and keeps the existing conditional writes and readbacks.
+
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
 Current deployed endpoint:

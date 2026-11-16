@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import suppress
 from datetime import datetime
 import hashlib
 import io
@@ -96,9 +97,11 @@ ISOLATED_PRODUCTION_REPOS = {
 
 AUDIOVISUAL_RECOVERY_DOMAIN = "curso-produccion-audiovisual.music.lynxpardelle.com"
 ACORDES_RECOVERY_DOMAIN = "masterclass-acordes.music.lynxpardelle.com"
+ESTRUCTURA_RECOVERY_DOMAIN = "masterclass-estructura-musical.music.lynxpardelle.com"
 RECOVERY_INCIDENTS = {
     "audiovisual": ("production", AUDIOVISUAL_RECOVERY_DOMAIN, 18),
     "acordes": ("test", ACORDES_RECOVERY_DOMAIN, 37),
+    "estructura": ("test", ESTRUCTURA_RECOVERY_DOMAIN, 40),
 }
 
 CANONICAL_ACTIONS = ("createSite", "upsertDraft", "publishDraft", "getSite")
@@ -1859,27 +1862,31 @@ class AwsCliS3:
 class InMemoryS3(AwsCliS3):
     """Operator-only body transport; metadata retains the existing CLI checks."""
 
-    def __init__(self, *, profile: str, region: str, environment: str = "test", runner=None, client=None):
+    def __init__(self, *, profile: str, region: str, environment: str = "test", runner=None, client_factory=None):
         super().__init__(profile=profile, region=region, runner=runner)
         if environment not in ENVIRONMENTS:
             raise BootstrapError("isolated S3 environment is invalid")
         self.environment = environment
-        if client is None:
-            try:
+        try:
+            if client_factory is None:
                 from boto3 import Session
                 from botocore.config import Config
-                client = Session(profile_name=profile).client(
-                    "s3", region_name=region,
-                    config=Config(
-                        signature_version="s3v4", connect_timeout=10, read_timeout=60,
-                        retries={"mode": "standard", "total_max_attempts": 1},
-                    ),
+
+                session = Session(profile_name=profile)
+                config = Config(
+                    signature_version="s3v4", connect_timeout=10, read_timeout=60,
+                    retries={"mode": "standard", "total_max_attempts": 1},
                 )
-            except ImportError:
-                raise BootstrapError("isolated onboarding requires operator-only boto3") from None
-            except Exception:
-                raise BootstrapError("isolated S3 client could not be initialized") from None
-        self.client = client
+
+                def client_factory():
+                    return session.client("s3", region_name=region, config=config)
+
+            self._client_factory = client_factory
+            self.client = client_factory()
+        except ImportError:
+            raise BootstrapError("isolated onboarding requires operator-only boto3") from None
+        except Exception:
+            raise BootstrapError("isolated S3 client could not be initialized") from None
 
     def _parameters(self, bucket, key, expected_owner):
         require_environment_bucket(self.environment, bucket)
@@ -1964,7 +1971,14 @@ class InMemoryS3(AwsCliS3):
         if if_none_match is not None:
             parameters["IfNoneMatch"] = if_none_match
         try:
-            result = self.client.put_object(**parameters)
+            # Each write gets its own HTTP pool while retaining the reviewed session and config.
+            writer = self._client_factory()
+            try:
+                result = writer.put_object(**parameters)
+            finally:
+                # Cleanup cannot invalidate an acknowledged write or mask its failure.
+                with suppress(Exception):
+                    writer.close()
         except Exception as exc:
             raise S3OperationError(operation, _s3_failure_family(exc)) from None
         if not isinstance(result, dict) or not isinstance(result.get("ETag"), str) or not result.get("VersionId"):
@@ -3030,6 +3044,8 @@ def _add_recovery_selectors(parser: argparse.ArgumentParser) -> None:
                           help="Recover the reviewed Audiovisual production grant.")
     recovery.add_argument("--recover-acordes", dest="recovery", action="store_const", const="acordes",
                           help="Recover the reviewed Acordes TEST grant.")
+    recovery.add_argument("--recover-estructura", dest="recovery", action="store_const", const="estructura",
+                          help="Recover the reviewed Estructura musical TEST grant.")
 
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:

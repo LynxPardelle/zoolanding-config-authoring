@@ -595,8 +595,11 @@ class ServerScopeBootstrapTests(unittest.TestCase):
     def _recovery_candidate(self, incident="audiovisual", prior_count=None):
         if incident == "audiovisual":
             domain, environment, observed = "curso-produccion-audiovisual.music.lynxpardelle.com", "production", 17
-        else:
+        elif incident == "acordes":
             domain, environment, observed = "masterclass-acordes.music.lynxpardelle.com", "test", 36
+        else:
+            self.assertEqual(incident, "estructura")
+            domain, environment, observed = "masterclass-estructura-musical.music.lynxpardelle.com", "test", 39
         prior_count = observed if prior_count is None else prior_count
         prior_scope, _, _ = self._isolated_baseline()
         prior_contract = json.loads(prior_scope)
@@ -752,6 +755,9 @@ class ServerScopeBootstrapTests(unittest.TestCase):
     def test_acordes_recovery_command_writes_only_the_missing_test_grant_and_noops_normally(self):
         self._verify_recovery_command("acordes")
 
+    def test_estructura_recovery_command_writes_only_the_missing_test_grant_and_noops_normally(self):
+        self._verify_recovery_command("estructura")
+
     def _verify_recovery_command(self, incident):
         inputs, candidate_authz = self._recovery_candidate(incident)
         environment = inputs["environment"]
@@ -828,7 +834,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             args.recovery = None
             noop = bootstrap._plan(args)
         self.assertEqual(noop["updateMode"], "noop")
-        self.assertEqual(result["ruleCount"], 18 if incident == "audiovisual" else 37)
+        self.assertEqual(result["ruleCount"], {"audiovisual": 18, "acordes": 37, "estructura": 40}[incident])
         if environment == "production":
             collect.assert_called_once()
             self.assertEqual(collect.call_args.kwargs["expected_scope_bytes"], inputs["current_scope_bytes"])
@@ -877,6 +883,29 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         with self.assertRaisesRegex(bootstrap.BootstrapError, "observed scope count"):
             bootstrap.build_recovery_bundle(**inputs)
 
+    def test_estructura_recovery_cli_limits_the_selector_to_the_exact_test_incident(self):
+        domain = "masterclass-estructura-musical.music.lynxpardelle.com"
+        common = ["plan", "--registry", "fixture.json", "--expected-draft-count", "3", "--profile", "operator"]
+        exact = ["--environment", "test", "--test-bucket", bootstrap.ENVIRONMENT_BUCKETS["test"],
+                 "--add-domain", domain, "--recover-estructura"]
+        self.assertEqual(bootstrap.parse_args(common + exact).recovery, "estructura")
+        for args in (
+            exact[:-2] + ["masterclass-acordes.music.lynxpardelle.com", "--recover-estructura"],
+            exact + ["--recover-acordes"],
+            ["--environment", "production", "--production-bucket", bootstrap.ENVIRONMENT_BUCKETS["production"],
+             "--add-domain", domain, "--recover-estructura"],
+        ):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                bootstrap.parse_args(common + args)
+
+    def test_estructura_recovery_rejects_otherwise_exact_additions_with_different_counts(self):
+        for prior_count in (38, 40):
+            inputs, _ = self._recovery_candidate("estructura", prior_count=prior_count)
+            with self.subTest(prior_count=prior_count), self.assertRaisesRegex(
+                bootstrap.BootstrapError, "observed scope count"
+            ):
+                bootstrap.build_recovery_bundle(**inputs)
+
     def test_isolated_candidate_rejects_cross_field_identity_collisions(self):
         scopes, rules, target = self._isolated_baseline()
         for key, value in (("tenantId", "zoosite"), ("tenantId", "draft-example-com"),
@@ -912,7 +941,8 @@ class ServerScopeBootstrapTests(unittest.TestCase):
     def _memory_s3(self, client=None, environment="test"):
         adapter = getattr(bootstrap, "InMemoryS3", None)
         self.assertIsNotNone(adapter, "isolated S3 transport is not implemented")
-        return adapter(profile="operator", region="us-east-1", environment=environment, client=client)
+        factory = None if client is None else lambda: client
+        return adapter(profile="operator", region="us-east-1", environment=environment, client_factory=factory)
 
     def test_isolated_sdk_reads_and_writes_bodies_only_in_memory(self):
         body = b'{"synthetic":true}\n'
@@ -952,6 +982,73 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertEqual(sdk.Session.call_args.kwargs, {"profile_name": "operator"})
         self.assertEqual(sdk.Session.return_value.client.call_args.kwargs["region_name"], "us-east-1")
 
+    def test_isolated_sdk_opens_a_fresh_client_for_each_conditional_put(self):
+        read_client, scope_client, authz_client = mock.Mock(), mock.Mock(), mock.Mock()
+        read_client.get_object.return_value = {"Body": io.BytesIO(b"[]\n")}
+        scope_client.put_object.return_value = {"ETag": '"scope-new"', "VersionId": "scope-version"}
+        authz_client.put_object.return_value = {"ETag": '"authz-new"', "VersionId": "authz-version"}
+        sdk, config = mock.Mock(), mock.Mock()
+        session = sdk.Session.return_value
+        session.client.side_effect = [read_client, scope_client, authz_client]
+        with mock.patch.dict(sys.modules, {"boto3": sdk, "botocore.config": config}):
+            adapter = self._memory_s3()
+            bucket, account = bootstrap.ENVIRONMENT_BUCKETS["test"], "123456789012"
+            adapter.get_object(bucket, bootstrap.SCOPE_KEY, account)
+            adapter.put_object(bucket, bootstrap.SCOPE_KEY, b"[]\n", account, if_match='"scope-old"')
+            adapter.put_object(bucket, bootstrap.AUTHZ_KEY, b"[]\n", account, if_match='"authz-old"')
+        sdk.Session.assert_called_once_with(profile_name="operator")
+        config.Config.assert_called_once()
+        self.assertEqual(config.Config.call_args.kwargs["retries"], {"mode": "standard", "total_max_attempts": 1})
+        self.assertEqual(session.client.call_args_list, [
+            mock.call("s3", region_name="us-east-1", config=config.Config.return_value),
+        ] * 3)
+        read_client.put_object.assert_not_called()
+        read_client.close.assert_not_called()
+        scope_client.get_object.assert_not_called()
+        authz_client.get_object.assert_not_called()
+        self.assertEqual((scope_client.put_object.call_count, authz_client.put_object.call_count), (1, 1))
+        self.assertEqual(scope_client.put_object.call_args.kwargs["IfMatch"], '"scope-old"')
+        self.assertEqual(authz_client.put_object.call_args.kwargs["IfMatch"], '"authz-old"')
+        self.assertEqual(scope_client.put_object.call_args.kwargs["Key"], bootstrap.SCOPE_KEY)
+        self.assertEqual(authz_client.put_object.call_args.kwargs["Key"], bootstrap.AUTHZ_KEY)
+        scope_client.close.assert_called_once()
+        authz_client.close.assert_called_once()
+
+    def test_isolated_sdk_closes_failed_write_client_without_retry(self):
+        class ConnectionClosedError(Exception):
+            pass
+
+        reader, writer = mock.Mock(), mock.Mock()
+        writer.put_object.side_effect = ConnectionClosedError("PRIVATE-SENTINEL")
+        factory = mock.Mock(side_effect=[reader, writer])
+        adapter = bootstrap.InMemoryS3(
+            profile="operator", region="us-east-1", environment="test", client_factory=factory,
+        )
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["test"], "123456789012"
+        with self.assertRaises(bootstrap.S3OperationError) as captured:
+            adapter.put_object(bucket, bootstrap.AUTHZ_KEY, b"[]\n", account, if_match='"old"')
+        self.assertEqual((captured.exception.operation, captured.exception.family), ("authz_put", "connection"))
+        self.assertEqual(factory.call_count, 2)
+        reader.put_object.assert_not_called()
+        writer.put_object.assert_called_once()
+        writer.close.assert_called_once()
+
+    def test_isolated_sdk_preserves_acknowledged_write_when_transport_cleanup_fails(self):
+        reader, writer = mock.Mock(), mock.Mock()
+        writer.put_object.return_value = {"ETag": '"new"', "VersionId": "version"}
+        writer.close.side_effect = OSError("PRIVATE-SENTINEL")
+        factory = mock.Mock(side_effect=[reader, writer])
+        adapter = bootstrap.InMemoryS3(
+            profile="operator", region="us-east-1", environment="test", client_factory=factory,
+        )
+        result = adapter.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY, b"[]\\n",
+            "123456789012", if_match='"old"',
+        )
+        self.assertEqual(result, {"etag": '"new"', "versionId": "version"})
+        writer.put_object.assert_called_once()
+        writer.close.assert_called_once()
+
     def test_isolated_sdk_sanitizes_precondition_failed_without_retry(self):
         class ConditionalFailure(Exception):
             response = {"Error": {"Code": "PreconditionFailed", "Message": "PRIVATE-SENTINEL"}}
@@ -976,7 +1073,7 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         client = mock.Mock()
         runner = mock.Mock()
         adapter = bootstrap.InMemoryS3(
-            profile="operator", region="us-east-1", environment="test", client=client, runner=runner,
+            profile="operator", region="us-east-1", environment="test", client_factory=lambda: client, runner=runner,
         )
         bucket, account = bootstrap.ENVIRONMENT_BUCKETS["test"], "123456789012"
         client.get_object.side_effect = ReadTimeoutError("PRIVATE-SENTINEL")
