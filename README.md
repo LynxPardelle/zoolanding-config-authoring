@@ -183,6 +183,24 @@ hash, and one new authorization version. Re-run the normal isolated production
 or readback diverges, stop and review the exact state again. Recovery leaves the
 prior versions in place.
 
+#### Acordes TEST scope-only recovery
+
+Use the same approved recovery protocol with `--recover-acordes`,
+`--environment test`, and the exact `--add-domain masterclass-acordes.music.lynxpardelle.com`.
+The read-only plan requires the immediate previous scope version with 36 canonical
+scopes and grants, the current version with 37 scopes and 36 grants, and a
+37-grant candidate that adds only Acordes. Review the prior version and hash,
+both current ETag/version/SHA-256 triples, and both candidate hashes. Apply with
+the same selector, the normal TEST trust checks, and those exact approvals.
+Expect one authorization write, unchanged scope metadata and bytes, and a normal
+isolated TEST plan returning `updateMode: noop`.
+
+Isolated S3 transport exceptions expose fixed `operation` and `family`
+categories covering the logical object read, metadata check, or write. Retain
+only those categories in operator logs. For an apply error, classify both
+current and version-specific objects before deciding how to proceed. The SDK
+still makes one attempt for each call.
+
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
 Current deployed endpoint:

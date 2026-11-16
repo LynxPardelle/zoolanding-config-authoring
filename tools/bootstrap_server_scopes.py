@@ -95,6 +95,11 @@ ISOLATED_PRODUCTION_REPOS = {
 }
 
 AUDIOVISUAL_RECOVERY_DOMAIN = "curso-produccion-audiovisual.music.lynxpardelle.com"
+ACORDES_RECOVERY_DOMAIN = "masterclass-acordes.music.lynxpardelle.com"
+RECOVERY_INCIDENTS = {
+    "audiovisual": ("production", AUDIOVISUAL_RECOVERY_DOMAIN, 18),
+    "acordes": ("test", ACORDES_RECOVERY_DOMAIN, 37),
+}
 
 CANONICAL_ACTIONS = ("createSite", "upsertDraft", "publishDraft", "getSite")
 SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -124,6 +129,51 @@ MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024
 
 class BootstrapError(RuntimeError):
     """Raised when the bootstrap cannot prove a required invariant."""
+
+
+class S3OperationError(BootstrapError):
+    """Report only a code-owned operation and failure family."""
+
+    def __init__(self, operation: str, family: str):
+        super().__init__(f"isolated S3 {operation} failed ({family})")
+        self.operation = operation
+        self.family = family
+
+
+def _s3_failure_family(error: Exception) -> str:
+    if isinstance(error, BootstrapError):
+        return "timeout" if str(error) == "aws operation timed out" else "command_failure"
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        fields = response.get("Error")
+        code = fields.get("Code") if isinstance(fields, dict) else None
+        for family, codes in (
+            ("precondition", ("PreconditionFailed", "ConditionalRequestConflict")),
+            ("credentials", ("ExpiredToken", "InvalidAccessKeyId", "InvalidToken", "InvalidClientTokenId")),
+            ("access", ("AccessDenied", "Forbidden", "SignatureDoesNotMatch")),
+            ("not_found", ("NoSuchKey", "NoSuchVersion", "NoSuchBucket", "NotFound")),
+            ("throttled", ("SlowDown", "Throttling", "ThrottlingException", "TooManyRequestsException")),
+            ("timeout", ("RequestTimeout", "RequestTimeoutException")),
+        ):
+            if code in codes:
+                return family
+        metadata = response.get("ResponseMetadata")
+        status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+        if type(status) is int and 500 <= status <= 599:
+            return "service"
+    return {
+        "ConnectTimeoutError": "timeout",
+        "ReadTimeoutError": "timeout",
+        "EndpointConnectionError": "connection",
+        "ConnectionClosedError": "connection",
+        "ProxyConnectionError": "connection",
+        "ResponseStreamingError": "connection",
+        "IncompleteReadError": "connection",
+        "SSLError": "certificate",
+        "NoCredentialsError": "credentials",
+        "PartialCredentialsError": "credentials",
+        "CredentialRetrievalError": "credentials",
+    }.get(type(error).__name__, "unknown")
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -1837,24 +1887,37 @@ class InMemoryS3(AwsCliS3):
             raise BootstrapError("isolated S3 key is not allowlisted")
         return {"Bucket": bucket, "Key": key, "ExpectedBucketOwner": expected_owner}
 
-    def prior_audiovisual_scope_version(
+    def bucket_state(self, bucket: str, expected_owner: str) -> dict[str, Any]:
+        require_environment_bucket(self.environment, bucket)
+        try:
+            return super().bucket_state(bucket, expected_owner)
+        except BootstrapError as exc:
+            raise S3OperationError("bucket_controls", _s3_failure_family(exc)) from None
+
+    def head_object(self, bucket: str, key: str, expected_owner: str) -> Optional[dict[str, Any]]:
+        self._parameters(bucket, key, expected_owner)
+        operation = "scope_head" if key == SCOPE_KEY else "authz_head"
+        try:
+            return super().head_object(bucket, key, expected_owner)
+        except BootstrapError as exc:
+            raise S3OperationError(operation, _s3_failure_family(exc)) from None
+
+    def prior_scope_version(
         self, bucket: str, expected_owner: str, current_head: dict[str, Any]
     ) -> str:
-        if self.environment != "production":
-            raise BootstrapError("Audiovisual recovery requires production")
         require_environment_bucket(self.environment, bucket)
         try:
             result = self.client.list_object_versions(
                 Bucket=bucket, ExpectedBucketOwner=expected_owner, Prefix=SCOPE_KEY, MaxKeys=2,
             )
-        except Exception:
-            raise BootstrapError("Audiovisual recovery could not read version history") from None
+        except Exception as exc:
+            raise S3OperationError("scope_version_history", _s3_failure_family(exc)) from None
         versions = result.get("Versions") if isinstance(result, dict) else None
         if (
             not isinstance(versions, list) or len(versions) != 2 or result.get("DeleteMarkers")
             or any(not isinstance(item, dict) or item.get("Key") != SCOPE_KEY for item in versions)
         ):
-            raise BootstrapError("Audiovisual recovery requires two consecutive scope versions")
+            raise BootstrapError("recovery requires two consecutive scope versions")
         current, prior = versions
         version_id = prior.get("VersionId")
         if (
@@ -1864,11 +1927,14 @@ class InMemoryS3(AwsCliS3):
             or not isinstance(version_id, str) or not version_id or version_id == "null"
             or version_id == current.get("VersionId")
         ):
-            raise BootstrapError("Audiovisual recovery scope versions changed")
+            raise BootstrapError("recovery scope versions changed")
         return version_id
 
     def get_object(self, bucket, key, expected_owner, version_id=None):
         parameters = self._parameters(bucket, key, expected_owner)
+        scope_kind = "scope" if key == SCOPE_KEY else "authz"
+        version_kind = "versioned" if version_id is not None else "current"
+        operation = f"{scope_kind}_{version_kind}_get"
         if version_id is not None:
             parameters["VersionId"] = version_id
         try:
@@ -1876,15 +1942,18 @@ class InMemoryS3(AwsCliS3):
             try:
                 body = stream.read()
                 if not isinstance(body, bytes):
-                    raise ValueError("invalid body type")
+                    raise S3OperationError(operation, "invalid_response")
                 return body
             finally:
                 stream.close()
-        except Exception:
-            raise BootstrapError("isolated S3 body could not be read") from None
+        except S3OperationError:
+            raise
+        except Exception as exc:
+            raise S3OperationError(operation, _s3_failure_family(exc)) from None
 
     def put_object(self, bucket, key, body, expected_owner, *, if_match=None, if_none_match=None):
         parameters = self._parameters(bucket, key, expected_owner)
+        operation = "scope_put" if key == SCOPE_KEY else "authz_put"
         parameters.update(
             Body=body, ContentType="application/json", ServerSideEncryption="AES256",
             ChecksumAlgorithm="SHA256",
@@ -1897,13 +1966,9 @@ class InMemoryS3(AwsCliS3):
         try:
             result = self.client.put_object(**parameters)
         except Exception as exc:
-            response = getattr(exc, "response", None)
-            error = response.get("Error") if isinstance(response, dict) else None
-            if isinstance(error, dict) and error.get("Code") in {"PreconditionFailed", "ConditionalRequestConflict"}:
-                raise BootstrapError("isolated S3 precondition failed; re-plan required") from None
-            raise BootstrapError("isolated S3 write failed; recheck state before proceeding") from None
+            raise S3OperationError(operation, _s3_failure_family(exc)) from None
         if not isinstance(result, dict) or not isinstance(result.get("ETag"), str) or not result.get("VersionId"):
-            raise BootstrapError("versioned S3 write did not return ETag and VersionId")
+            raise S3OperationError(operation, "invalid_response")
         return {"etag": result["ETag"], "versionId": result["VersionId"]}
 
 
@@ -2013,7 +2078,7 @@ def apply_private_bundle(
             raise BootstrapError("authorization object changed after review")
     scope_head = s3.head_object(bucket, SCOPE_KEY, expected_owner)
     if require_scope_unchanged and (
-        bucket != ENVIRONMENT_BUCKETS["production"] or scope_head is None
+        bucket not in ENVIRONMENT_BUCKETS.values() or scope_head is None
         or current_authz is None or expected_current_authz_sha256 is None
     ):
         raise BootstrapError("recovery requires the reviewed scope and authorization objects")
@@ -2387,8 +2452,9 @@ def build_isolated_bundle(
     return proposed_scope, proposed_authz, "add"
 
 
-def build_audiovisual_recovery_bundle(
+def build_recovery_bundle(
     *,
+    incident: str,
     prior_scope_bytes: bytes,
     current_scope_bytes: bytes,
     current_authz_bytes: bytes,
@@ -2397,18 +2463,23 @@ def build_audiovisual_recovery_bundle(
     expected_owner: str,
     environment: str,
 ) -> tuple[bytes, bytes, str]:
-    if environment != "production" or target_scope.get("domain") != AUDIOVISUAL_RECOVERY_DOMAIN:
-        raise BootstrapError("recovery is limited to Audiovisual production")
+    reviewed = RECOVERY_INCIDENTS.get(incident)
+    domain = target_scope.get("domain")
+    if (
+        reviewed is None or (environment, domain) != reviewed[:2]
+        or target_scope.get("repo") != LYNX_OFFER_REPOS[reviewed[1]]
+    ):
+        raise BootstrapError("recovery does not match the reviewed incident")
     proposed_scope, proposed_authz, mode = build_isolated_bundle(
         scope_bytes=prior_scope_bytes, authz_bytes=current_authz_bytes,
         target_scope=target_scope, target_binding=target_binding,
         expected_owner=expected_owner, environment=environment,
     )
     if mode != "add" or proposed_scope != current_scope_bytes:
-        raise BootstrapError("Audiovisual recovery requires the exact interrupted scope addition")
+        raise BootstrapError("recovery requires the exact interrupted scope addition")
     # The candidate builder proves one rule per canonical scope and exactly one addition.
-    if len(json.loads(proposed_authz)) != 18:
-        raise BootstrapError("Audiovisual recovery requires the observed scope count")
+    if len(json.loads(proposed_authz)) != reviewed[2]:
+        raise BootstrapError("recovery requires the observed scope count")
     return current_scope_bytes, proposed_authz, "recover-authz"
 
 
@@ -2521,9 +2592,10 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
     bucket = args.bucket if write else (
         args.test_bucket if environment == "test" else args.production_bucket
     )
-    recovery = getattr(args, "recover_audiovisual", False)
-    if recovery and (domain != AUDIOVISUAL_RECOVERY_DOMAIN or environment != "production"):
-        raise BootstrapError("recovery is limited to Audiovisual production")
+    incident = getattr(args, "recovery", None)
+    recovery = incident is not None
+    if recovery and (environment, domain) != RECOVERY_INCIDENTS.get(incident, ())[:2]:
+        raise BootstrapError("recovery does not match the reviewed incident")
     if args.tenant_override:
         raise BootstrapError("isolated onboarding does not accept tenant overrides")
     if environment == "production" and domain not in ISOLATED_PRODUCTION_REPOS:
@@ -2564,14 +2636,14 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
     recovery_prior = None
     if recovery:
         current_scope_head, current_scope = snapshots["scope"]
-        previous_version = s3.prior_audiovisual_scope_version(bucket, account, current_scope_head)
+        previous_version = s3.prior_scope_version(bucket, account, current_scope_head)
         previous_scope = s3.get_object(bucket, SCOPE_KEY, account, previous_version)
         if write:
             if previous_version != args.expected_prior_scope_version_id:
-                raise BootstrapError("Audiovisual recovery prior scope version changed after review")
+                raise BootstrapError("recovery prior scope version changed after review")
             _require_approved_hash(args.expected_prior_scope_sha256, previous_scope, "prior scope")
-        scope_bytes, authz_bytes, mode = build_audiovisual_recovery_bundle(
-            prior_scope_bytes=previous_scope, current_scope_bytes=current_scope,
+        scope_bytes, authz_bytes, mode = build_recovery_bundle(
+            incident=incident, prior_scope_bytes=previous_scope, current_scope_bytes=current_scope,
             current_authz_bytes=snapshots["authz"][1], target_scope=selected[0],
             target_binding=bindings[0], expected_owner=account, environment=environment,
         )
@@ -2666,7 +2738,7 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
             "sha256": args.expected_current_scope_sha256,
             "written": False,
         }:
-            raise BootstrapError("Audiovisual recovery did not preserve the reviewed scope version")
+            raise BootstrapError("recovery did not preserve the reviewed scope version")
         response["scopeWritten"] = False
     if test_evidence_sha256 is not None:
         response["testEvidenceSha256"] = test_evidence_sha256
@@ -2952,6 +3024,14 @@ def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--region", default="us-east-1")
 
 
+def _add_recovery_selectors(parser: argparse.ArgumentParser) -> None:
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--recover-audiovisual", dest="recovery", action="store_const", const="audiovisual",
+                          help="Recover the reviewed Audiovisual production grant.")
+    recovery.add_argument("--recover-acordes", dest="recovery", action="store_const", const="acordes",
+                          help="Recover the reviewed Acordes TEST grant.")
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2962,16 +3042,14 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     plan.add_argument("--test-bucket")
     plan.add_argument("--production-bucket")
     plan.add_argument("--add-domain", action="append")
-    plan.add_argument("--recover-audiovisual", action="store_true",
-                      help="Plan exact recovery of the interrupted Audiovisual production grant.")
+    _add_recovery_selectors(plan)
 
     apply = commands.add_parser("apply", help="Conditionally write and read back one reviewed environment.")
     _add_generation_arguments(apply)
     apply.add_argument("--environment", required=True, choices=ENVIRONMENTS)
     apply.add_argument("--bucket", required=True)
     apply.add_argument("--add-domain", action="append")
-    apply.add_argument("--recover-audiovisual", action="store_true",
-                       help="Complete the reviewed Audiovisual production grant without writing scope.")
+    _add_recovery_selectors(apply)
     apply.add_argument("--expected-prior-scope-version-id")
     apply.add_argument("--expected-prior-scope-sha256")
     apply.add_argument("--approve-scope-sha256", required=True)
@@ -3009,18 +3087,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     rollback.add_argument("--expected-current-etag", required=True)
     args = parser.parse_args(argv)
     selected = getattr(args, "add_domain", None)
-    if getattr(args, "recover_audiovisual", False):
-        if selected != [AUDIOVISUAL_RECOVERY_DOMAIN] or args.environment != "production":
-            parser.error("--recover-audiovisual requires the exact production Audiovisual domain selector")
+    incident = getattr(args, "recovery", None)
+    if incident is not None:
+        environment, domain, _ = RECOVERY_INCIDENTS[incident]
+        if selected != [domain] or args.environment != environment:
+            parser.error(f"--recover-{incident} requires its exact environment and domain selector")
         if args.command == "apply" and (
             not args.expected_prior_scope_version_id
             or not SHA256_PATTERN.fullmatch(args.expected_prior_scope_sha256 or "")
         ):
-            parser.error("Audiovisual recovery apply requires the reviewed prior scope version and SHA-256")
+            parser.error("recovery apply requires the reviewed prior scope version and SHA-256")
     elif args.command == "apply" and (
         args.expected_prior_scope_version_id is not None or args.expected_prior_scope_sha256 is not None
     ):
-        parser.error("prior scope approvals require --recover-audiovisual")
+        parser.error("prior scope approvals require an exact recovery selector")
     if selected is not None:
         if len(selected) != 1:
             parser.error("--add-domain requires exactly one domain")
