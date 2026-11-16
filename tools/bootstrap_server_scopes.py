@@ -2275,7 +2275,7 @@ def validate_restore_contract(
             match is None
             or match.group("partition") != "aws"
             or match.group("account") != expected_owner
-            or match.group("name") != f"{scope['repo']}-{environment}-deploy"
+            or match.group("name") != _deployment_role_name(domain, environment)
             or role_arn in seen_role_arns
             or rule.get("tenantId") != scope["tenantId"]
             or rule.get("draftId") != scope["draftId"]
