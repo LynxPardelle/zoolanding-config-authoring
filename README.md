@@ -151,6 +151,38 @@ An exact existing target produces a true no-op: neither object is written and no
 
 This tool is outside the Lambda artifact. Release its source through a feature-to-dev PR with successful CI and reviewed changes, then execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator when the current production evidence gate can already be satisfied, because that push starts a service deployment. If production apply lacks a valid current attempt-1 `Deploy Test` push run and retained artifact, it remains blocked; the only supported recovery is a separately reviewed exact `dev -> test` promotion through the normal protected workflow, followed by a successful attempt-1 authoring run and a later signed draft canary dispatch. Before that merge, inspect only the presence/empty state of the repository-level `AUTHORING_TEST_PROMOTION_SELECTION_JSON` variable without printing its value. It must be absent or empty: an exact nonempty THN selector intentionally takes the source-only path and creates no deploy artifact, while a stale nonempty selector fails the first attempt. Remove a stale selector through the approved GitHub variable operation, verify the absent/empty state again, and only then merge the protected promotion. Do not restore a stale selector; a future THN source-only promotion must set a newly reviewed exact selector and clear it after use. Never bypass or weaken the evidence gate. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
 
+#### Audiovisual production scope-only recovery
+
+Use the reviewed operator source for the interrupted production onboarding of
+`curso-produccion-audiovisual.music.lynxpardelle.com`. Run the usual isolated
+production `plan` with that exact `--add-domain` and `--recover-audiovisual`.
+The read-only plan verifies the current scope and authorization versions and reads
+the immediate preceding scope version for the exact key. It accepts
+`updateMode: recover-authz` only when the current canonical scope equals that
+prior version plus the selected identity and the current authorization still
+covers exactly the prior scope. The prior pair must contain 17 scopes and grants,
+the current pair must have 18 scopes and 17 grants, and the candidate must have
+18 scopes and grants. The candidate retains every existing grant.
+Keep the canonical objects in memory. Review the safe current and prior version
+metadata and the candidate hashes.
+
+Obtain fresh `verify-test` evidence for this exact draft after the live TEST
+bundle stabilizes. Repeat the usual isolated production `apply` with
+`--recover-audiovisual` and the fresh review inputs. Pass the plan's
+`priorScope.versionId` and `priorScope.sha256` as
+`--expected-prior-scope-version-id` and `--expected-prior-scope-sha256`.
+The apply revalidates that prior version, the current pair, the candidate digests,
+the selected role trust, and the approved TEST evidence and scope subset. Keep
+other scope and authorization operators idle through readback. S3 conditions the
+grant write on ETag. The operator rechecks the exact authorization version
+immediately before that write and verifies the stored version and hash after it.
+
+Expect `scopeWritten: false` and `authzWritten: true`, the same scope version and
+hash, and one new authorization version. Re-run the normal isolated production
+`plan` with the exact selector to verify `updateMode: noop`. If the recovery plan
+or readback diverges, stop and review the exact state again. Recovery leaves the
+prior versions in place.
+
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
 Current deployed endpoint:
