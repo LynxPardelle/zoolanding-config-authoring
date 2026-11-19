@@ -357,6 +357,30 @@ def load_item(table_name: str, pk: str, sk: str = "METADATA") -> Optional[Dict[s
     return item if isinstance(item, dict) else None
 
 
+def load_item_consistently(table_name: str, pk: str, sk: str = "METADATA") -> Optional[Dict[str, Any]]:
+    response = get_table(table_name).get_item(Key={"pk": pk, "sk": sk}, ConsistentRead=True)
+    item = response.get("Item")
+    return item if isinstance(item, dict) else None
+
+
+def put_catalog_projection_if_newer(table_name: str, item: Dict[str, Any]) -> None:
+    if DRY_RUN:
+        log("INFO", "Dry run: skipping conditional catalog projection", table=table_name)
+        return
+    try:
+        get_table(table_name).put_item(
+            Item=item,
+            ConditionExpression="attribute_not_exists(#pk) OR #sequence < :sequence",
+            ExpressionAttributeNames={"#pk": "pk", "#sequence": "sequence"},
+            ExpressionAttributeValues={":sequence": item["sequence"]},
+        )
+    except ClientError as exc:  # type: ignore[misc]
+        code = str(getattr(exc, "response", {}).get("Error", {}).get("Code"))
+        if code == "ConditionalCheckFailedException":
+            raise RevisionConflictError() from None
+        raise
+
+
 def put_item(table_name: str, item: Dict[str, Any]) -> None:
     if DRY_RUN:
         log("INFO", "Dry run: skipping DynamoDB put_item", table=table_name, pk=item.get("pk"), sk=item.get("sk"))
