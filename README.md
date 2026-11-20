@@ -33,7 +33,7 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - `LOG_LEVEL`
 - `DEPLOY_AUTHZ_CONFIG_S3_KEY`
 
-`DEPLOY_AUTHZ_CONFIG_S3_KEY` points to a JSON array in `CONFIG_PAYLOADS_BUCKET_NAME`. Every rule has exactly six keys: one IAM role ARN, one valid `tenantId`, one valid `draftId`, one canonical domain, the current stack environment, and unique code-owned actions. Wildcards, plural role fields, extra keys, unknown actions, duplicate roles/domains/drafts, or one malformed entry reject the complete authorization object. Example:
+`DEPLOY_AUTHZ_CONFIG_S3_KEY` points to a JSON array in `CONFIG_PAYLOADS_BUCKET_NAME`. Every rule has six required keys: one IAM role ARN, one valid `tenantId`, one valid `draftId`, one canonical domain, the current stack environment, and unique code-owned actions. The only optional key is the closed `catalog` enrollment described below. Wildcards, plural role fields, other extra keys, unknown actions, duplicate roles/domains/drafts/catalog IDs, or one malformed entry reject the complete authorization object. Example:
 
 ```json
 [
@@ -232,6 +232,7 @@ https://2dvjmiwjod.execute-api.us-east-1.amazonaws.com/Prod/config-authoring
 - `upsertDraft`
 - `getSite`
 - `publishDraft`
+- `reconcileCatalog` (requires an enrolled source's existing `publishDraft` permission)
 - `setSiteStatus`
 
 Proposed production aliases are authored in `site-config.json` through an optional `aliases` array. Proposed test aliases are authored under `site-config.json.environments.test.aliases`.
@@ -340,19 +341,93 @@ with count zero; absent `catalog` produces the unchanged legacy pointer shape
 without `catalogRevision`. Publishing TEST preserves both production pointers;
 production updates its environment pointer and the existing legacy `published`
 pointer. Request-supplied catalog or snapshot fields cannot replace the validated
-stored declaration. Publication adds no public catalog endpoint, table, IAM
-grant, extra S3 write, or additional side effect.
+stored declaration. Publication adds no public catalog read endpoint, table, IAM
+grant, or extra S3 write. An enrolled source also receives a durable pending
+handoff for a separate signed projection request, as described below.
 
-### Internal projection primitive (not activated)
+### Scoped automatic projection and retry
 
 `_project_published_catalog(registration, environment)` is a separate internal
-replay primitive. Neither `publishDraft` nor the API dispatcher calls it. There
-is no new accepted API action, scheduling, authorization grant, or catalog read
-endpoint. A future integration must load reviewed registrations from a trusted
-server-owned registry; callers cannot supply their own approval through the API.
-Each closed registration contains `sourceDomain`, `tenantId`, `draftId`, and a
-nonempty list of at most 32 approved `entryIds`. Central registration must assign
-each public ID to its sole approved owner before activation.
+replay primitive. `publishDraft` never calls it. For an enrolled source, the
+publication response contains a pending handoff backed by the snapshot committed
+with the pointer. The source's deployment workflow consumes that handoff in a
+separate signed `reconcileCatalog` request. This keeps S3/projection latency and
+retry budget outside publication: there is no projection read or write after
+the pointer commit. Registration is derived from a validated private IAM grant
+for the exact domain, scope, environment, and `publishDraft`; callers cannot
+supply their own approval through the API. A source's declared IDs must be
+approved before its pointer can be committed.
+
+The initial code-owned enrollment contains exactly one TEST source:
+`zoositioweb.com.mx`, entry ID `zoositioweb-com-mx`. It requires the source's real
+existing scoped publish grant; the code-owned default never grants API access
+or guesses a tenant, draft, or role. There is no implicit production enrollment
+or corporate publisher hook. Projection only updates its source document; it
+does not publish the corporate draft, so corporate publication cannot recurse.
+
+A private grant may override this default with one of these closed variants:
+
+```json
+{"catalog": {"enabled": false}}
+```
+
+```json
+{
+  "catalog": {
+    "enabled": true,
+    "entryIds": ["example-site"],
+    "environments": ["test"]
+  }
+}
+```
+
+These snippets are the optional field of a full six-key IAM grant, not public
+site configuration or a request payload. `enabled` must be a boolean. Disabled
+options contain only `enabled` and take precedence over code-owned enrollment.
+Enabled options contain exactly these three fields, with one to 32 unique
+canonical entry IDs and exactly the grant's own single stack environment.
+Production requires its separately reviewed production grant and explicit
+production options; TEST never enrolls production. Each public draft entry ID
+may have only one enrolled owner within an environment. Malformed options fail
+the whole authorization object closed. Existing six-key grants remain valid.
+
+The scope bootstrap preserves existing optional enrollment verbatim and blocks
+removal, ownership changes, type changes, or option changes before any write.
+Its normal registry generator does not invent or activate catalog options;
+intentional private enrollment changes require a separate reviewed operation.
+An opt-out stops future publisher/replay writes; reader enrollment must also be
+disabled when withdrawing an existing source from the public catalog.
+
+The internal closed registration contains `sourceDomain`, `tenantId`, `draftId`,
+and its approved `entryIds`. Those scope values come from the exact private
+grant, rather than authored public JSON. Successful `publishDraft` responses
+for enrolled sources include `catalogSync.status: pending`. That response is
+fully validated before the pointer CAS. A pointer CAS conflict returns the
+existing conflict response and never invokes the projector. Non-enrolled
+publish responses remain unchanged. Every deployment client that publishes an
+enrolled source must consume `pending`; an older client leaves a durable intent
+for a later signed replay rather than silently synchronizing the catalog.
+
+The same IAM endpoint accepts this closed retry body:
+
+```json
+{"action": "reconcileCatalog", "domain": "example.com", "environment": "test"}
+```
+
+Reconciliation requires the caller's exact existing `publishDraft` permission
+plus effective enrollment. It adds no authorization action to the private grant
+and grants no permission to edit another source or the corporate draft. The
+request accepts no version, entry IDs, registration, or receipt. It resolves
+the current publication afresh, returns its safe `catalogSync` status (`applied`,
+`noop`, `legacy`, or `unpublished`), and
+does not republish or rewrite source metadata/S3. An unsuccessful retry returns
+HTTP 500 with fixed `catalog_projection_pending` and logs no exception details;
+the durable snapshot remains. An IAM/SigV4 operator or source-owned post-deploy
+job can retry that action with bounded backoff, including transport timeouts.
+A source-owned workflow should treat exhaustion as catalog pending, never as a
+reason to roll back a successfully published source. A future scheduled reconciler must enumerate only enrolled
+sources and use those same exact grants. No scheduler or broadened operator
+role is introduced in this increment.
 
 The primitive strongly reads the source registry, verifies its scope and exact
 `publishedEnvironments[environment]` pointer, reloads/revalidates that immutable
@@ -402,11 +477,17 @@ publication and catalog projection, nor across different sources.
 
 The checked-in Authoring policy already permits GetItem and PutItem on its
 existing table, but deployed authority still needs verification before use.
-Runtime Query permission, source enrollment, replay authorization/scheduling,
-cache refresh, and reader integration remain separate work. Likewise, live
+Reader permissions, scheduled reconciliation, cache refresh, and consumer
+deployment remain separate work. Likewise, live
 canonical URL, public response, robots/noindex, and HTML checks are activation
 prerequisites; this offline contract does not infer indexability from authored
 static metadata or block TEST merely for its intentional noindex response.
+
+The protected TEST workflow checks the authorization key parameter and Lambda
+readiness, not the private authorization object's contents or a signed source
+canary. Before deployment/activation, verify that private object's exact grants
+without printing its contents, and run the approved signed source canary after
+deployment. A green workflow alone does not establish catalog publish authority.
 
 ## Server-only feature descriptors
 
