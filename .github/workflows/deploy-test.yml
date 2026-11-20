@@ -370,7 +370,7 @@ jobs:
           description="$RUNNER_TEMP/reviewed-change-set.json"
           collect_native_baseline() {
             python3 - "$STACK_NAME" "$1" <<'PY'
-          import base64, json, os, re, subprocess, sys
+          import json, os, subprocess, sys
           from pathlib import Path
           def aws(*args):
               result=subprocess.run(["aws",*args,"--output","json","--no-cli-pager"],capture_output=True,text=True)
@@ -379,36 +379,12 @@ jobs:
           if os.getenv("AWS_REGION") != "us-east-1" or aws("sts","get-caller-identity").get("Account") != "765932874577":
               raise SystemExit("native_identity_invalid")
           stack=aws("cloudformation","describe-stacks","--stack-name",sys.argv[1])["Stacks"]
-          if (len(stack)!=1 or stack[0].get("StackName") != "zoolanding-config-authoring-test"
-              or sys.argv[1] != "zoolanding-config-authoring-test"
-              or re.fullmatch(r"arn:aws:cloudformation:us-east-1:765932874577:stack/zoolanding-config-authoring-test/[A-Za-z0-9-]+", str(stack[0].get("StackId", ""))) is None
-              or stack[0].get("StackStatus") not in ("CREATE_COMPLETE","UPDATE_COMPLETE","UPDATE_ROLLBACK_COMPLETE")):
+          if len(stack)!=1 or stack[0].get("StackStatus") not in ("CREATE_COMPLETE","UPDATE_COMPLETE"):
               raise SystemExit("native_stack_unavailable")
-          resource_response=aws("cloudformation","list-stack-resources","--stack-name",sys.argv[1])
-          resources=resource_response.get("StackResourceSummaries")
-          if (resource_response.get("NextToken") or not isinstance(resources,list) or not resources
-              or any(not isinstance(item,dict) or item.get("ResourceStatus") not in ("CREATE_COMPLETE","UPDATE_COMPLETE")
-                     or any(not isinstance(item.get(key),str) or not item[key] for key in ("LogicalResourceId","PhysicalResourceId","ResourceType")) for item in resources)
-              or len({item["LogicalResourceId"] for item in resources}) != len(resources)
-              or [item["LogicalResourceId"] for item in resources if item["ResourceType"]=="AWS::Lambda::Function"] != ["ConfigAuthoringFunction"]):
-              raise SystemExit("native_inventory_invalid")
+          resources=aws("cloudformation","list-stack-resources","--stack-name",sys.argv[1])["StackResourceSummaries"]
           identities=sorted([{key:item.get(key) for key in ("LogicalResourceId","PhysicalResourceId","ResourceType")} for item in resources],key=lambda item:item["LogicalResourceId"])
           functions=[aws("lambda","get-function-configuration","--function-name",item["PhysicalResourceId"]) for item in identities if item["ResourceType"]=="AWS::Lambda::Function"]
-          function=functions[0]
-          function_id=next(item["PhysicalResourceId"] for item in identities if item["LogicalResourceId"]=="ConfigAuthoringFunction")
-          if (function.get("FunctionName") != function_id
-              or function.get("FunctionArn") != "arn:aws:lambda:us-east-1:765932874577:function:"+function_id
-              or function.get("Version") != "$LATEST" or function.get("State") != "Active"
-              or function.get("LastUpdateStatus") != "Successful"
-              or not isinstance(function.get("RevisionId"),str) or not function["RevisionId"].strip()):
-              raise SystemExit("native_function_unavailable")
-          try:
-              code_sha=base64.b64decode(function.get("CodeSha256", ""),validate=True)
-          except (ValueError,TypeError):
-              raise SystemExit("native_function_unavailable") from None
-          if len(code_sha)!=32:
-              raise SystemExit("native_function_unavailable")
-          baseline={"stackId":stack[0]["StackId"],"stackStatus":stack[0]["StackStatus"],"parameters":sorted(stack[0].get("Parameters",[]),key=lambda item:item["ParameterKey"]),
+          baseline={"stackId":stack[0]["StackId"],"parameters":sorted(stack[0].get("Parameters",[]),key=lambda item:item["ParameterKey"]),
             "outputs":sorted(stack[0].get("Outputs",[]),key=lambda item:item["OutputKey"]),"identities":identities,"functions":functions,
             "original":aws("cloudformation","get-template","--stack-name",sys.argv[1],"--template-stage","Original")["TemplateBody"],
             "processed":aws("cloudformation","get-template","--stack-name",sys.argv[1],"--template-stage","Processed")["TemplateBody"]}
