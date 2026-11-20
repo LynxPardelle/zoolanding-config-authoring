@@ -67,6 +67,33 @@ The checked-in `samconfig.toml` includes only explicit `test` and `prod` deploym
 
 The checked-in deploy profiles use the parallel `system/deploy-authz-v2.json` key. Bootstrap and validate that object in the environment's private config bucket before deploying the new Lambda; missing or malformed authorization configuration denies every request. The legacy `system/deploy-authz.json` object remains untouched so the currently deployed role-name runtime and a protected code rollback keep their original contract.
 
+### Native TEST review after a completed update rollback
+
+The native TEST baseline collector accepts `UPDATE_ROLLBACK_COMPLETE` in addition
+to `CREATE_COMPLETE` and `UPDATE_COMPLETE`. This only prepares a fresh review;
+it neither retries a consumed change set nor treats a failed update as a release.
+The exact existing TEST stack/account/region must match, its complete inventory
+must contain no failed or in-progress resource, and its sole Lambda must be the
+existing `ConfigAuthoringFunction`. That function must be `$LATEST`, `Active`,
+and `Successful`, with its exact identity, revision, and a valid code checksum.
+Missing or paginated inventory is rejected rather than silently truncated.
+
+Before approving recovery, inspect the failed resource event and independently
+verify that the current function checksum belongs to the restored release.
+The collector seals that actual configuration, including checksum/revision, and
+the current stack status into the private native baseline. The review digest
+binds those bytes; execute rereads and compares the complete baseline unchanged.
+Recovery still permits only one nonreplacement `ConfigAuthoringFunction.Code`
+modification using the exact retained change-set ARN and approved digest.
+Post-execution readiness still requires `UPDATE_COMPLETE`; failed, incomplete,
+initial rollback, or deleted stack states are not accepted recovery baselines.
+
+A version-pinned code package requires the actual deploy/CloudFormation authority
+to read that exact S3 object version. Diagnose and review that authority before
+another attempt; accepting a healthy rollback baseline adds no IAM permission,
+changes no authorization object, and removes no S3 version pin. Production and
+the separate `AWS-live-snapshot/v1` state contract are unchanged.
+
 ### Explicit AWS-observed TEST recovery
 
 `tools/aws_live_snapshot.py` provides the separate `AWS-live-snapshot/v1` operator contract. It does not replace an expired GitHub release, rebuild a ZIP, or weaken the current eight-file artifact verifier. Historical compatibility accepts only the reviewed seven-file ZIP, its fixed full source SHA, exact object/version digests, size, and per-file hashes. The original GitHub artifact is not claimed to exist.
