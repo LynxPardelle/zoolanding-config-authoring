@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import suppress
 from datetime import datetime
 import hashlib
 import io
@@ -39,78 +38,12 @@ ENVIRONMENT_BUCKETS = {
     "test": "zoolanding-config-payloads-test",
     "production": "zoolanding-config-payloads",
 }
-LYNX_OFFER_OWNER = "LynxPardelle"
-LYNX_OFFER_REPOS = {
-    "curso-diseno-sonoro.music.lynxpardelle.com": "draft-curso-diseno-sonoro-music-lynxpardelle-com",
-    "curso-music-business.music.lynxpardelle.com": "draft-curso-music-business-music-lynxpardelle-com",
-    "curso-musica-electronica.music.lynxpardelle.com": "draft-curso-musica-electronica-music-lynxpardelle-com",
-    "curso-produccion-audiovisual.music.lynxpardelle.com": "draft-curso-produccion-audiovisual-music-lynxpardelle-com",
-    "masterclass-acordes.music.lynxpardelle.com": "draft-masterclass-acordes-music-lynxpardelle-com",
-    "masterclass-artista-independiente.music.lynxpardelle.com": "draft-masterclass-artista-independiente-music-lynxpardelle-com",
-    "masterclass-drum-rack.music.lynxpardelle.com": "draft-masterclass-drum-rack-music-lynxpardelle-com",
-    "masterclass-edicion-del-sonido.music.lynxpardelle.com": "draft-masterclass-edicion-del-sonido-music-lynxpardelle-com",
-    "masterclass-escalas-mayores.music.lynxpardelle.com": "draft-masterclass-escalas-mayores-music-lynxpardelle-com",
-    "masterclass-escalas-menores.music.lynxpardelle.com": "draft-masterclass-escalas-menores-music-lynxpardelle-com",
-    "masterclass-estructura-musical.music.lynxpardelle.com": "draft-masterclass-estructura-musical-music-lynxpardelle-com",
-    "masterclass-grabacion-de-voz-e-instrumentos.music.lynxpardelle.com": "draft-masterclass-grabacion-de-voz-e-instrumentos-lp-offer",
-    "masterclass-impulse.music.lynxpardelle.com": "draft-masterclass-impulse-music-lynxpardelle-com",
-    "masterclass-industria-musical.music.lynxpardelle.com": "draft-masterclass-industria-musical-music-lynxpardelle-com",
-    "masterclass-instrumentos-y-efectos-midi.music.lynxpardelle.com": "draft-masterclass-instrumentos-y-efectos-midi-lp-offer",
-    "masterclass-intervalos.music.lynxpardelle.com": "draft-masterclass-intervalos-music-lynxpardelle-com",
-    "masterclass-loops-en-vivo.music.lynxpardelle.com": "draft-masterclass-loops-en-vivo-music-lynxpardelle-com",
-    "masterclass-masterizacion-profesional.music.lynxpardelle.com": "draft-masterclass-masterizacion-profesional-lp-offer",
-    "masterclass-mezcla-digital.music.lynxpardelle.com": "draft-masterclass-mezcla-digital-music-lynxpardelle-com",
-    "masterclass-notas-musicales.music.lynxpardelle.com": "draft-masterclass-notas-musicales-music-lynxpardelle-com",
-    "masterclass-procesos-de-audio-1.music.lynxpardelle.com": "draft-masterclass-procesos-de-audio-1-music-lynxpardelle-com",
-    "masterclass-procesos-de-audio-2.music.lynxpardelle.com": "draft-masterclass-procesos-de-audio-2-music-lynxpardelle-com",
-    "masterclass-profesionaliza-tu-proyecto-musical.music.lynxpardelle.com": "draft-masterclass-profesionaliza-tu-proyecto-musical-lp-offer",
-    "masterclass-redes-sociales-para-musicos.music.lynxpardelle.com": "draft-masterclass-redes-sociales-para-musicos-lp-offer",
-    "masterclass-ritmo.music.lynxpardelle.com": "draft-masterclass-ritmo-music-lynxpardelle-com",
-    "masterclass-ruteo-y-grupos.music.lynxpardelle.com": "draft-masterclass-ruteo-y-grupos-music-lynxpardelle-com",
-    "masterclass-sampler.music.lynxpardelle.com": "draft-masterclass-sampler-music-lynxpardelle-com",
-    "masterclass-simpler.music.lynxpardelle.com": "draft-masterclass-simpler-music-lynxpardelle-com",
-    "masterclass-sintesis-aditiva-sustractiva-y-fm.music.lynxpardelle.com": "draft-masterclass-sintesis-aditiva-sustractiva-y-fm-lp-offer",
-    "masterclass-sintesis-de-tabla-de-ondas.music.lynxpardelle.com": "draft-masterclass-sintesis-de-tabla-de-ondas-lp-offer",
-    "masterclass-sintesis-organica-y-granular.music.lynxpardelle.com": "draft-masterclass-sintesis-organica-y-granular-lp-offer",
-    "masterclass-sintesis-por-modelado-fisico.music.lynxpardelle.com": "draft-masterclass-sintesis-por-modelado-fisico-lp-offer",
-    "servicio-animaciones.music.lynxpardelle.com": "draft-servicio-animaciones-music-lynxpardelle-com",
-    "servicio-asesorias.music.lynxpardelle.com": "draft-servicio-asesorias-music-lynxpardelle-com",
-    "servicio-clases-personalizadas.music.lynxpardelle.com": "draft-servicio-clases-personalizadas-music-lynxpardelle-com",
-    "servicio-flyers-digitales.music.lynxpardelle.com": "draft-servicio-flyers-digitales-music-lynxpardelle-com",
-    "servicio-jingles.music.lynxpardelle.com": "draft-servicio-jingles-music-lynxpardelle-com",
-    "servicio-landing-pages.music.lynxpardelle.com": "draft-servicio-landing-pages-music-lynxpardelle-com",
-    "servicio-logos.music.lynxpardelle.com": "draft-servicio-logos-music-lynxpardelle-com",
-    "servicio-masterizacion.music.lynxpardelle.com": "draft-servicio-masterizacion-music-lynxpardelle-com",
-    "servicio-mezcla.music.lynxpardelle.com": "draft-servicio-mezcla-music-lynxpardelle-com",
-    "servicio-portadas-musicales.music.lynxpardelle.com": "draft-servicio-portadas-musicales-music-lynxpardelle-com",
-    "servicio-portafolios-online.music.lynxpardelle.com": "draft-servicio-portafolios-online-music-lynxpardelle-com",
-    "servicio-presskits-online.music.lynxpardelle.com": "draft-servicio-presskits-online-music-lynxpardelle-com",
-    "servicio-sitios-web.music.lynxpardelle.com": "draft-servicio-sitios-web-music-lynxpardelle-com",
-    "servicio-soundtracks.music.lynxpardelle.com": "draft-servicio-soundtracks-music-lynxpardelle-com",
-    "servicio-videoclips.music.lynxpardelle.com": "draft-servicio-videoclips-music-lynxpardelle-com",
-}
-ISOLATED_PRODUCTION_REPOS = {
-    "zooberiahsystems.com": "draft-zooberiahsystems-com",
-    "dipsydoo.com.mx": "draft-dipsydoo-com-mx",
-    **LYNX_OFFER_REPOS,
-}
-
-AUDIOVISUAL_RECOVERY_DOMAIN = "curso-produccion-audiovisual.music.lynxpardelle.com"
-ACORDES_RECOVERY_DOMAIN = "masterclass-acordes.music.lynxpardelle.com"
-ESTRUCTURA_RECOVERY_DOMAIN = "masterclass-estructura-musical.music.lynxpardelle.com"
-RECOVERY_INCIDENTS = {
-    "audiovisual": ("production", AUDIOVISUAL_RECOVERY_DOMAIN, 18),
-    "acordes": ("test", ACORDES_RECOVERY_DOMAIN, 37),
-    "estructura": ("test", ESTRUCTURA_RECOVERY_DOMAIN, 40),
-}
-
 CANONICAL_ACTIONS = ("createSite", "upsertDraft", "publishDraft", "getSite")
 SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 REPO_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 GITHUB_OWNER_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 ROLE_ARN_PATTERN = re.compile(r"^arn:(?P<partition>[^:]+):iam::(?P<account>\d{12}):role/(?P<name>[A-Za-z0-9+=,.@_/-]+)$")
-MAX_ROLE_NAME_LENGTH = 64
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 CENTRAL_TIME = ZoneInfo("America/Mexico_City")
 AUTHORING_REPOSITORY = "zoolanding-config-authoring"
@@ -132,51 +65,6 @@ MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024
 
 class BootstrapError(RuntimeError):
     """Raised when the bootstrap cannot prove a required invariant."""
-
-
-class S3OperationError(BootstrapError):
-    """Report only a code-owned operation and failure family."""
-
-    def __init__(self, operation: str, family: str):
-        super().__init__(f"isolated S3 {operation} failed ({family})")
-        self.operation = operation
-        self.family = family
-
-
-def _s3_failure_family(error: Exception) -> str:
-    if isinstance(error, BootstrapError):
-        return "timeout" if str(error) == "aws operation timed out" else "command_failure"
-    response = getattr(error, "response", None)
-    if isinstance(response, dict):
-        fields = response.get("Error")
-        code = fields.get("Code") if isinstance(fields, dict) else None
-        for family, codes in (
-            ("precondition", ("PreconditionFailed", "ConditionalRequestConflict")),
-            ("credentials", ("ExpiredToken", "InvalidAccessKeyId", "InvalidToken", "InvalidClientTokenId")),
-            ("access", ("AccessDenied", "Forbidden", "SignatureDoesNotMatch")),
-            ("not_found", ("NoSuchKey", "NoSuchVersion", "NoSuchBucket", "NotFound")),
-            ("throttled", ("SlowDown", "Throttling", "ThrottlingException", "TooManyRequestsException")),
-            ("timeout", ("RequestTimeout", "RequestTimeoutException")),
-        ):
-            if code in codes:
-                return family
-        metadata = response.get("ResponseMetadata")
-        status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
-        if type(status) is int and 500 <= status <= 599:
-            return "service"
-    return {
-        "ConnectTimeoutError": "timeout",
-        "ReadTimeoutError": "timeout",
-        "EndpointConnectionError": "connection",
-        "ConnectionClosedError": "connection",
-        "ProxyConnectionError": "connection",
-        "ResponseStreamingError": "connection",
-        "IncompleteReadError": "connection",
-        "SSLError": "certificate",
-        "NoCredentialsError": "credentials",
-        "PartialCredentialsError": "credentials",
-        "CredentialRetrievalError": "credentials",
-    }.get(type(error).__name__, "unknown")
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -266,23 +154,6 @@ def verify_deployed_artifact(
         "manifestSha256": sha256_hex(canonical_json_bytes(manifest)),
         "lambdaCodeSha256": deployed_code_sha,
     }
-
-
-def _is_reviewed_production_pair(domain: Any, repo: Any) -> bool:
-    return isinstance(domain, str) and isinstance(repo, str) and ISOLATED_PRODUCTION_REPOS.get(domain) == repo
-
-
-def _require_isolated_repository(
-    registry: dict[str, Any], domain: str, repo: str, environment: str,
-) -> None:
-    if environment == "production" and not _is_reviewed_production_pair(domain, repo):
-        raise BootstrapError("isolated production repository is not the reviewed target")
-    if domain in LYNX_OFFER_REPOS and (
-        LYNX_OFFER_REPOS[domain] != repo
-        or registry.get("owner") != LYNX_OFFER_OWNER
-        or _registered_repo_owner(registry, repo) != LYNX_OFFER_OWNER
-    ):
-        raise BootstrapError("isolated Lynx offer requires the reviewed GitHub repository identity")
 
 
 def _strict_domain(value: Any) -> str:
@@ -847,17 +718,12 @@ def validate_test_green_snapshot(
     if (
         not isinstance(artifact_evidence, dict)
         or set(artifact_evidence) != {
-            "sourceCommit", "manifestSha256", "lambdaCodeSha256",
-            "artifactId", "artifactName",
+            "sourceCommit", "manifestSha256", "lambdaCodeSha256"
         }
         or artifact_evidence.get("sourceCommit") != test_commit
         or not isinstance(artifact_evidence.get("manifestSha256"), str)
         or not SHA256_PATTERN.fullmatch(artifact_evidence["manifestSha256"])
         or artifact_evidence.get("lambdaCodeSha256") != function.get("CodeSha256")
-        or type(artifact_evidence.get("artifactId")) is not int
-        or artifact_evidence["artifactId"] < 1
-        or artifact_evidence.get("artifactName")
-        != _test_artifact_name(test_run_id, 1, test_commit)
     ):
         raise BootstrapError("test Lambda is not bound to the exact workflow artifact")
 
@@ -948,8 +814,6 @@ def validate_test_green_snapshot(
             "codeSha256": function["CodeSha256"],
             "revisionId": function["RevisionId"],
             "artifactManifestSha256": artifact_evidence["manifestSha256"],
-            "artifactId": artifact_evidence["artifactId"],
-            "artifactName": artifact_evidence["artifactName"],
             "sourceCommit": artifact_evidence["sourceCommit"],
         },
         "scope": {
@@ -1023,19 +887,6 @@ def _download_deployed_zip(location: Any) -> bytes:
     return payload
 
 
-def _test_artifact_name(run_id: Any, run_attempt: Any, source_commit: Any) -> str:
-    if (
-        type(run_id) is not int
-        or run_id < 1
-        or type(run_attempt) is not int
-        or run_attempt != 1
-        or not isinstance(source_commit, str)
-        or not re.fullmatch(r"[a-f0-9]{40}", source_commit)
-    ):
-        raise BootstrapError("test artifact run identity is invalid")
-    return f"config-authoring-test-{run_id}-{run_attempt}-{source_commit}"
-
-
 def collect_artifact_evidence(
     *,
     runner: "CommandRunner",
@@ -1044,10 +895,9 @@ def collect_artifact_evidence(
     region: str,
     test_commit: str,
     test_run_id: int,
-    test_run_attempt: int,
     function_name: str,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    artifact_name = _test_artifact_name(test_run_id, test_run_attempt, test_commit)
+) -> tuple[dict[str, Any], dict[str, str]]:
+    artifact_name = f"config-authoring-test-{test_commit}"
     artifact_result = runner.run_json([
         "gh", "api",
         f"repos/{owner}/{AUTHORING_REPOSITORY}/actions/runs/{test_run_id}/artifacts",
@@ -1055,27 +905,17 @@ def collect_artifact_evidence(
         "-f", "per_page=100",
     ])
     artifacts = artifact_result.get("artifacts") if isinstance(artifact_result, dict) else None
-    total_count = artifact_result.get("total_count") if isinstance(artifact_result, dict) else None
     matches = [
         artifact for artifact in artifacts or []
         if isinstance(artifact, dict) and artifact.get("name") == artifact_name
     ]
     if (
         not isinstance(artifacts, list)
-        or type(total_count) is not int
-        or total_count != 1
-        or len(artifacts) != 1
         or len(matches) != 1
         or matches[0].get("expired") is not False
-        or type(matches[0].get("id")) is not int
-        or matches[0]["id"] < 1
-        or type(matches[0].get("size_in_bytes")) is not int
+        or not isinstance(matches[0].get("size_in_bytes"), int)
         or matches[0]["size_in_bytes"] < 1
         or matches[0]["size_in_bytes"] > MAX_DEPLOYED_ZIP_BYTES
-        or not isinstance(matches[0].get("workflow_run"), dict)
-        or matches[0]["workflow_run"].get("id") != test_run_id
-        or matches[0]["workflow_run"].get("head_branch") != "test"
-        or matches[0]["workflow_run"].get("head_sha") != test_commit
     ):
         raise BootstrapError("exact test workflow artifact metadata is unavailable")
     function_result = runner.run_json([
@@ -1111,11 +951,7 @@ def collect_artifact_evidence(
             function_configuration=configuration,
             source_commit=test_commit,
         )
-    return configuration, {
-        **artifact_evidence,
-        "artifactId": matches[0]["id"],
-        "artifactName": artifact_name,
-    }
+    return configuration, artifact_evidence
 
 
 def collect_test_green_evidence(
@@ -1221,7 +1057,6 @@ def collect_test_green_evidence(
         region=region,
         test_commit=test_commit,
         test_run_id=test_run_id,
-        test_run_attempt=run.get("runAttempt") if isinstance(run, dict) else None,
         function_name=function_name,
     )
 
@@ -1407,20 +1242,6 @@ def collect_test_green_evidence(
     )
 
 
-def _deployment_role_name(domain: str, environment: str) -> str:
-    # Match the hub's roleNameFor for a strictly validated canonical domain.
-    domain_slug = re.sub(r"[^a-z0-9]+", "-", domain)
-    stem = f"draft-{domain_slug}"
-    suffix = f"-{environment}-deploy"
-    name = f"{stem}{suffix}"
-    if len(name) <= MAX_ROLE_NAME_LENGTH:
-        return name
-
-    digest = sha256_hex(domain.encode("ascii"))[:16]
-    stem_length = MAX_ROLE_NAME_LENGTH - len(suffix) - len(digest) - 1
-    return f"{stem[:stem_length].rstrip('-')}-{digest}{suffix}"
-
-
 def verify_role_evidence(
     *,
     owner: str,
@@ -1442,7 +1263,8 @@ def verify_role_evidence(
         raise BootstrapError("role evidence is incomplete")
     role_arn = _one_string(github.get("AWS_ROLE_ARN"), "GitHub AWS_ROLE_ARN")
     match = ROLE_ARN_PATTERN.fullmatch(role_arn)
-    expected_role_name = _deployment_role_name(domain, environment)
+    suffix = "test" if environment == "test" else "production"
+    expected_role_name = f"{repo}-{suffix}-deploy"
     if (
         github.get("DRAFT_DOMAIN") != domain
         or match is None
@@ -1683,18 +1505,15 @@ def collect_verified_bindings(
         raise BootstrapError("canonical draft registry is invalid")
     isolated = domain is not None
     if isolated:
+        if environment != "test":
+            raise BootstrapError("isolated onboarding is test only")
         domain = _strict_domain(domain)
-        if environment == "production" and domain not in ISOLATED_PRODUCTION_REPOS:
-            raise BootstrapError("isolated production onboarding is limited to the reviewed domain")
-        reviewed = build_scope_registry(
-            registry, expected_draft_count=len(drafts), tenant_overrides={}, environment=environment,
+        build_scope_registry(
+            registry, expected_draft_count=len(drafts), tenant_overrides={}, environment="test",
         )
-        if [scope for scope in reviewed["scopes"] if scope["domain"] == domain] == []:
-            raise BootstrapError("isolated domain is not deployable in the selected environment")
         drafts = [entry for entry in drafts if entry["domain"] == domain]
         if len(drafts) != 1:
             raise BootstrapError("isolated domain must select exactly one registered draft")
-        _require_isolated_repository(registry, domain, drafts[0]["repo"], environment)
     bindings: list[dict[str, str]] = []
     for entry in drafts:
         if not isinstance(entry, dict):
@@ -1714,7 +1533,7 @@ def collect_verified_bindings(
             github.get("DRAFT_DOMAIN") != domain
             or match.group("partition") != "aws"
             or match.group("account") != account_id
-            or match.group("name") != _deployment_role_name(domain, environment)
+            or match.group("name") != f"{repo}-test-deploy"
         ):
             raise BootstrapError("isolated role coordinates do not match the selected draft")
         iam_result = runner.run_json([
@@ -1862,86 +1681,34 @@ class AwsCliS3:
 class InMemoryS3(AwsCliS3):
     """Operator-only body transport; metadata retains the existing CLI checks."""
 
-    def __init__(self, *, profile: str, region: str, environment: str = "test", runner=None, client_factory=None):
+    def __init__(self, *, profile: str, region: str, runner=None, client=None):
         super().__init__(profile=profile, region=region, runner=runner)
-        if environment not in ENVIRONMENTS:
-            raise BootstrapError("isolated S3 environment is invalid")
-        self.environment = environment
-        try:
-            if client_factory is None:
+        if client is None:
+            try:
                 from boto3 import Session
                 from botocore.config import Config
-
-                session = Session(profile_name=profile)
-                config = Config(
-                    signature_version="s3v4", connect_timeout=10, read_timeout=60,
-                    retries={"mode": "standard", "total_max_attempts": 1},
+                client = Session(profile_name=profile).client(
+                    "s3", region_name=region,
+                    config=Config(
+                        signature_version="s3v4", connect_timeout=10, read_timeout=60,
+                        retries={"mode": "standard", "total_max_attempts": 1},
+                    ),
                 )
+            except ImportError:
+                raise BootstrapError("isolated onboarding requires operator-only boto3") from None
+            except Exception:
+                raise BootstrapError("isolated S3 client could not be initialized") from None
+        self.client = client
 
-                def client_factory():
-                    return session.client("s3", region_name=region, config=config)
-
-            self._client_factory = client_factory
-            self.client = client_factory()
-        except ImportError:
-            raise BootstrapError("isolated onboarding requires operator-only boto3") from None
-        except Exception:
-            raise BootstrapError("isolated S3 client could not be initialized") from None
-
-    def _parameters(self, bucket, key, expected_owner):
-        require_environment_bucket(self.environment, bucket)
+    @staticmethod
+    def _parameters(bucket, key, expected_owner):
+        require_environment_bucket("test", bucket)
         if key not in {SCOPE_KEY, AUTHZ_KEY}:
             raise BootstrapError("isolated S3 key is not allowlisted")
         return {"Bucket": bucket, "Key": key, "ExpectedBucketOwner": expected_owner}
 
-    def bucket_state(self, bucket: str, expected_owner: str) -> dict[str, Any]:
-        require_environment_bucket(self.environment, bucket)
-        try:
-            return super().bucket_state(bucket, expected_owner)
-        except BootstrapError as exc:
-            raise S3OperationError("bucket_controls", _s3_failure_family(exc)) from None
-
-    def head_object(self, bucket: str, key: str, expected_owner: str) -> Optional[dict[str, Any]]:
-        self._parameters(bucket, key, expected_owner)
-        operation = "scope_head" if key == SCOPE_KEY else "authz_head"
-        try:
-            return super().head_object(bucket, key, expected_owner)
-        except BootstrapError as exc:
-            raise S3OperationError(operation, _s3_failure_family(exc)) from None
-
-    def prior_scope_version(
-        self, bucket: str, expected_owner: str, current_head: dict[str, Any]
-    ) -> str:
-        require_environment_bucket(self.environment, bucket)
-        try:
-            result = self.client.list_object_versions(
-                Bucket=bucket, ExpectedBucketOwner=expected_owner, Prefix=SCOPE_KEY, MaxKeys=2,
-            )
-        except Exception as exc:
-            raise S3OperationError("scope_version_history", _s3_failure_family(exc)) from None
-        versions = result.get("Versions") if isinstance(result, dict) else None
-        if (
-            not isinstance(versions, list) or len(versions) != 2 or result.get("DeleteMarkers")
-            or any(not isinstance(item, dict) or item.get("Key") != SCOPE_KEY for item in versions)
-        ):
-            raise BootstrapError("recovery requires two consecutive scope versions")
-        current, prior = versions
-        version_id = prior.get("VersionId")
-        if (
-            current.get("IsLatest") is not True or prior.get("IsLatest") is not False
-            or current.get("ETag") != current_head.get("etag")
-            or current.get("VersionId") != current_head.get("versionId")
-            or not isinstance(version_id, str) or not version_id or version_id == "null"
-            or version_id == current.get("VersionId")
-        ):
-            raise BootstrapError("recovery scope versions changed")
-        return version_id
-
     def get_object(self, bucket, key, expected_owner, version_id=None):
         parameters = self._parameters(bucket, key, expected_owner)
-        scope_kind = "scope" if key == SCOPE_KEY else "authz"
-        version_kind = "versioned" if version_id is not None else "current"
-        operation = f"{scope_kind}_{version_kind}_get"
         if version_id is not None:
             parameters["VersionId"] = version_id
         try:
@@ -1949,18 +1716,15 @@ class InMemoryS3(AwsCliS3):
             try:
                 body = stream.read()
                 if not isinstance(body, bytes):
-                    raise S3OperationError(operation, "invalid_response")
+                    raise ValueError("invalid body type")
                 return body
             finally:
                 stream.close()
-        except S3OperationError:
-            raise
-        except Exception as exc:
-            raise S3OperationError(operation, _s3_failure_family(exc)) from None
+        except Exception:
+            raise BootstrapError("isolated S3 body could not be read") from None
 
     def put_object(self, bucket, key, body, expected_owner, *, if_match=None, if_none_match=None):
         parameters = self._parameters(bucket, key, expected_owner)
-        operation = "scope_put" if key == SCOPE_KEY else "authz_put"
         parameters.update(
             Body=body, ContentType="application/json", ServerSideEncryption="AES256",
             ChecksumAlgorithm="SHA256",
@@ -1971,18 +1735,15 @@ class InMemoryS3(AwsCliS3):
         if if_none_match is not None:
             parameters["IfNoneMatch"] = if_none_match
         try:
-            # Each write gets its own HTTP pool while retaining the reviewed session and config.
-            writer = self._client_factory()
-            try:
-                result = writer.put_object(**parameters)
-            finally:
-                # Cleanup cannot invalidate an acknowledged write or mask its failure.
-                with suppress(Exception):
-                    writer.close()
+            result = self.client.put_object(**parameters)
         except Exception as exc:
-            raise S3OperationError(operation, _s3_failure_family(exc)) from None
+            response = getattr(exc, "response", None)
+            error = response.get("Error") if isinstance(response, dict) else None
+            if isinstance(error, dict) and error.get("Code") in {"PreconditionFailed", "ConditionalRequestConflict"}:
+                raise BootstrapError("isolated S3 precondition failed; re-plan required") from None
+            raise BootstrapError("isolated S3 write failed; recheck state before proceeding") from None
         if not isinstance(result, dict) or not isinstance(result.get("ETag"), str) or not result.get("VersionId"):
-            raise S3OperationError(operation, "invalid_response")
+            raise BootstrapError("versioned S3 write did not return ETag and VersionId")
         return {"etag": result["ETag"], "versionId": result["VersionId"]}
 
 
@@ -2000,7 +1761,6 @@ def _verify_readback(
     expected_owner: str,
     expected_body: bytes,
     result: dict[str, str],
-    allow_missing_checksum: bool = False,
 ) -> None:
     if s3.get_object(bucket, key, expected_owner) != expected_body:
         raise BootstrapError("current S3 readback does not match generated bytes")
@@ -2009,23 +1769,16 @@ def _verify_readback(
     head = s3.head_object(bucket, key, expected_owner)
     if not head or head.get("etag") != result["etag"] or head.get("versionId") != result["versionId"]:
         raise BootstrapError("S3 metadata readback does not match the new version")
-    _require_exact_object_metadata(
-        head, expected_body, allow_missing_checksum=allow_missing_checksum,
-    )
+    _require_exact_object_metadata(head, expected_body)
 
 
-def _require_exact_object_metadata(
-    head: dict[str, Any], expected_body: bytes, *, allow_missing_checksum: bool = False,
-) -> None:
+def _require_exact_object_metadata(head: dict[str, Any], expected_body: bytes) -> None:
     expected_checksum = base64.b64encode(hashlib.sha256(expected_body).digest()).decode("ascii")
     if (
         head.get("contentLength") != len(expected_body)
         or head.get("contentType") != "application/json"
         or head.get("serverSideEncryption") != "AES256"
-        or (
-            head.get("checksumSHA256") != expected_checksum
-            and not (allow_missing_checksum and head.get("checksumSHA256") is None)
-        )
+        or head.get("checksumSHA256") != expected_checksum
     ):
         raise BootstrapError("S3 object encryption, content type, length, or checksum is not exact")
 
@@ -2083,7 +1836,6 @@ def apply_private_bundle(
     expected_current_scope_version_id: str,
     expected_current_scope_sha256: str,
     expected_current_authz_sha256: Optional[str] = None,
-    require_scope_unchanged: bool = False,
 ) -> dict[str, Any]:
     _require_approved_hash(approved_scope_sha256, scope_bytes, "scope registry")
     _require_approved_hash(approved_authz_sha256, authz_bytes, "authorization")
@@ -2096,10 +1848,6 @@ def apply_private_bundle(
         raise BootstrapError("all S3 public access block controls must be enabled")
 
     current_authz = s3.head_object(bucket, AUTHZ_KEY, expected_owner)
-    allow_missing_baseline_checksum = (
-        expected_current_authz_sha256 is not None
-        and bucket == ENVIRONMENT_BUCKETS["production"]
-    )
     previous_authz: Optional[dict[str, str]] = None
     if current_authz is None:
         if (
@@ -2123,24 +1871,15 @@ def apply_private_bundle(
             raise BootstrapError("authorization baseline could not be verified") from None
         _require_catalog_grants_preserved(enrollment_baseline, authz_bytes)
     scope_head = s3.head_object(bucket, SCOPE_KEY, expected_owner)
-    if require_scope_unchanged and (
-        bucket not in ENVIRONMENT_BUCKETS.values() or scope_head is None
-        or current_authz is None or expected_current_authz_sha256 is None
-    ):
-        raise BootstrapError("recovery requires the reviewed scope and authorization objects")
     if expected_current_authz_sha256 is not None:
-        if bucket not in ENVIRONMENT_BUCKETS.values():
-            raise BootstrapError("isolated S3 bucket is not allowlisted")
+        require_environment_bucket("test", bucket)
         if current_authz is None or scope_head is None:
             raise BootstrapError("isolated onboarding requires both existing private objects")
         current_authz_body = _read_stable_versioned_object(
             s3, bucket=bucket, key=AUTHZ_KEY, expected_owner=expected_owner, head=current_authz,
         )
         _require_approved_hash(expected_current_authz_sha256, current_authz_body, "current authorization")
-        _require_exact_object_metadata(
-            current_authz, current_authz_body,
-            allow_missing_checksum=allow_missing_baseline_checksum,
-        )
+        _require_exact_object_metadata(current_authz, current_authz_body)
     scope_result: dict[str, str]
     scope_written = False
     previous_scope: Optional[dict[str, str]] = None
@@ -2181,12 +1920,7 @@ def apply_private_bundle(
             current_scope_body,
             "current scope registry",
         )
-        _require_exact_object_metadata(
-            scope_head, current_scope_body,
-            allow_missing_checksum=allow_missing_baseline_checksum and not require_scope_unchanged,
-        )
-        if require_scope_unchanged and current_scope_body != scope_bytes:
-            raise BootstrapError("recovery requires the reviewed scope bytes to stay unchanged")
+        _require_exact_object_metadata(scope_head, current_scope_body)
         previous_scope = {
             "etag": scope_head["etag"],
             "versionId": scope_head["versionId"],
@@ -2231,18 +1965,13 @@ def apply_private_bundle(
         }
     if expected_current_authz_sha256 is not None:
         _require_approved_hash(expected_current_authz_sha256, previous_authz_body, "current authorization")
-        _require_exact_object_metadata(
-            current_authz, previous_authz_body,
-            allow_missing_checksum=allow_missing_baseline_checksum,
-        )
+        _require_exact_object_metadata(current_authz, previous_authz_body)
         _verify_readback(
             s3, bucket=bucket, key=SCOPE_KEY, expected_owner=expected_owner,
             expected_body=scope_bytes, result=scope_result,
         )
         if s3.bucket_state(bucket, expected_owner) != state:
             raise BootstrapError("private bucket controls changed before authorization write")
-    if require_scope_unchanged and s3.head_object(bucket, AUTHZ_KEY, expected_owner) != current_authz:
-        raise BootstrapError("authorization changed immediately before recovery write")
     authz_result = s3.put_object(
         bucket,
         AUTHZ_KEY,
@@ -2428,7 +2157,7 @@ def validate_restore_contract(
             match is None
             or match.group("partition") != "aws"
             or match.group("account") != expected_owner
-            or match.group("name") != _deployment_role_name(domain, environment)
+            or match.group("name") != f"{scope['repo']}-{environment}-deploy"
             or role_arn in seen_role_arns
             or rule.get("tenantId") != scope["tenantId"]
             or rule.get("draftId") != scope["draftId"]
@@ -2449,18 +2178,11 @@ def build_isolated_bundle(
     target_scope: dict[str, str],
     target_binding: dict[str, str],
     expected_owner: str,
-    environment: str,
 ) -> tuple[bytes, bytes, str]:
-    if environment not in ENVIRONMENTS:
-        raise BootstrapError("environment must be test or production")
-    if environment == "production" and not _is_reviewed_production_pair(
-        target_scope.get("domain"), target_scope.get("repo"),
-    ):
-        raise BootstrapError("isolated production onboarding is limited to the reviewed target")
     contract, existing = _validated_scope_contract(scope_bytes)
     validate_restore_contract(
         key=AUTHZ_KEY, restore_body=authz_bytes, canonical_scope_bytes=scope_bytes,
-        environment=environment, expected_owner=expected_owner,
+        environment="test", expected_owner=expected_owner,
     )
     rules = _parse_canonical_json_bytes(authz_bytes, "current authorization")
     selected = {"version": 1, "scopes": [target_scope]}
@@ -2468,10 +2190,10 @@ def build_isolated_bundle(
     _validated_scope_contract(selected_bytes)
     if target_scope["tenantId"] != target_scope["repo"] or target_scope["draftId"] != target_scope["repo"]:
         raise BootstrapError("isolated onboarding requires repository-derived IDs")
-    target_rule = build_authz_rules(selected, [target_binding], environment)[0]
+    target_rule = build_authz_rules(selected, [target_binding], "test")[0]
     validate_restore_contract(
         key=AUTHZ_KEY, restore_body=canonical_json_bytes([target_rule]),
-        canonical_scope_bytes=selected_bytes, environment=environment, expected_owner=expected_owner,
+        canonical_scope_bytes=selected_bytes, environment="test", expected_owner=expected_owner,
     )
     domain = target_scope["domain"]
     identities = {target_scope[key] for key in ("repo", "tenantId", "draftId")}
@@ -2493,40 +2215,9 @@ def build_isolated_bundle(
     validate_append_only_scope_update(scope_bytes, proposed_scope)
     validate_restore_contract(
         key=AUTHZ_KEY, restore_body=proposed_authz, canonical_scope_bytes=proposed_scope,
-        environment=environment, expected_owner=expected_owner,
+        environment="test", expected_owner=expected_owner,
     )
     return proposed_scope, proposed_authz, "add"
-
-
-def build_recovery_bundle(
-    *,
-    incident: str,
-    prior_scope_bytes: bytes,
-    current_scope_bytes: bytes,
-    current_authz_bytes: bytes,
-    target_scope: dict[str, str],
-    target_binding: dict[str, str],
-    expected_owner: str,
-    environment: str,
-) -> tuple[bytes, bytes, str]:
-    reviewed = RECOVERY_INCIDENTS.get(incident)
-    domain = target_scope.get("domain")
-    if (
-        reviewed is None or (environment, domain) != reviewed[:2]
-        or target_scope.get("repo") != LYNX_OFFER_REPOS[reviewed[1]]
-    ):
-        raise BootstrapError("recovery does not match the reviewed incident")
-    proposed_scope, proposed_authz, mode = build_isolated_bundle(
-        scope_bytes=prior_scope_bytes, authz_bytes=current_authz_bytes,
-        target_scope=target_scope, target_binding=target_binding,
-        expected_owner=expected_owner, environment=environment,
-    )
-    if mode != "add" or proposed_scope != current_scope_bytes:
-        raise BootstrapError("recovery requires the exact interrupted scope addition")
-    # The candidate builder proves one rule per canonical scope and exactly one addition.
-    if len(json.loads(proposed_authz)) != reviewed[2]:
-        raise BootstrapError("recovery requires the observed scope count")
-    return current_scope_bytes, proposed_authz, "recover-authz"
 
 
 def _parse_overrides(values: list[str]) -> dict[str, str]:
@@ -2599,72 +2290,27 @@ def _safe_head(head: Optional[dict[str, Any]]) -> Optional[dict[str, Any]]:
     }
 
 
-def _read_live_test_private_bundle(
-    s3: Any,
-    *,
-    expected_owner: str,
-) -> tuple[dict[str, Any], dict[str, bytes]]:
-    bucket = ENVIRONMENT_BUCKETS["test"]
-    state = s3.bucket_state(bucket, expected_owner)
-    if state != {
-        "versioning": "Enabled",
-        "ownership": "BucketOwnerEnforced",
-        "publicAccessBlock": True,
-    }:
-        raise BootstrapError("test evidence requires a private versioned bucket")
-    snapshots: dict[str, bytes] = {}
-    for label, key in (("scope", SCOPE_KEY), ("authz", AUTHZ_KEY)):
-        head = s3.head_object(bucket, key, expected_owner)
-        if head is None:
-            raise BootstrapError("test evidence requires the live private bundle")
-        body = _read_stable_versioned_object(
-            s3, bucket=bucket, key=key, expected_owner=expected_owner, head=head,
-        )
-        _require_exact_object_metadata(head, body)
-        snapshots[label] = body
-    validate_restore_contract(
-        key=AUTHZ_KEY,
-        restore_body=snapshots["authz"],
-        canonical_scope_bytes=snapshots["scope"],
-        environment="test",
-        expected_owner=expected_owner,
-    )
-    return state, snapshots
-
-
 def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any]:
     domain = _strict_domain(args.add_domain)
-    environment = args.environment
-    bucket = args.bucket if write else (
-        args.test_bucket if environment == "test" else args.production_bucket
-    )
-    incident = getattr(args, "recovery", None)
-    recovery = incident is not None
-    if recovery and (environment, domain) != RECOVERY_INCIDENTS.get(incident, ())[:2]:
-        raise BootstrapError("recovery does not match the reviewed incident")
-    if args.tenant_override:
-        raise BootstrapError("isolated onboarding does not accept tenant overrides")
-    if environment == "production" and domain not in ISOLATED_PRODUCTION_REPOS:
-        raise BootstrapError("isolated production onboarding is limited to the reviewed domain")
-    require_environment_bucket(environment, bucket)
+    bucket = args.bucket if write else args.test_bucket
+    if args.tenant_override or (write and args.environment != "test"):
+        raise BootstrapError("isolated onboarding is test only without tenant overrides")
+    require_environment_bucket("test", bucket)
     registry = _load_json_file(args.registry, reject_duplicate_keys=True)
     reviewed_scopes = build_scope_registry(
         registry, expected_draft_count=args.expected_draft_count,
-        tenant_overrides={}, environment=environment,
+        tenant_overrides={}, environment="test",
     )
     selected = [scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain]
     if len(selected) != 1:
         raise BootstrapError("isolated domain must select exactly one registered draft")
-    _require_isolated_repository(registry, domain, selected[0]["repo"], environment)
     runner = CommandRunner()
     account = _account_id(runner, args.profile)
     bindings = collect_verified_bindings(
-        registry, environment=environment, profile=args.profile, account_id=account,
+        registry, environment="test", profile=args.profile, account_id=account,
         runner=runner, domain=domain,
     )
-    s3 = InMemoryS3(
-        profile=args.profile, region=args.region, environment=environment, runner=runner,
-    )
+    s3 = InMemoryS3(profile=args.profile, region=args.region, runner=runner)
     state = s3.bucket_state(bucket, account)
     if state != {"versioning": "Enabled", "ownership": "BucketOwnerEnforced", "publicAccessBlock": True}:
         raise BootstrapError("isolated onboarding requires a private versioned bucket")
@@ -2674,41 +2320,19 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
         if head is None:
             raise BootstrapError("isolated onboarding requires both existing private objects")
         body = _read_stable_versioned_object(s3, bucket=bucket, key=key, expected_owner=account, head=head)
-        _require_exact_object_metadata(
-            head, body,
-            allow_missing_checksum=(environment == "production" and (not recovery or label == "authz")),
-        )
+        _require_exact_object_metadata(head, body)
         snapshots[label] = (head, body)
-    recovery_prior = None
-    if recovery:
-        current_scope_head, current_scope = snapshots["scope"]
-        previous_version = s3.prior_scope_version(bucket, account, current_scope_head)
-        previous_scope = s3.get_object(bucket, SCOPE_KEY, account, previous_version)
-        if write:
-            if previous_version != args.expected_prior_scope_version_id:
-                raise BootstrapError("recovery prior scope version changed after review")
-            _require_approved_hash(args.expected_prior_scope_sha256, previous_scope, "prior scope")
-        scope_bytes, authz_bytes, mode = build_recovery_bundle(
-            incident=incident, prior_scope_bytes=previous_scope, current_scope_bytes=current_scope,
-            current_authz_bytes=snapshots["authz"][1], target_scope=selected[0],
-            target_binding=bindings[0], expected_owner=account, environment=environment,
-        )
-        recovery_prior = {"versionId": previous_version, "sha256": sha256_hex(previous_scope)}
-    else:
-        scope_bytes, authz_bytes, mode = build_isolated_bundle(
-            scope_bytes=snapshots["scope"][1], authz_bytes=snapshots["authz"][1],
-            target_scope=selected[0], target_binding=bindings[0], expected_owner=account,
-            environment=environment,
-        )
+    scope_bytes, authz_bytes, mode = build_isolated_bundle(
+        scope_bytes=snapshots["scope"][1], authz_bytes=snapshots["authz"][1],
+        target_scope=selected[0], target_binding=bindings[0], expected_owner=account,
+    )
     response = {
-        "mode": "apply" if write else "plan", "environment": environment, "domain": domain,
+        "mode": "apply" if write else "plan", "environment": "test", "domain": domain,
         "repo": selected[0]["repo"], "updateMode": mode, "bucketState": state,
         "scopeCount": len(json.loads(scope_bytes)["scopes"]), "ruleCount": len(json.loads(authz_bytes)),
         "scopeSha256": sha256_hex(scope_bytes), "authzSha256": sha256_hex(authz_bytes),
         "existingScopesPreserved": True, "existingGrantsPreserved": True,
     }
-    if recovery_prior is not None:
-        response["priorScope"] = recovery_prior
     if write:
         _require_approved_hash(args.approve_scope_sha256, scope_bytes, "scope registry")
         _require_approved_hash(args.approve_authz_sha256, authz_bytes, "authorization")
@@ -2721,50 +2345,15 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
             ):
                 raise BootstrapError("isolated baseline metadata changed after review")
             _require_approved_hash(getattr(args, f"expected_current_{label}_sha256"), body, "current private object")
-        _verify_readback(
-            s3, bucket=bucket, key=key, expected_owner=account,
-            expected_body=body, result=head,
-            allow_missing_checksum=(environment == "production"),
-        )
+        _verify_readback(s3, bucket=bucket, key=key, expected_owner=account, expected_body=body, result=head)
         response[f"current{label.title()}"] = _safe_head(head)
         response[f"current{label.title()}Sha256"] = sha256_hex(body)
     if s3.bucket_state(bucket, account) != state:
         raise BootstrapError("private bucket controls changed after review")
     if not write:
         return response
-    test_evidence_sha256: Optional[str] = None
-    if environment == "production":
-        if args.canary_repo != selected[0]["repo"]:
-            raise BootstrapError("production canary must be the reviewed isolated repository")
-        test_s3 = InMemoryS3(
-            profile=args.profile, region=args.region, environment="test", runner=runner,
-        )
-        test_state, test_snapshots = _read_live_test_private_bundle(
-            test_s3, expected_owner=account,
-        )
-        if test_state != state:
-            raise BootstrapError("production append requires the same private TEST bucket controls")
-        _, test_scopes = _validated_scope_contract(test_snapshots["scope"])
-        if test_scopes.get(domain) != selected[0]:
-            raise BootstrapError("production target is not the exact live TEST scope")
-        require_production_scope_subset(test_snapshots["scope"], scope_bytes)
-        registry_owner = _strict_owner(registry.get("owner"))
-        evidence = collect_test_green_evidence(
-            runner=runner, s3=test_s3, owner=registry_owner, account_id=account,
-            profile=args.profile, region=args.region, test_commit=args.test_commit,
-            test_run_id=args.test_run_id, canary_repo=args.canary_repo,
-            canary_run_id=args.canary_run_id,
-            expected_scope_bytes=test_snapshots["scope"],
-            expected_authz_bytes=test_snapshots["authz"],
-            canary_owner=_registered_repo_owner(registry, args.canary_repo),
-        )
-        require_approved_test_evidence(evidence, args.approve_test_evidence_sha256)
-        test_evidence_sha256 = sha256_hex(canonical_json_bytes(evidence))
     if mode == "noop":
-        result = {**response, "scopeWritten": False, "authzWritten": False}
-        if test_evidence_sha256 is not None:
-            result["testEvidenceSha256"] = test_evidence_sha256
-        return result
+        return {**response, "scopeWritten": False, "authzWritten": False}
     result = apply_private_bundle(
         s3, bucket=bucket, expected_owner=account, scope_bytes=scope_bytes, authz_bytes=authz_bytes,
         approved_scope_sha256=args.approve_scope_sha256, approved_authz_sha256=args.approve_authz_sha256,
@@ -2774,21 +2363,8 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
         expected_current_authz_etag=args.expected_current_authz_etag,
         expected_current_authz_version_id=args.expected_current_authz_version_id,
         expected_current_authz_sha256=args.expected_current_authz_sha256,
-        require_scope_unchanged=recovery,
     )
-    response = {**response, **result, "authzWritten": True}
-    if recovery:
-        if result["scope"] != {
-            "etag": args.expected_current_scope_etag,
-            "versionId": args.expected_current_scope_version_id,
-            "sha256": args.expected_current_scope_sha256,
-            "written": False,
-        }:
-            raise BootstrapError("recovery did not preserve the reviewed scope version")
-        response["scopeWritten"] = False
-    if test_evidence_sha256 is not None:
-        response["testEvidenceSha256"] = test_evidence_sha256
-    return response
+    return {**response, **result, "authzWritten": True}
 
 
 def _plan(args: argparse.Namespace) -> dict[str, Any]:
@@ -2918,89 +2494,7 @@ def _apply(args: argparse.Namespace) -> dict[str, Any]:
     return response
 
 
-def _verify_isolated_test(args: argparse.Namespace) -> dict[str, Any]:
-    domain = _strict_domain(args.add_domain)
-    if domain not in ISOLATED_PRODUCTION_REPOS:
-        raise BootstrapError("isolated test evidence is limited to the reviewed domain")
-    if args.tenant_override:
-        raise BootstrapError("isolated test evidence does not accept tenant overrides")
-    if not _is_reviewed_production_pair(domain, args.canary_repo):
-        raise BootstrapError("isolated test evidence requires the reviewed canary repository")
-    registry = _load_json_file(args.registry, reject_duplicate_keys=True)
-    reviewed_scopes = build_scope_registry(
-        registry,
-        expected_draft_count=args.expected_draft_count,
-        tenant_overrides={},
-        environment="test",
-    )
-    selected = [
-        scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain
-    ]
-    if len(selected) != 1 or not _is_reviewed_production_pair(
-        selected[0]["domain"], selected[0]["repo"],
-    ):
-        raise BootstrapError("isolated test evidence target is not exact")
-    _require_isolated_repository(registry, domain, selected[0]["repo"], "test")
-
-    runner = CommandRunner()
-    account_id = _account_id(runner, args.profile)
-    bindings = collect_verified_bindings(
-        registry,
-        environment="test",
-        profile=args.profile,
-        account_id=account_id,
-        runner=runner,
-        domain=domain,
-    )
-    s3 = InMemoryS3(
-        profile=args.profile,
-        region=args.region,
-        environment="test",
-        runner=runner,
-    )
-    _, test_snapshots = _read_live_test_private_bundle(
-        s3, expected_owner=account_id,
-    )
-    _, live_scopes = _validated_scope_contract(test_snapshots["scope"])
-    if live_scopes.get(domain) != selected[0]:
-        raise BootstrapError("isolated test evidence target is not the exact live scope")
-    rules = json.loads(test_snapshots["authz"])
-    matching_rules = [
-        rule for rule in rules
-        if isinstance(rule, dict) and rule.get("domains") == [domain]
-    ]
-    expected_rule = build_authz_rules(
-        {"version": 1, "scopes": [selected[0]]}, bindings, "test",
-    )[0]
-    if len(matching_rules) != 1 or matching_rules[0] != expected_rule:
-        raise BootstrapError("isolated test authorization is not the reviewed live binding")
-
-    owner = _strict_owner(registry.get("owner"))
-    evidence = collect_test_green_evidence(
-        runner=runner,
-        s3=s3,
-        owner=owner,
-        account_id=account_id,
-        profile=args.profile,
-        region=args.region,
-        test_commit=args.test_commit,
-        test_run_id=args.test_run_id,
-        canary_repo=args.canary_repo,
-        canary_run_id=args.canary_run_id,
-        expected_scope_bytes=test_snapshots["scope"],
-        expected_authz_bytes=test_snapshots["authz"],
-        canary_owner=_registered_repo_owner(registry, args.canary_repo),
-    )
-    return {
-        "mode": "verify-test",
-        "evidence": evidence,
-        "evidenceSha256": sha256_hex(canonical_json_bytes(evidence)),
-    }
-
-
 def _verify_test(args: argparse.Namespace) -> dict[str, Any]:
-    if getattr(args, "add_domain", None) is not None:
-        return _verify_isolated_test(args)
     runner = CommandRunner()
     scope_bytes, authz_bytes, account_id = _generated_bundle(args, "test", runner)
     registry = _load_json_file(args.registry)
@@ -3070,36 +2564,21 @@ def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--region", default="us-east-1")
 
 
-def _add_recovery_selectors(parser: argparse.ArgumentParser) -> None:
-    recovery = parser.add_mutually_exclusive_group()
-    recovery.add_argument("--recover-audiovisual", dest="recovery", action="store_const", const="audiovisual",
-                          help="Recover the reviewed Audiovisual production grant.")
-    recovery.add_argument("--recover-acordes", dest="recovery", action="store_const", const="acordes",
-                          help="Recover the reviewed Acordes TEST grant.")
-    recovery.add_argument("--recover-estructura", dest="recovery", action="store_const", const="estructura",
-                          help="Recover the reviewed Estructura musical TEST grant.")
-
-
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
 
     plan = commands.add_parser("plan", help="Verify sources and print hashes/metadata without writing.")
     _add_generation_arguments(plan)
-    plan.add_argument("--environment", choices=ENVIRONMENTS)
-    plan.add_argument("--test-bucket")
+    plan.add_argument("--test-bucket", required=True)
     plan.add_argument("--production-bucket")
     plan.add_argument("--add-domain", action="append")
-    _add_recovery_selectors(plan)
 
     apply = commands.add_parser("apply", help="Conditionally write and read back one reviewed environment.")
     _add_generation_arguments(apply)
     apply.add_argument("--environment", required=True, choices=ENVIRONMENTS)
     apply.add_argument("--bucket", required=True)
     apply.add_argument("--add-domain", action="append")
-    _add_recovery_selectors(apply)
-    apply.add_argument("--expected-prior-scope-version-id")
-    apply.add_argument("--expected-prior-scope-sha256")
     apply.add_argument("--approve-scope-sha256", required=True)
     apply.add_argument("--approve-authz-sha256", required=True)
     apply.add_argument("--expected-current-authz-etag", required=True)
@@ -3119,7 +2598,6 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="Prove a successful test workflow, stack, private bundle, Lambda, and IAM denial probe.",
     )
     _add_generation_arguments(verify_test)
-    verify_test.add_argument("--add-domain", action="append")
     verify_test.add_argument("--test-commit", required=True)
     verify_test.add_argument("--test-run-id", required=True, type=int)
     verify_test.add_argument("--canary-repo", required=True)
@@ -3135,53 +2613,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     rollback.add_argument("--expected-current-etag", required=True)
     args = parser.parse_args(argv)
     selected = getattr(args, "add_domain", None)
-    incident = getattr(args, "recovery", None)
-    if incident is not None:
-        environment, domain, _ = RECOVERY_INCIDENTS[incident]
-        if selected != [domain] or args.environment != environment:
-            parser.error(f"--recover-{incident} requires its exact environment and domain selector")
-        if args.command == "apply" and (
-            not args.expected_prior_scope_version_id
-            or not SHA256_PATTERN.fullmatch(args.expected_prior_scope_sha256 or "")
-        ):
-            parser.error("recovery apply requires the reviewed prior scope version and SHA-256")
-    elif args.command == "apply" and (
-        args.expected_prior_scope_version_id is not None or args.expected_prior_scope_sha256 is not None
-    ):
-        parser.error("prior scope approvals require an exact recovery selector")
     if selected is not None:
         if len(selected) != 1:
             parser.error("--add-domain requires exactly one domain")
         args.add_domain = _strict_domain(selected[0])
         if args.tenant_override:
             parser.error("isolated onboarding does not accept tenant overrides")
-        if args.command == "plan":
-            args.environment = args.environment or "test"
-            selected_bucket = args.test_bucket if args.environment == "test" else args.production_bucket
-            other_bucket = args.production_bucket if args.environment == "test" else args.test_bucket
-            if selected_bucket is None or other_bucket is not None:
-                parser.error("isolated plan requires only its selected environment bucket")
-        if (
-            args.command in {"plan", "apply"}
-            and args.environment == "production"
-            and args.add_domain not in ISOLATED_PRODUCTION_REPOS
-        ):
-            parser.error("isolated production onboarding is limited to reviewed domains")
-        if args.command == "verify-test" and not _is_reviewed_production_pair(
-            args.add_domain, args.canary_repo,
-        ):
-            parser.error("isolated test evidence is limited to a reviewed domain and its exact repository")
+        if args.command == "plan" and args.production_bucket is not None:
+            parser.error("isolated plan does not accept a production bucket")
+        if args.command == "apply" and args.environment != "test":
+            parser.error("isolated onboarding is test only")
         if args.command == "apply" and args.expected_current_authz_sha256 is None:
             parser.error("isolated apply requires --expected-current-authz-sha256")
-        if args.command == "apply" and args.environment == "production" and any(value is None for value in (
-            args.test_commit, args.test_run_id, args.canary_repo,
-            args.canary_run_id, args.approve_test_evidence_sha256,
-        )):
-            parser.error("isolated production apply requires approved machine-readable test evidence")
-    elif args.command == "plan" and (
-        args.environment is not None or args.test_bucket is None or args.production_bucket is None
-    ):
-        parser.error("global plan requires both environment buckets and no environment selector")
+    elif args.command == "plan" and args.production_bucket is None:
+        parser.error("global plan requires --production-bucket")
     elif args.command == "apply" and args.expected_current_authz_sha256 is not None:
         parser.error("--expected-current-authz-sha256 requires --add-domain")
     return args

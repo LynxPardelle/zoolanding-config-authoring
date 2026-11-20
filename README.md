@@ -67,33 +67,6 @@ The checked-in `samconfig.toml` includes only explicit `test` and `prod` deploym
 
 The checked-in deploy profiles use the parallel `system/deploy-authz-v2.json` key. Bootstrap and validate that object in the environment's private config bucket before deploying the new Lambda; missing or malformed authorization configuration denies every request. The legacy `system/deploy-authz.json` object remains untouched so the currently deployed role-name runtime and a protected code rollback keep their original contract.
 
-### Native TEST review after a completed update rollback
-
-The native TEST baseline collector accepts `UPDATE_ROLLBACK_COMPLETE` in addition
-to `CREATE_COMPLETE` and `UPDATE_COMPLETE`. This only prepares a fresh review;
-it neither retries a consumed change set nor treats a failed update as a release.
-The exact existing TEST stack/account/region must match, its complete inventory
-must contain no failed or in-progress resource, and its sole Lambda must be the
-existing `ConfigAuthoringFunction`. That function must be `$LATEST`, `Active`,
-and `Successful`, with its exact identity, revision, and a valid code checksum.
-Missing or paginated inventory is rejected rather than silently truncated.
-
-Before approving recovery, inspect the failed resource event and independently
-verify that the current function checksum belongs to the restored release.
-The collector seals that actual configuration, including checksum/revision, and
-the current stack status into the private native baseline. The review digest
-binds those bytes; execute rereads and compares the complete baseline unchanged.
-Recovery still permits only one nonreplacement `ConfigAuthoringFunction.Code`
-modification using the exact retained change-set ARN and approved digest.
-Post-execution readiness still requires `UPDATE_COMPLETE`; failed, incomplete,
-initial rollback, or deleted stack states are not accepted recovery baselines.
-
-A version-pinned code package requires the actual deploy/CloudFormation authority
-to read that exact S3 object version. Diagnose and review that authority before
-another attempt; accepting a healthy rollback baseline adds no IAM permission,
-changes no authorization object, and removes no S3 version pin. Production and
-the separate `AWS-live-snapshot/v1` state contract are unchanged.
-
 ### Explicit AWS-observed TEST recovery
 
 `tools/aws_live_snapshot.py` provides the separate `AWS-live-snapshot/v1` operator contract. It does not replace an expired GitHub release, rebuild a ZIP, or weaken the current eight-file artifact verifier. Historical compatibility accepts only the reviewed seven-file ZIP, its fixed full source SHA, exact object/version digests, size, and per-file hashes. The original GitHub artifact is not claimed to exist.
@@ -120,8 +93,6 @@ Operational readiness requires the actual principal to read the exact prior obje
 ### Private server-scope bootstrap
 
 `tools/bootstrap_server_scopes.py` is the operator-only bootstrap for the private scope registry and runtime authorization object. It is not part of the Lambda artifact. It derives the exact draft set from the hub's `docs/drafts-registry.json`, resolves an optional entry-level GitHub owner with the registry owner as the default, verifies each resolved repository's environment-scoped `DRAFT_DOMAIN` and `AWS_ROLE_ARN`, and verifies the matching IAM role's exact GitHub OIDC trust before generating any bytes. The operator's authenticated GitHub profile must have read access to the required Environment variables and OIDC metadata for every resolved repository; missing cross-owner access fails closed and must not be replaced with inferred values. Registry version 2 requires every draft to declare exactly `deploymentEnvironments: ["test"]` or `deploymentEnvironments: ["test", "production"]`; version 1 remains compatible only for registries whose complete draft set belongs to both environments.
-
-The expected IAM role name follows the hub's canonical domain and environment. Names that would exceed IAM's 64-character limit use a shortened stem with the domain's SHA-256 suffix. The registered repository slug still identifies the GitHub OIDC subject, `draftId` and default `tenantId`.
 
 The reviewed ID rule is deliberately small:
 
@@ -162,88 +133,19 @@ Rollback uses `rollback --help` to copy an explicitly approved prior version bac
 
 Scope removals, canonical ID changes, and tenant split/merge migrations are outside Phase 1. They require a separately reviewed migration and must not be represented as an append or rollback.
 
-### Isolated additive onboarding
+### Isolated additive test onboarding
 
-For an explicitly reviewed single-draft onboarding, `plan`, `apply`, and `verify-test` accept `--add-domain` with exactly one canonical registry domain. TEST planning accepts one selected canonical draft, while isolated evidence and production accept only the reviewed pairs `zooberiahsystems.com` / `draft-zooberiahsystems-com` and `dipsydoo.com.mx` / `draft-dipsydoo-com-mx`, plus the 47 explicit Lynx Pardelle offer pairs listed in `LYNX_OFFER_REPOS`. The latter require the exact domain, repository slug, and `LynxPardelle` GitHub ownership in every isolated environment. All isolated paths reject multiple selectors and tenant overrides. Global commands without this flag retain their full-inventory verification and cross-owner failure; rollback is unchanged.
+For an explicitly reviewed single-draft onboarding, `plan` and `apply` accept `--add-domain` with exactly one canonical registry domain. This opt-in mode is test-only: it rejects production, multiple selectors and tenant overrides. Global commands without this flag retain their full-inventory verification and cross-owner failure; `verify-test` and rollback are unchanged.
 
-The operator validates the local registry and expected count, but reads GitHub Environment/OIDC metadata and IAM evidence only for the selected draft. It rejects a mismatched role before querying IAM. Both private objects in the selected environment must already exist as exact canonical JSON with valid scope/grant mappings. Existing grants are structurally validated and preserved in memory, not re-certified against their repositories. The selected draft receives repository-derived IDs and the existing four canonical actions; collisions or conflicting/one-sided entries fail closed. No IAM/GitHub permissions or existing grants are changed.
+The operator validates the local registry and expected count, but reads GitHub Environment/OIDC metadata and IAM evidence only for the selected draft. It rejects a mismatched role before querying IAM. Both private test objects must already exist as exact canonical JSON with valid scope/grant mappings. Existing grants are structurally validated and preserved in memory, not re-certified against their repositories. The selected draft receives repository-derived IDs and the existing four canonical actions; collisions or conflicting/one-sided entries fail closed. No IAM/GitHub permissions or existing grants are changed.
 
 Use a separate ignored operator environment with `boto3==1.43.81` and `botocore==1.43.81` installed from HTTPS PyPI. These are lazy-loaded operator dependencies, not Lambda or CI dependencies. The isolated S3 body transport uses in-memory SDK bytes/streams and explicitly permits only one total SDK attempt; existing CLI metadata checks are reused. The global AWS CLI transport is unchanged. Do not enable SDK wire/debug logging, save private bodies or dump environment variables.
 
-For an isolated TEST plan, supply the registry, expected count, profile, region, `--test-bucket`, and `--add-domain`; omit the production bucket. For the closed production plan, use `--environment production`, the production bucket, and the selected reviewed domain; omit the test bucket. Review only the emitted safe counts, hashes, ETags, VersionIds, and preservation results. Isolated apply repeats the selected environment and adds `--expected-current-authz-sha256`; both baseline ETag/VersionId/SHA-256 triples and both candidate hashes must match the reviewed plan. `MISSING` is not an isolated-onboarding baseline.
+For isolated plan, supply the existing registry, expected count, profile, region and test-bucket arguments plus `--add-domain`; omit `--production-bucket`. Review only the emitted safe counts, hashes, ETags, VersionIds and preservation results. For isolated apply, retain all existing approval arguments, use `--environment test`, repeat the same selector, and additionally pass `--expected-current-authz-sha256`. Both baseline ETag/VersionId/SHA-256 triples and both candidate hashes must match the reviewed plan. `MISSING` is not an isolated-onboarding baseline.
 
-Production apply also requires the approved machine-readable TEST evidence fields used by the global production gate. Run `verify-test` with `--add-domain`, the exact authoring TEST commit/run, and the later canary run from the matching reviewed repository to produce that evidence and its approval hash without writing AWS state. This closed verifier reads GitHub/IAM metadata only for the selected draft's exact TEST repository, then reads the same current/versioned live TEST bundle and invokes the same evidence collector used at production apply; the global verifier remains unchanged when the selector is absent. It proves the selected draft's exact scope and TEST role binding are already live, validates the complete TEST authorization shape, and accepts only the matching draft repository as the signed canary. Production apply additionally requires the complete candidate production scope mapping to be an exact subset of the live TEST mapping. The retained authoring artifact must have exactly the workflow's coordinated `config-authoring-test-{runId}-{attempt}-{sha}` identity, one positive immutable artifact ID, and matching run, `test` branch, and source SHA metadata; prefixes, duplicates, later attempts, unbound metadata, expired artifacts, and paginated ambiguity fail closed. Production and TEST authorization rules remain environment-specific and are validated independently rather than compared as raw bytes. The current production objects predate stored S3 checksum metadata; only that production baseline may omit `ChecksumSHA256`, while AES256 encryption, JSON content type, exact length, stable current/versioned bytes, ETag, VersionId, and computed SHA-256 remain mandatory. Every new object version includes and verifies its S3 checksum.
+An exact existing target produces a true no-op: neither object is written and no version is created. An addition inserts only the new sorted scope and appends the new authorization rule without reordering or reconstructing existing arrays. It writes scope first, rechecks the pair, then conditionally writes authz and reads both current/versioned results back. `If-Match` conditions ETag, not VersionId; version/hash rechecks do not make two S3 keys atomic. A race or failure can leave the new scope without its grant. Errors are sanitized and stop without automatic retry or repair; a one-sided state requires a separately reviewed recovery decision. Never restore or delete shared objects to force onboarding through.
 
-An exact existing target produces a true no-op: neither object is written and no version is created. An addition inserts only the new sorted scope and appends the new authorization rule without reordering or changing any existing canonical entry bytes. It writes scope first, rechecks the pair, then conditionally writes authz and reads both current/versioned results back. `If-Match` conditions ETag, not VersionId; version/hash rechecks do not make two S3 keys atomic. A race or failure can leave the new scope without its grant. Errors are sanitized and stop without automatic retry or repair; a one-sided state requires a separately reviewed recovery decision. Never restore or delete shared objects to force onboarding through.
-
-This tool is outside the Lambda artifact. Release its source through a feature-to-dev PR with successful CI and reviewed changes, then execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator when the current production evidence gate can already be satisfied, because that push starts a service deployment. If production apply lacks a valid current attempt-1 `Deploy Test` push run and retained artifact, it remains blocked; the only supported recovery is a separately reviewed exact `dev -> test` promotion through the normal protected workflow, followed by a successful attempt-1 authoring run and a later signed draft canary dispatch. Before that merge, inspect only the presence/empty state of the repository-level `AUTHORING_TEST_PROMOTION_SELECTION_JSON` variable without printing its value. It must be absent or empty: an exact nonempty THN selector intentionally takes the source-only path and creates no deploy artifact, while a stale nonempty selector fails the first attempt. Remove a stale selector through the approved GitHub variable operation, verify the absent/empty state again, and only then merge the protected promotion. Do not restore a stale selector; a future THN source-only promotion must set a newly reviewed exact selector and clear it after use. Never bypass or weaken the evidence gate. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
-
-#### Audiovisual production scope-only recovery
-
-Use the reviewed operator source for the interrupted production onboarding of
-`curso-produccion-audiovisual.music.lynxpardelle.com`. Run the usual isolated
-production `plan` with that exact `--add-domain` and `--recover-audiovisual`.
-The read-only plan verifies the current scope and authorization versions and reads
-the immediate preceding scope version for the exact key. It accepts
-`updateMode: recover-authz` only when the current canonical scope equals that
-prior version plus the selected identity and the current authorization still
-covers exactly the prior scope. The prior pair must contain 17 scopes and grants,
-the current pair must have 18 scopes and 17 grants, and the candidate must have
-18 scopes and grants. The candidate retains every existing grant.
-Keep the canonical objects in memory. Review the safe current and prior version
-metadata and the candidate hashes.
-
-Obtain fresh `verify-test` evidence for this exact draft after the live TEST
-bundle stabilizes. Repeat the usual isolated production `apply` with
-`--recover-audiovisual` and the fresh review inputs. Pass the plan's
-`priorScope.versionId` and `priorScope.sha256` as
-`--expected-prior-scope-version-id` and `--expected-prior-scope-sha256`.
-The apply revalidates that prior version, the current pair, the candidate digests,
-the selected role trust, and the approved TEST evidence and scope subset. Keep
-other scope and authorization operators idle through readback. S3 conditions the
-grant write on ETag. The operator rechecks the exact authorization version
-immediately before that write and verifies the stored version and hash after it.
-
-Expect `scopeWritten: false` and `authzWritten: true`, the same scope version and
-hash, and one new authorization version. Re-run the normal isolated production
-`plan` with the exact selector to verify `updateMode: noop`. If the recovery plan
-or readback diverges, stop and review the exact state again. Recovery leaves the
-prior versions in place.
-
-#### Acordes TEST scope-only recovery
-
-Use the same approved recovery protocol with `--recover-acordes`,
-`--environment test`, and the exact `--add-domain masterclass-acordes.music.lynxpardelle.com`.
-The read-only plan requires the immediate previous scope version with 36 canonical
-scopes and grants, the current version with 37 scopes and 36 grants, and a
-37-grant candidate that adds only Acordes. Review the prior version and hash,
-both current ETag/version/SHA-256 triples, and both candidate hashes. Apply with
-the same selector, the normal TEST trust checks, and those exact approvals.
-Expect one authorization write, unchanged scope metadata and bytes, and a normal
-isolated TEST plan returning `updateMode: noop`.
-
-Isolated S3 transport exceptions expose fixed `operation` and `family`
-categories covering the logical object read, metadata check, or write. Retain
-only those categories in operator logs. For an apply error, classify both
-current and version-specific objects before deciding how to proceed. The SDK
-still makes one attempt for each call.
-
-#### Estructura musical TEST scope-only recovery
-
-Use the same reviewed TEST recovery with `--recover-estructura`,
-`--environment test`, and the exact
-`--add-domain masterclass-estructura-musical.music.lynxpardelle.com`.
-The plan requires 39 scopes and grants at the preceding version, 40 scopes and
-39 grants currently, and a 40-grant candidate that adds only Estructura musical.
-Review the prior scope version and hash, both current ETag/version/SHA-256 triples,
-and both candidate hashes. Apply with the same selector and approvals. Verify
-one authorization write, unchanged scope metadata and bytes, and a normal TEST
-plan returning `updateMode: noop`.
-
-The isolated operator opens a new SDK client and HTTP connection pool for each
-conditional PUT, using the same authenticated session, region, and SDK config
-as its read client. Each write gets one SDK attempt. The operator closes that
-client after the request and keeps the existing conditional writes and readbacks.
+This tool is outside the Lambda artifact. Release its source through a feature-to-dev PR with successful CI and reviewed changes, then execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator, because that push starts a service deployment. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
 
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
