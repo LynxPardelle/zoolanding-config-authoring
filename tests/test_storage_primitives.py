@@ -3,11 +3,47 @@ import io
 import json
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 import zoolanding_lambda_common as common
 
 
 class StoragePrimitiveTest(unittest.TestCase):
+    def test_catalog_reads_are_strongly_consistent_and_writes_require_a_newer_sequence(self):
+        self.assertTrue(hasattr(common, "load_item_consistently"))
+        self.assertTrue(hasattr(common, "put_catalog_projection_if_newer"))
+        calls = []
+
+        class Table:
+            def get_item(self, **kwargs):
+                calls.append(("get", kwargs))
+                return {"Item": {"sequence": 2}}
+
+            def put_item(self, **kwargs):
+                calls.append(("put", kwargs))
+
+        item = {"pk": "CATALOG#test", "sk": "SOURCE#DRAFT#example.com", "sequence": 2}
+        with patch.object(common, "get_table", return_value=Table()), patch.object(common, "DRY_RUN", False):
+            self.assertEqual(common.load_item_consistently("table", item["pk"], item["sk"]), {"sequence": 2})
+            common.put_catalog_projection_if_newer("table", item)
+        self.assertEqual(calls[0], ("get", {"Key": {"pk": item["pk"], "sk": item["sk"]}, "ConsistentRead": True}))
+        self.assertEqual(calls[1][1]["ConditionExpression"], "attribute_not_exists(#pk) OR #sequence < :sequence")
+        self.assertEqual(calls[1][1]["ExpressionAttributeNames"], {"#pk": "pk", "#sequence": "sequence"})
+        self.assertEqual(calls[1][1]["ExpressionAttributeValues"], {":sequence": 2})
+
+    def test_catalog_sequence_condition_failure_is_reported_without_retry(self):
+        item = {"pk": "CATALOG#test", "sk": "SOURCE#DRAFT#example.com", "sequence": 2}
+        class ConditionalFailure(common.ClientError):
+            def __init__(self):
+                self.response = {"Error": {"Code": "ConditionalCheckFailedException"}}
+
+        error = ConditionalFailure()
+        with patch.object(common, "get_table") as table, patch.object(common, "DRY_RUN", False):
+            table.return_value.put_item.side_effect = error
+            with self.assertRaises(common.RevisionConflictError):
+                common.put_catalog_projection_if_newer("table", item)
+            table.return_value.put_item.assert_called_once()
+
     def test_json_response_serializes_nested_integral_decimals_as_json_numbers(self):
         response = common.ok({
             "registry": {

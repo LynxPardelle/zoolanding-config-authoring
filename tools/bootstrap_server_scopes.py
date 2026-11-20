@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import suppress
 from datetime import datetime
 import hashlib
 import io
@@ -38,9 +39,69 @@ ENVIRONMENT_BUCKETS = {
     "test": "zoolanding-config-payloads-test",
     "production": "zoolanding-config-payloads",
 }
+LYNX_OFFER_OWNER = "LynxPardelle"
+LYNX_OFFER_REPOS = {
+    "curso-diseno-sonoro.music.lynxpardelle.com": "draft-curso-diseno-sonoro-music-lynxpardelle-com",
+    "curso-music-business.music.lynxpardelle.com": "draft-curso-music-business-music-lynxpardelle-com",
+    "curso-musica-electronica.music.lynxpardelle.com": "draft-curso-musica-electronica-music-lynxpardelle-com",
+    "curso-produccion-audiovisual.music.lynxpardelle.com": "draft-curso-produccion-audiovisual-music-lynxpardelle-com",
+    "masterclass-acordes.music.lynxpardelle.com": "draft-masterclass-acordes-music-lynxpardelle-com",
+    "masterclass-artista-independiente.music.lynxpardelle.com": "draft-masterclass-artista-independiente-music-lynxpardelle-com",
+    "masterclass-drum-rack.music.lynxpardelle.com": "draft-masterclass-drum-rack-music-lynxpardelle-com",
+    "masterclass-edicion-del-sonido.music.lynxpardelle.com": "draft-masterclass-edicion-del-sonido-music-lynxpardelle-com",
+    "masterclass-escalas-mayores.music.lynxpardelle.com": "draft-masterclass-escalas-mayores-music-lynxpardelle-com",
+    "masterclass-escalas-menores.music.lynxpardelle.com": "draft-masterclass-escalas-menores-music-lynxpardelle-com",
+    "masterclass-estructura-musical.music.lynxpardelle.com": "draft-masterclass-estructura-musical-music-lynxpardelle-com",
+    "masterclass-grabacion-de-voz-e-instrumentos.music.lynxpardelle.com": "draft-masterclass-grabacion-de-voz-e-instrumentos-lp-offer",
+    "masterclass-impulse.music.lynxpardelle.com": "draft-masterclass-impulse-music-lynxpardelle-com",
+    "masterclass-industria-musical.music.lynxpardelle.com": "draft-masterclass-industria-musical-music-lynxpardelle-com",
+    "masterclass-instrumentos-y-efectos-midi.music.lynxpardelle.com": "draft-masterclass-instrumentos-y-efectos-midi-lp-offer",
+    "masterclass-intervalos.music.lynxpardelle.com": "draft-masterclass-intervalos-music-lynxpardelle-com",
+    "masterclass-loops-en-vivo.music.lynxpardelle.com": "draft-masterclass-loops-en-vivo-music-lynxpardelle-com",
+    "masterclass-masterizacion-profesional.music.lynxpardelle.com": "draft-masterclass-masterizacion-profesional-lp-offer",
+    "masterclass-mezcla-digital.music.lynxpardelle.com": "draft-masterclass-mezcla-digital-music-lynxpardelle-com",
+    "masterclass-notas-musicales.music.lynxpardelle.com": "draft-masterclass-notas-musicales-music-lynxpardelle-com",
+    "masterclass-procesos-de-audio-1.music.lynxpardelle.com": "draft-masterclass-procesos-de-audio-1-music-lynxpardelle-com",
+    "masterclass-procesos-de-audio-2.music.lynxpardelle.com": "draft-masterclass-procesos-de-audio-2-music-lynxpardelle-com",
+    "masterclass-profesionaliza-tu-proyecto-musical.music.lynxpardelle.com": "draft-masterclass-profesionaliza-tu-proyecto-musical-lp-offer",
+    "masterclass-redes-sociales-para-musicos.music.lynxpardelle.com": "draft-masterclass-redes-sociales-para-musicos-lp-offer",
+    "masterclass-ritmo.music.lynxpardelle.com": "draft-masterclass-ritmo-music-lynxpardelle-com",
+    "masterclass-ruteo-y-grupos.music.lynxpardelle.com": "draft-masterclass-ruteo-y-grupos-music-lynxpardelle-com",
+    "masterclass-sampler.music.lynxpardelle.com": "draft-masterclass-sampler-music-lynxpardelle-com",
+    "masterclass-simpler.music.lynxpardelle.com": "draft-masterclass-simpler-music-lynxpardelle-com",
+    "masterclass-sintesis-aditiva-sustractiva-y-fm.music.lynxpardelle.com": "draft-masterclass-sintesis-aditiva-sustractiva-y-fm-lp-offer",
+    "masterclass-sintesis-de-tabla-de-ondas.music.lynxpardelle.com": "draft-masterclass-sintesis-de-tabla-de-ondas-lp-offer",
+    "masterclass-sintesis-organica-y-granular.music.lynxpardelle.com": "draft-masterclass-sintesis-organica-y-granular-lp-offer",
+    "masterclass-sintesis-por-modelado-fisico.music.lynxpardelle.com": "draft-masterclass-sintesis-por-modelado-fisico-lp-offer",
+    "servicio-animaciones.music.lynxpardelle.com": "draft-servicio-animaciones-music-lynxpardelle-com",
+    "servicio-asesorias.music.lynxpardelle.com": "draft-servicio-asesorias-music-lynxpardelle-com",
+    "servicio-clases-personalizadas.music.lynxpardelle.com": "draft-servicio-clases-personalizadas-music-lynxpardelle-com",
+    "servicio-flyers-digitales.music.lynxpardelle.com": "draft-servicio-flyers-digitales-music-lynxpardelle-com",
+    "servicio-jingles.music.lynxpardelle.com": "draft-servicio-jingles-music-lynxpardelle-com",
+    "servicio-landing-pages.music.lynxpardelle.com": "draft-servicio-landing-pages-music-lynxpardelle-com",
+    "servicio-logos.music.lynxpardelle.com": "draft-servicio-logos-music-lynxpardelle-com",
+    "servicio-masterizacion.music.lynxpardelle.com": "draft-servicio-masterizacion-music-lynxpardelle-com",
+    "servicio-mezcla.music.lynxpardelle.com": "draft-servicio-mezcla-music-lynxpardelle-com",
+    "servicio-portadas-musicales.music.lynxpardelle.com": "draft-servicio-portadas-musicales-music-lynxpardelle-com",
+    "servicio-portafolios-online.music.lynxpardelle.com": "draft-servicio-portafolios-online-music-lynxpardelle-com",
+    "servicio-presskits-online.music.lynxpardelle.com": "draft-servicio-presskits-online-music-lynxpardelle-com",
+    "servicio-sitios-web.music.lynxpardelle.com": "draft-servicio-sitios-web-music-lynxpardelle-com",
+    "servicio-soundtracks.music.lynxpardelle.com": "draft-servicio-soundtracks-music-lynxpardelle-com",
+    "servicio-videoclips.music.lynxpardelle.com": "draft-servicio-videoclips-music-lynxpardelle-com",
+}
 ISOLATED_PRODUCTION_REPOS = {
     "zooberiahsystems.com": "draft-zooberiahsystems-com",
     "dipsydoo.com.mx": "draft-dipsydoo-com-mx",
+    **LYNX_OFFER_REPOS,
+}
+
+AUDIOVISUAL_RECOVERY_DOMAIN = "curso-produccion-audiovisual.music.lynxpardelle.com"
+ACORDES_RECOVERY_DOMAIN = "masterclass-acordes.music.lynxpardelle.com"
+ESTRUCTURA_RECOVERY_DOMAIN = "masterclass-estructura-musical.music.lynxpardelle.com"
+RECOVERY_INCIDENTS = {
+    "audiovisual": ("production", AUDIOVISUAL_RECOVERY_DOMAIN, 18),
+    "acordes": ("test", ACORDES_RECOVERY_DOMAIN, 37),
+    "estructura": ("test", ESTRUCTURA_RECOVERY_DOMAIN, 40),
 }
 
 CANONICAL_ACTIONS = ("createSite", "upsertDraft", "publishDraft", "getSite")
@@ -49,6 +110,7 @@ REPO_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 GITHUB_OWNER_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 ROLE_ARN_PATTERN = re.compile(r"^arn:(?P<partition>[^:]+):iam::(?P<account>\d{12}):role/(?P<name>[A-Za-z0-9+=,.@_/-]+)$")
+MAX_ROLE_NAME_LENGTH = 64
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 CENTRAL_TIME = ZoneInfo("America/Mexico_City")
 AUTHORING_REPOSITORY = "zoolanding-config-authoring"
@@ -70,6 +132,51 @@ MAX_RUNTIME_FILE_BYTES = 2 * 1024 * 1024
 
 class BootstrapError(RuntimeError):
     """Raised when the bootstrap cannot prove a required invariant."""
+
+
+class S3OperationError(BootstrapError):
+    """Report only a code-owned operation and failure family."""
+
+    def __init__(self, operation: str, family: str):
+        super().__init__(f"isolated S3 {operation} failed ({family})")
+        self.operation = operation
+        self.family = family
+
+
+def _s3_failure_family(error: Exception) -> str:
+    if isinstance(error, BootstrapError):
+        return "timeout" if str(error) == "aws operation timed out" else "command_failure"
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        fields = response.get("Error")
+        code = fields.get("Code") if isinstance(fields, dict) else None
+        for family, codes in (
+            ("precondition", ("PreconditionFailed", "ConditionalRequestConflict")),
+            ("credentials", ("ExpiredToken", "InvalidAccessKeyId", "InvalidToken", "InvalidClientTokenId")),
+            ("access", ("AccessDenied", "Forbidden", "SignatureDoesNotMatch")),
+            ("not_found", ("NoSuchKey", "NoSuchVersion", "NoSuchBucket", "NotFound")),
+            ("throttled", ("SlowDown", "Throttling", "ThrottlingException", "TooManyRequestsException")),
+            ("timeout", ("RequestTimeout", "RequestTimeoutException")),
+        ):
+            if code in codes:
+                return family
+        metadata = response.get("ResponseMetadata")
+        status = metadata.get("HTTPStatusCode") if isinstance(metadata, dict) else None
+        if type(status) is int and 500 <= status <= 599:
+            return "service"
+    return {
+        "ConnectTimeoutError": "timeout",
+        "ReadTimeoutError": "timeout",
+        "EndpointConnectionError": "connection",
+        "ConnectionClosedError": "connection",
+        "ProxyConnectionError": "connection",
+        "ResponseStreamingError": "connection",
+        "IncompleteReadError": "connection",
+        "SSLError": "certificate",
+        "NoCredentialsError": "credentials",
+        "PartialCredentialsError": "credentials",
+        "CredentialRetrievalError": "credentials",
+    }.get(type(error).__name__, "unknown")
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -163,6 +270,19 @@ def verify_deployed_artifact(
 
 def _is_reviewed_production_pair(domain: Any, repo: Any) -> bool:
     return isinstance(domain, str) and isinstance(repo, str) and ISOLATED_PRODUCTION_REPOS.get(domain) == repo
+
+
+def _require_isolated_repository(
+    registry: dict[str, Any], domain: str, repo: str, environment: str,
+) -> None:
+    if environment == "production" and not _is_reviewed_production_pair(domain, repo):
+        raise BootstrapError("isolated production repository is not the reviewed target")
+    if domain in LYNX_OFFER_REPOS and (
+        LYNX_OFFER_REPOS[domain] != repo
+        or registry.get("owner") != LYNX_OFFER_OWNER
+        or _registered_repo_owner(registry, repo) != LYNX_OFFER_OWNER
+    ):
+        raise BootstrapError("isolated Lynx offer requires the reviewed GitHub repository identity")
 
 
 def _strict_domain(value: Any) -> str:
@@ -1287,6 +1407,20 @@ def collect_test_green_evidence(
     )
 
 
+def _deployment_role_name(domain: str, environment: str) -> str:
+    # Match the hub's roleNameFor for a strictly validated canonical domain.
+    domain_slug = re.sub(r"[^a-z0-9]+", "-", domain)
+    stem = f"draft-{domain_slug}"
+    suffix = f"-{environment}-deploy"
+    name = f"{stem}{suffix}"
+    if len(name) <= MAX_ROLE_NAME_LENGTH:
+        return name
+
+    digest = sha256_hex(domain.encode("ascii"))[:16]
+    stem_length = MAX_ROLE_NAME_LENGTH - len(suffix) - len(digest) - 1
+    return f"{stem[:stem_length].rstrip('-')}-{digest}{suffix}"
+
+
 def verify_role_evidence(
     *,
     owner: str,
@@ -1308,8 +1442,7 @@ def verify_role_evidence(
         raise BootstrapError("role evidence is incomplete")
     role_arn = _one_string(github.get("AWS_ROLE_ARN"), "GitHub AWS_ROLE_ARN")
     match = ROLE_ARN_PATTERN.fullmatch(role_arn)
-    suffix = "test" if environment == "test" else "production"
-    expected_role_name = f"{repo}-{suffix}-deploy"
+    expected_role_name = _deployment_role_name(domain, environment)
     if (
         github.get("DRAFT_DOMAIN") != domain
         or match is None
@@ -1561,8 +1694,7 @@ def collect_verified_bindings(
         drafts = [entry for entry in drafts if entry["domain"] == domain]
         if len(drafts) != 1:
             raise BootstrapError("isolated domain must select exactly one registered draft")
-        if environment == "production" and not _is_reviewed_production_pair(domain, drafts[0].get("repo")):
-            raise BootstrapError("isolated production repository is not the reviewed target")
+        _require_isolated_repository(registry, domain, drafts[0]["repo"], environment)
     bindings: list[dict[str, str]] = []
     for entry in drafts:
         if not isinstance(entry, dict):
@@ -1582,7 +1714,7 @@ def collect_verified_bindings(
             github.get("DRAFT_DOMAIN") != domain
             or match.group("partition") != "aws"
             or match.group("account") != account_id
-            or match.group("name") != f"{repo}-{environment}-deploy"
+            or match.group("name") != _deployment_role_name(domain, environment)
         ):
             raise BootstrapError("isolated role coordinates do not match the selected draft")
         iam_result = runner.run_json([
@@ -1730,27 +1862,31 @@ class AwsCliS3:
 class InMemoryS3(AwsCliS3):
     """Operator-only body transport; metadata retains the existing CLI checks."""
 
-    def __init__(self, *, profile: str, region: str, environment: str = "test", runner=None, client=None):
+    def __init__(self, *, profile: str, region: str, environment: str = "test", runner=None, client_factory=None):
         super().__init__(profile=profile, region=region, runner=runner)
         if environment not in ENVIRONMENTS:
             raise BootstrapError("isolated S3 environment is invalid")
         self.environment = environment
-        if client is None:
-            try:
+        try:
+            if client_factory is None:
                 from boto3 import Session
                 from botocore.config import Config
-                client = Session(profile_name=profile).client(
-                    "s3", region_name=region,
-                    config=Config(
-                        signature_version="s3v4", connect_timeout=10, read_timeout=60,
-                        retries={"mode": "standard", "total_max_attempts": 1},
-                    ),
+
+                session = Session(profile_name=profile)
+                config = Config(
+                    signature_version="s3v4", connect_timeout=10, read_timeout=60,
+                    retries={"mode": "standard", "total_max_attempts": 1},
                 )
-            except ImportError:
-                raise BootstrapError("isolated onboarding requires operator-only boto3") from None
-            except Exception:
-                raise BootstrapError("isolated S3 client could not be initialized") from None
-        self.client = client
+
+                def client_factory():
+                    return session.client("s3", region_name=region, config=config)
+
+            self._client_factory = client_factory
+            self.client = client_factory()
+        except ImportError:
+            raise BootstrapError("isolated onboarding requires operator-only boto3") from None
+        except Exception:
+            raise BootstrapError("isolated S3 client could not be initialized") from None
 
     def _parameters(self, bucket, key, expected_owner):
         require_environment_bucket(self.environment, bucket)
@@ -1758,8 +1894,54 @@ class InMemoryS3(AwsCliS3):
             raise BootstrapError("isolated S3 key is not allowlisted")
         return {"Bucket": bucket, "Key": key, "ExpectedBucketOwner": expected_owner}
 
+    def bucket_state(self, bucket: str, expected_owner: str) -> dict[str, Any]:
+        require_environment_bucket(self.environment, bucket)
+        try:
+            return super().bucket_state(bucket, expected_owner)
+        except BootstrapError as exc:
+            raise S3OperationError("bucket_controls", _s3_failure_family(exc)) from None
+
+    def head_object(self, bucket: str, key: str, expected_owner: str) -> Optional[dict[str, Any]]:
+        self._parameters(bucket, key, expected_owner)
+        operation = "scope_head" if key == SCOPE_KEY else "authz_head"
+        try:
+            return super().head_object(bucket, key, expected_owner)
+        except BootstrapError as exc:
+            raise S3OperationError(operation, _s3_failure_family(exc)) from None
+
+    def prior_scope_version(
+        self, bucket: str, expected_owner: str, current_head: dict[str, Any]
+    ) -> str:
+        require_environment_bucket(self.environment, bucket)
+        try:
+            result = self.client.list_object_versions(
+                Bucket=bucket, ExpectedBucketOwner=expected_owner, Prefix=SCOPE_KEY, MaxKeys=2,
+            )
+        except Exception as exc:
+            raise S3OperationError("scope_version_history", _s3_failure_family(exc)) from None
+        versions = result.get("Versions") if isinstance(result, dict) else None
+        if (
+            not isinstance(versions, list) or len(versions) != 2 or result.get("DeleteMarkers")
+            or any(not isinstance(item, dict) or item.get("Key") != SCOPE_KEY for item in versions)
+        ):
+            raise BootstrapError("recovery requires two consecutive scope versions")
+        current, prior = versions
+        version_id = prior.get("VersionId")
+        if (
+            current.get("IsLatest") is not True or prior.get("IsLatest") is not False
+            or current.get("ETag") != current_head.get("etag")
+            or current.get("VersionId") != current_head.get("versionId")
+            or not isinstance(version_id, str) or not version_id or version_id == "null"
+            or version_id == current.get("VersionId")
+        ):
+            raise BootstrapError("recovery scope versions changed")
+        return version_id
+
     def get_object(self, bucket, key, expected_owner, version_id=None):
         parameters = self._parameters(bucket, key, expected_owner)
+        scope_kind = "scope" if key == SCOPE_KEY else "authz"
+        version_kind = "versioned" if version_id is not None else "current"
+        operation = f"{scope_kind}_{version_kind}_get"
         if version_id is not None:
             parameters["VersionId"] = version_id
         try:
@@ -1767,15 +1949,18 @@ class InMemoryS3(AwsCliS3):
             try:
                 body = stream.read()
                 if not isinstance(body, bytes):
-                    raise ValueError("invalid body type")
+                    raise S3OperationError(operation, "invalid_response")
                 return body
             finally:
                 stream.close()
-        except Exception:
-            raise BootstrapError("isolated S3 body could not be read") from None
+        except S3OperationError:
+            raise
+        except Exception as exc:
+            raise S3OperationError(operation, _s3_failure_family(exc)) from None
 
     def put_object(self, bucket, key, body, expected_owner, *, if_match=None, if_none_match=None):
         parameters = self._parameters(bucket, key, expected_owner)
+        operation = "scope_put" if key == SCOPE_KEY else "authz_put"
         parameters.update(
             Body=body, ContentType="application/json", ServerSideEncryption="AES256",
             ChecksumAlgorithm="SHA256",
@@ -1786,15 +1971,18 @@ class InMemoryS3(AwsCliS3):
         if if_none_match is not None:
             parameters["IfNoneMatch"] = if_none_match
         try:
-            result = self.client.put_object(**parameters)
+            # Each write gets its own HTTP pool while retaining the reviewed session and config.
+            writer = self._client_factory()
+            try:
+                result = writer.put_object(**parameters)
+            finally:
+                # Cleanup cannot invalidate an acknowledged write or mask its failure.
+                with suppress(Exception):
+                    writer.close()
         except Exception as exc:
-            response = getattr(exc, "response", None)
-            error = response.get("Error") if isinstance(response, dict) else None
-            if isinstance(error, dict) and error.get("Code") in {"PreconditionFailed", "ConditionalRequestConflict"}:
-                raise BootstrapError("isolated S3 precondition failed; re-plan required") from None
-            raise BootstrapError("isolated S3 write failed; recheck state before proceeding") from None
+            raise S3OperationError(operation, _s3_failure_family(exc)) from None
         if not isinstance(result, dict) or not isinstance(result.get("ETag"), str) or not result.get("VersionId"):
-            raise BootstrapError("versioned S3 write did not return ETag and VersionId")
+            raise S3OperationError(operation, "invalid_response")
         return {"etag": result["ETag"], "versionId": result["VersionId"]}
 
 
@@ -1857,6 +2045,29 @@ def _read_stable_versioned_object(
     return current_body
 
 
+def _require_catalog_grants_preserved(previous: bytes, candidate: bytes) -> None:
+    try:
+        old_rules = json.loads(previous)
+    except (ValueError, UnicodeError):
+        # A malformed historical object cannot authorize catalog participation.
+        return
+    if not isinstance(old_rules, list):
+        return
+    enrolled = [rule for rule in old_rules if isinstance(rule, dict) and "catalog" in rule]
+    if not enrolled:
+        return
+    try:
+        new_rules = json.loads(candidate)
+    except (ValueError, UnicodeError):
+        raise BootstrapError("reviewed catalog authorization must be preserved") from None
+    if not isinstance(new_rules, list):
+        raise BootstrapError("reviewed catalog authorization must be preserved")
+    for old_rule in enrolled:
+        matches = [rule for rule in new_rules if isinstance(rule, dict) and rule.get("roleArn") == old_rule.get("roleArn")]
+        if len(matches) != 1 or canonical_json_bytes(matches[0]) != canonical_json_bytes(old_rule):
+            raise BootstrapError("reviewed catalog authorization must be preserved")
+
+
 def apply_private_bundle(
     s3: Any,
     *,
@@ -1872,6 +2083,7 @@ def apply_private_bundle(
     expected_current_scope_version_id: str,
     expected_current_scope_sha256: str,
     expected_current_authz_sha256: Optional[str] = None,
+    require_scope_unchanged: bool = False,
 ) -> dict[str, Any]:
     _require_approved_hash(approved_scope_sha256, scope_bytes, "scope registry")
     _require_approved_hash(approved_authz_sha256, authz_bytes, "authorization")
@@ -1901,7 +2113,21 @@ def apply_private_bundle(
             or current_authz.get("versionId") != expected_current_authz_version_id
         ):
             raise BootstrapError("authorization object changed after review")
+        try:
+            enrollment_baseline = _read_stable_versioned_object(
+                s3, bucket=bucket, key=AUTHZ_KEY, expected_owner=expected_owner, head=current_authz,
+            )
+        except BootstrapError:
+            raise
+        except Exception:
+            raise BootstrapError("authorization baseline could not be verified") from None
+        _require_catalog_grants_preserved(enrollment_baseline, authz_bytes)
     scope_head = s3.head_object(bucket, SCOPE_KEY, expected_owner)
+    if require_scope_unchanged and (
+        bucket not in ENVIRONMENT_BUCKETS.values() or scope_head is None
+        or current_authz is None or expected_current_authz_sha256 is None
+    ):
+        raise BootstrapError("recovery requires the reviewed scope and authorization objects")
     if expected_current_authz_sha256 is not None:
         if bucket not in ENVIRONMENT_BUCKETS.values():
             raise BootstrapError("isolated S3 bucket is not allowlisted")
@@ -1957,8 +2183,10 @@ def apply_private_bundle(
         )
         _require_exact_object_metadata(
             scope_head, current_scope_body,
-            allow_missing_checksum=allow_missing_baseline_checksum,
+            allow_missing_checksum=allow_missing_baseline_checksum and not require_scope_unchanged,
         )
+        if require_scope_unchanged and current_scope_body != scope_bytes:
+            raise BootstrapError("recovery requires the reviewed scope bytes to stay unchanged")
         previous_scope = {
             "etag": scope_head["etag"],
             "versionId": scope_head["versionId"],
@@ -2013,6 +2241,8 @@ def apply_private_bundle(
         )
         if s3.bucket_state(bucket, expected_owner) != state:
             raise BootstrapError("private bucket controls changed before authorization write")
+    if require_scope_unchanged and s3.head_object(bucket, AUTHZ_KEY, expected_owner) != current_authz:
+        raise BootstrapError("authorization changed immediately before recovery write")
     authz_result = s3.put_object(
         bucket,
         AUTHZ_KEY,
@@ -2198,7 +2428,7 @@ def validate_restore_contract(
             match is None
             or match.group("partition") != "aws"
             or match.group("account") != expected_owner
-            or match.group("name") != f"{scope['repo']}-{environment}-deploy"
+            or match.group("name") != _deployment_role_name(domain, environment)
             or role_arn in seen_role_arns
             or rule.get("tenantId") != scope["tenantId"]
             or rule.get("draftId") != scope["draftId"]
@@ -2266,6 +2496,37 @@ def build_isolated_bundle(
         environment=environment, expected_owner=expected_owner,
     )
     return proposed_scope, proposed_authz, "add"
+
+
+def build_recovery_bundle(
+    *,
+    incident: str,
+    prior_scope_bytes: bytes,
+    current_scope_bytes: bytes,
+    current_authz_bytes: bytes,
+    target_scope: dict[str, str],
+    target_binding: dict[str, str],
+    expected_owner: str,
+    environment: str,
+) -> tuple[bytes, bytes, str]:
+    reviewed = RECOVERY_INCIDENTS.get(incident)
+    domain = target_scope.get("domain")
+    if (
+        reviewed is None or (environment, domain) != reviewed[:2]
+        or target_scope.get("repo") != LYNX_OFFER_REPOS[reviewed[1]]
+    ):
+        raise BootstrapError("recovery does not match the reviewed incident")
+    proposed_scope, proposed_authz, mode = build_isolated_bundle(
+        scope_bytes=prior_scope_bytes, authz_bytes=current_authz_bytes,
+        target_scope=target_scope, target_binding=target_binding,
+        expected_owner=expected_owner, environment=environment,
+    )
+    if mode != "add" or proposed_scope != current_scope_bytes:
+        raise BootstrapError("recovery requires the exact interrupted scope addition")
+    # The candidate builder proves one rule per canonical scope and exactly one addition.
+    if len(json.loads(proposed_authz)) != reviewed[2]:
+        raise BootstrapError("recovery requires the observed scope count")
+    return current_scope_bytes, proposed_authz, "recover-authz"
 
 
 def _parse_overrides(values: list[str]) -> dict[str, str]:
@@ -2377,6 +2638,10 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
     bucket = args.bucket if write else (
         args.test_bucket if environment == "test" else args.production_bucket
     )
+    incident = getattr(args, "recovery", None)
+    recovery = incident is not None
+    if recovery and (environment, domain) != RECOVERY_INCIDENTS.get(incident, ())[:2]:
+        raise BootstrapError("recovery does not match the reviewed incident")
     if args.tenant_override:
         raise BootstrapError("isolated onboarding does not accept tenant overrides")
     if environment == "production" and domain not in ISOLATED_PRODUCTION_REPOS:
@@ -2390,10 +2655,7 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
     selected = [scope for scope in reviewed_scopes["scopes"] if scope["domain"] == domain]
     if len(selected) != 1:
         raise BootstrapError("isolated domain must select exactly one registered draft")
-    if environment == "production" and not _is_reviewed_production_pair(
-        selected[0]["domain"], selected[0]["repo"],
-    ):
-        raise BootstrapError("isolated production repository is not the reviewed target")
+    _require_isolated_repository(registry, domain, selected[0]["repo"], environment)
     runner = CommandRunner()
     account = _account_id(runner, args.profile)
     bindings = collect_verified_bindings(
@@ -2414,14 +2676,30 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
         body = _read_stable_versioned_object(s3, bucket=bucket, key=key, expected_owner=account, head=head)
         _require_exact_object_metadata(
             head, body,
-            allow_missing_checksum=(environment == "production"),
+            allow_missing_checksum=(environment == "production" and (not recovery or label == "authz")),
         )
         snapshots[label] = (head, body)
-    scope_bytes, authz_bytes, mode = build_isolated_bundle(
-        scope_bytes=snapshots["scope"][1], authz_bytes=snapshots["authz"][1],
-        target_scope=selected[0], target_binding=bindings[0], expected_owner=account,
-        environment=environment,
-    )
+    recovery_prior = None
+    if recovery:
+        current_scope_head, current_scope = snapshots["scope"]
+        previous_version = s3.prior_scope_version(bucket, account, current_scope_head)
+        previous_scope = s3.get_object(bucket, SCOPE_KEY, account, previous_version)
+        if write:
+            if previous_version != args.expected_prior_scope_version_id:
+                raise BootstrapError("recovery prior scope version changed after review")
+            _require_approved_hash(args.expected_prior_scope_sha256, previous_scope, "prior scope")
+        scope_bytes, authz_bytes, mode = build_recovery_bundle(
+            incident=incident, prior_scope_bytes=previous_scope, current_scope_bytes=current_scope,
+            current_authz_bytes=snapshots["authz"][1], target_scope=selected[0],
+            target_binding=bindings[0], expected_owner=account, environment=environment,
+        )
+        recovery_prior = {"versionId": previous_version, "sha256": sha256_hex(previous_scope)}
+    else:
+        scope_bytes, authz_bytes, mode = build_isolated_bundle(
+            scope_bytes=snapshots["scope"][1], authz_bytes=snapshots["authz"][1],
+            target_scope=selected[0], target_binding=bindings[0], expected_owner=account,
+            environment=environment,
+        )
     response = {
         "mode": "apply" if write else "plan", "environment": environment, "domain": domain,
         "repo": selected[0]["repo"], "updateMode": mode, "bucketState": state,
@@ -2429,6 +2707,8 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
         "scopeSha256": sha256_hex(scope_bytes), "authzSha256": sha256_hex(authz_bytes),
         "existingScopesPreserved": True, "existingGrantsPreserved": True,
     }
+    if recovery_prior is not None:
+        response["priorScope"] = recovery_prior
     if write:
         _require_approved_hash(args.approve_scope_sha256, scope_bytes, "scope registry")
         _require_approved_hash(args.approve_authz_sha256, authz_bytes, "authorization")
@@ -2494,8 +2774,18 @@ def _isolated_command(args: argparse.Namespace, *, write: bool) -> dict[str, Any
         expected_current_authz_etag=args.expected_current_authz_etag,
         expected_current_authz_version_id=args.expected_current_authz_version_id,
         expected_current_authz_sha256=args.expected_current_authz_sha256,
+        require_scope_unchanged=recovery,
     )
     response = {**response, **result, "authzWritten": True}
+    if recovery:
+        if result["scope"] != {
+            "etag": args.expected_current_scope_etag,
+            "versionId": args.expected_current_scope_version_id,
+            "sha256": args.expected_current_scope_sha256,
+            "written": False,
+        }:
+            raise BootstrapError("recovery did not preserve the reviewed scope version")
+        response["scopeWritten"] = False
     if test_evidence_sha256 is not None:
         response["testEvidenceSha256"] = test_evidence_sha256
     return response
@@ -2650,6 +2940,7 @@ def _verify_isolated_test(args: argparse.Namespace) -> dict[str, Any]:
         selected[0]["domain"], selected[0]["repo"],
     ):
         raise BootstrapError("isolated test evidence target is not exact")
+    _require_isolated_repository(registry, domain, selected[0]["repo"], "test")
 
     runner = CommandRunner()
     account_id = _account_id(runner, args.profile)
@@ -2779,6 +3070,16 @@ def _add_generation_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--region", default="us-east-1")
 
 
+def _add_recovery_selectors(parser: argparse.ArgumentParser) -> None:
+    recovery = parser.add_mutually_exclusive_group()
+    recovery.add_argument("--recover-audiovisual", dest="recovery", action="store_const", const="audiovisual",
+                          help="Recover the reviewed Audiovisual production grant.")
+    recovery.add_argument("--recover-acordes", dest="recovery", action="store_const", const="acordes",
+                          help="Recover the reviewed Acordes TEST grant.")
+    recovery.add_argument("--recover-estructura", dest="recovery", action="store_const", const="estructura",
+                          help="Recover the reviewed Estructura musical TEST grant.")
+
+
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -2789,12 +3090,16 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     plan.add_argument("--test-bucket")
     plan.add_argument("--production-bucket")
     plan.add_argument("--add-domain", action="append")
+    _add_recovery_selectors(plan)
 
     apply = commands.add_parser("apply", help="Conditionally write and read back one reviewed environment.")
     _add_generation_arguments(apply)
     apply.add_argument("--environment", required=True, choices=ENVIRONMENTS)
     apply.add_argument("--bucket", required=True)
     apply.add_argument("--add-domain", action="append")
+    _add_recovery_selectors(apply)
+    apply.add_argument("--expected-prior-scope-version-id")
+    apply.add_argument("--expected-prior-scope-sha256")
     apply.add_argument("--approve-scope-sha256", required=True)
     apply.add_argument("--approve-authz-sha256", required=True)
     apply.add_argument("--expected-current-authz-etag", required=True)
@@ -2830,6 +3135,20 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     rollback.add_argument("--expected-current-etag", required=True)
     args = parser.parse_args(argv)
     selected = getattr(args, "add_domain", None)
+    incident = getattr(args, "recovery", None)
+    if incident is not None:
+        environment, domain, _ = RECOVERY_INCIDENTS[incident]
+        if selected != [domain] or args.environment != environment:
+            parser.error(f"--recover-{incident} requires its exact environment and domain selector")
+        if args.command == "apply" and (
+            not args.expected_prior_scope_version_id
+            or not SHA256_PATTERN.fullmatch(args.expected_prior_scope_sha256 or "")
+        ):
+            parser.error("recovery apply requires the reviewed prior scope version and SHA-256")
+    elif args.command == "apply" and (
+        args.expected_prior_scope_version_id is not None or args.expected_prior_scope_sha256 is not None
+    ):
+        parser.error("prior scope approvals require an exact recovery selector")
     if selected is not None:
         if len(selected) != 1:
             parser.error("--add-domain requires exactly one domain")

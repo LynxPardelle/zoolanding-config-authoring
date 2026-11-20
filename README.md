@@ -33,7 +33,7 @@ This Lambda handles create, pull, update, publish, and lifecycle status changes 
 - `LOG_LEVEL`
 - `DEPLOY_AUTHZ_CONFIG_S3_KEY`
 
-`DEPLOY_AUTHZ_CONFIG_S3_KEY` points to a JSON array in `CONFIG_PAYLOADS_BUCKET_NAME`. Every rule has exactly six keys: one IAM role ARN, one valid `tenantId`, one valid `draftId`, one canonical domain, the current stack environment, and unique code-owned actions. Wildcards, plural role fields, extra keys, unknown actions, duplicate roles/domains/drafts, or one malformed entry reject the complete authorization object. Example:
+`DEPLOY_AUTHZ_CONFIG_S3_KEY` points to a JSON array in `CONFIG_PAYLOADS_BUCKET_NAME`. Every rule has six required keys: one IAM role ARN, one valid `tenantId`, one valid `draftId`, one canonical domain, the current stack environment, and unique code-owned actions. The only optional key is the closed `catalog` enrollment described below. Wildcards, plural role fields, other extra keys, unknown actions, duplicate roles/domains/drafts/catalog IDs, or one malformed entry reject the complete authorization object. Example:
 
 ```json
 [
@@ -94,6 +94,8 @@ Operational readiness requires the actual principal to read the exact prior obje
 
 `tools/bootstrap_server_scopes.py` is the operator-only bootstrap for the private scope registry and runtime authorization object. It is not part of the Lambda artifact. It derives the exact draft set from the hub's `docs/drafts-registry.json`, resolves an optional entry-level GitHub owner with the registry owner as the default, verifies each resolved repository's environment-scoped `DRAFT_DOMAIN` and `AWS_ROLE_ARN`, and verifies the matching IAM role's exact GitHub OIDC trust before generating any bytes. The operator's authenticated GitHub profile must have read access to the required Environment variables and OIDC metadata for every resolved repository; missing cross-owner access fails closed and must not be replaced with inferred values. Registry version 2 requires every draft to declare exactly `deploymentEnvironments: ["test"]` or `deploymentEnvironments: ["test", "production"]`; version 1 remains compatible only for registries whose complete draft set belongs to both environments.
 
+The expected IAM role name follows the hub's canonical domain and environment. Names that would exceed IAM's 64-character limit use a shortened stem with the domain's SHA-256 suffix. The registered repository slug still identifies the GitHub OIDC subject, `draftId` and default `tenantId`.
+
 The reviewed ID rule is deliberately small:
 
 - `draftId` is the canonical draft repository slug.
@@ -135,7 +137,7 @@ Scope removals, canonical ID changes, and tenant split/merge migrations are outs
 
 ### Isolated additive onboarding
 
-For an explicitly reviewed single-draft onboarding, `plan`, `apply`, and `verify-test` accept `--add-domain` with exactly one canonical registry domain. TEST planning accepts one selected canonical draft, while isolated evidence and production accept only the reviewed pairs `zooberiahsystems.com` / `draft-zooberiahsystems-com` and `dipsydoo.com.mx` / `draft-dipsydoo-com-mx`. All isolated paths reject multiple selectors and tenant overrides. Global commands without this flag retain their full-inventory verification and cross-owner failure; rollback is unchanged.
+For an explicitly reviewed single-draft onboarding, `plan`, `apply`, and `verify-test` accept `--add-domain` with exactly one canonical registry domain. TEST planning accepts one selected canonical draft, while isolated evidence and production accept only the reviewed pairs `zooberiahsystems.com` / `draft-zooberiahsystems-com` and `dipsydoo.com.mx` / `draft-dipsydoo-com-mx`, plus the 47 explicit Lynx Pardelle offer pairs listed in `LYNX_OFFER_REPOS`. The latter require the exact domain, repository slug, and `LynxPardelle` GitHub ownership in every isolated environment. All isolated paths reject multiple selectors and tenant overrides. Global commands without this flag retain their full-inventory verification and cross-owner failure; rollback is unchanged.
 
 The operator validates the local registry and expected count, but reads GitHub Environment/OIDC metadata and IAM evidence only for the selected draft. It rejects a mismatched role before querying IAM. Both private objects in the selected environment must already exist as exact canonical JSON with valid scope/grant mappings. Existing grants are structurally validated and preserved in memory, not re-certified against their repositories. The selected draft receives repository-derived IDs and the existing four canonical actions; collisions or conflicting/one-sided entries fail closed. No IAM/GitHub permissions or existing grants are changed.
 
@@ -148,6 +150,73 @@ Production apply also requires the approved machine-readable TEST evidence field
 An exact existing target produces a true no-op: neither object is written and no version is created. An addition inserts only the new sorted scope and appends the new authorization rule without reordering or changing any existing canonical entry bytes. It writes scope first, rechecks the pair, then conditionally writes authz and reads both current/versioned results back. `If-Match` conditions ETag, not VersionId; version/hash rechecks do not make two S3 keys atomic. A race or failure can leave the new scope without its grant. Errors are sanitized and stop without automatic retry or repair; a one-sided state requires a separately reviewed recovery decision. Never restore or delete shared objects to force onboarding through.
 
 This tool is outside the Lambda artifact. Release its source through a feature-to-dev PR with successful CI and reviewed changes, then execute the reviewed merged SHA locally. Do not promote the authoring service to `test` merely to run this operator when the current production evidence gate can already be satisfied, because that push starts a service deployment. If production apply lacks a valid current attempt-1 `Deploy Test` push run and retained artifact, it remains blocked; the only supported recovery is a separately reviewed exact `dev -> test` promotion through the normal protected workflow, followed by a successful attempt-1 authoring run and a later signed draft canary dispatch. Before that merge, inspect only the presence/empty state of the repository-level `AUTHORING_TEST_PROMOTION_SELECTION_JSON` variable without printing its value. It must be absent or empty: an exact nonempty THN selector intentionally takes the source-only path and creates no deploy artifact, while a stale nonempty selector fails the first attempt. Remove a stale selector through the approved GitHub variable operation, verify the absent/empty state again, and only then merge the protected promotion. Do not restore a stale selector; a future THN source-only promotion must set a newly reviewed exact selector and clear it after use. Never bypass or weaken the evidence gate. Draft content still follows its own protected `dev -> test` promotion after the isolated grant and integration gates are verified.
+
+#### Audiovisual production scope-only recovery
+
+Use the reviewed operator source for the interrupted production onboarding of
+`curso-produccion-audiovisual.music.lynxpardelle.com`. Run the usual isolated
+production `plan` with that exact `--add-domain` and `--recover-audiovisual`.
+The read-only plan verifies the current scope and authorization versions and reads
+the immediate preceding scope version for the exact key. It accepts
+`updateMode: recover-authz` only when the current canonical scope equals that
+prior version plus the selected identity and the current authorization still
+covers exactly the prior scope. The prior pair must contain 17 scopes and grants,
+the current pair must have 18 scopes and 17 grants, and the candidate must have
+18 scopes and grants. The candidate retains every existing grant.
+Keep the canonical objects in memory. Review the safe current and prior version
+metadata and the candidate hashes.
+
+Obtain fresh `verify-test` evidence for this exact draft after the live TEST
+bundle stabilizes. Repeat the usual isolated production `apply` with
+`--recover-audiovisual` and the fresh review inputs. Pass the plan's
+`priorScope.versionId` and `priorScope.sha256` as
+`--expected-prior-scope-version-id` and `--expected-prior-scope-sha256`.
+The apply revalidates that prior version, the current pair, the candidate digests,
+the selected role trust, and the approved TEST evidence and scope subset. Keep
+other scope and authorization operators idle through readback. S3 conditions the
+grant write on ETag. The operator rechecks the exact authorization version
+immediately before that write and verifies the stored version and hash after it.
+
+Expect `scopeWritten: false` and `authzWritten: true`, the same scope version and
+hash, and one new authorization version. Re-run the normal isolated production
+`plan` with the exact selector to verify `updateMode: noop`. If the recovery plan
+or readback diverges, stop and review the exact state again. Recovery leaves the
+prior versions in place.
+
+#### Acordes TEST scope-only recovery
+
+Use the same approved recovery protocol with `--recover-acordes`,
+`--environment test`, and the exact `--add-domain masterclass-acordes.music.lynxpardelle.com`.
+The read-only plan requires the immediate previous scope version with 36 canonical
+scopes and grants, the current version with 37 scopes and 36 grants, and a
+37-grant candidate that adds only Acordes. Review the prior version and hash,
+both current ETag/version/SHA-256 triples, and both candidate hashes. Apply with
+the same selector, the normal TEST trust checks, and those exact approvals.
+Expect one authorization write, unchanged scope metadata and bytes, and a normal
+isolated TEST plan returning `updateMode: noop`.
+
+Isolated S3 transport exceptions expose fixed `operation` and `family`
+categories covering the logical object read, metadata check, or write. Retain
+only those categories in operator logs. For an apply error, classify both
+current and version-specific objects before deciding how to proceed. The SDK
+still makes one attempt for each call.
+
+#### Estructura musical TEST scope-only recovery
+
+Use the same reviewed TEST recovery with `--recover-estructura`,
+`--environment test`, and the exact
+`--add-domain masterclass-estructura-musical.music.lynxpardelle.com`.
+The plan requires 39 scopes and grants at the preceding version, 40 scopes and
+39 grants currently, and a 40-grant candidate that adds only Estructura musical.
+Review the prior scope version and hash, both current ETag/version/SHA-256 triples,
+and both candidate hashes. Apply with the same selector and approvals. Verify
+one authorization write, unchanged scope metadata and bytes, and a normal TEST
+plan returning `updateMode: noop`.
+
+The isolated operator opens a new SDK client and HTTP connection pool for each
+conditional PUT, using the same authenticated session, region, and SDK config
+as its read client. Each write gets one SDK attempt. The operator closes that
+client after the request and keeps the existing conditional writes and readbacks.
 
 Use the output `ApiUrl` as the base for the local draft round-trip CLI in the main app repo.
 
@@ -163,6 +232,7 @@ https://2dvjmiwjod.execute-api.us-east-1.amazonaws.com/Prod/config-authoring
 - `upsertDraft`
 - `getSite`
 - `publishDraft`
+- `reconcileCatalog` (requires an enrolled source's existing `publishDraft` permission)
 - `setSiteStatus`
 
 Proposed production aliases are authored in `site-config.json` through an optional `aliases` array. Proposed test aliases are authored under `site-config.json.environments.test.aliases`.
@@ -191,6 +261,233 @@ A route may opt into a fixed language with an optional `language` field in the e
 ```
 
 `createSite` and `upsertDraft` reject invalid route-language contracts before any S3 or DynamoDB write. A nested or case-altered file named `site-config.json` is not a second configuration candidate and is rejected as `invalid_site_config_path`; metadata derivation reads only the exact domain-root path. `publishDraft` reloads the immutable package and applies the same path and language validation before moving a publication pointer. Validation reads the payload without normalizing or rewriting authored supported-language definitions, so accepted site configuration and registry routes round-trip unchanged. Existing routes that omit `language` retain their prior behavior and do not require an i18n block.
+
+## Optional public catalog contract
+
+The exact domain-root `site-config.json` may declare a closed `catalog` object
+containing only `entries`. This opt-in declaration describes public website or app
+listings; it does not register an alias or publish a corporate catalog by itself.
+Packages without `catalog` retain their existing behavior. An empty `entries`
+array is valid and explicitly declares no active listings for that version.
+
+```json
+{
+  "routes": [{"path": "/guitarra", "pageId": "guitar"}],
+  "catalog": {
+    "entries": [{
+      "entryId": "guitarra",
+      "kind": "website",
+      "path": "/guitarra",
+      "title": "Clases de guitarra",
+      "description": "Práctica guiada de guitarra acústica y eléctrica.",
+      "imageUrl": "https://example.com/images/guitarra.webp",
+      "imageAlt": "Guitarra acústica y eléctrica.",
+      "enabled": true,
+      "category": "music",
+      "builtWith": "zoolandingpage"
+    }]
+  }
+}
+```
+
+Each of at most 32 entries is closed and requires `entryId`, `kind`, `path`,
+`title`, `description`, `imageUrl`, `imageAlt`, and a strict boolean `enabled`.
+Only `category` and `builtWith` are optional. `kind` is `website` or `app`;
+`builtWith`, when present, is `zoolandingpage` or `zoositioweb`. Disabled entries
+are valid retirement declarations and follow the same validation rules.
+
+| Field | Constraint |
+| --- | --- |
+| `entryId`, `category` | Lowercase alphanumeric segments separated by single hyphens; maximum 64 and 48 characters respectively. |
+| `path` | At most 256 characters; exact existing static route. `/` is valid, otherwise slash-separated ASCII segments using letters, digits, `.`, `_`, `~`, or `-`. No trailing slash, dot segments, encoding, parameters, query, or fragment. |
+| `title`, `description`, `imageAlt` | Nonempty, already trimmed NFC text; maximum 100, 320, and 200 Unicode code points. No HTML delimiters or Unicode control, format, or surrogate characters. |
+| `imageUrl` | At most 1,024 characters; raw `https://` URL on the authorized draft domain or `assets.zoolandingpage.com.mx`, with no credentials, explicit port, query, fragment, whitespace, backslash, or control/format/surrogate characters. Host comparison is case-insensitive and exact. |
+
+Entry IDs and paths must each be unique, including disabled records. A listing
+cannot target a route with `auth.required: true`, a private route that resolves
+to the same normalized path, or a source in `site.seo.redirects`. Explicit
+`auth.required: false` is allowed. Image validation never fetches remote URLs.
+Create/upsert validates before S3 or DynamoDB writes; publish revalidates the
+integrity-checked stored package before changing a pointer. Invalid new input
+returns the generic `invalid_catalog` error; an invalid stored package returns
+`stored_package_invalid`. Accepted content is preserved without rewriting it.
+
+### Publication snapshot
+
+When the requested stored version declares `catalog`, `publishDraft` adds only
+this metadata to that environment's published pointer:
+
+```json
+{
+  "catalogRevision": {
+    "schemaVersion": 1,
+    "sequence": 2,
+    "entriesSha256": "<64 lowercase hexadecimal characters>",
+    "entryCount": 1
+  }
+}
+```
+
+The SHA-256 binds the validated stored `entries` array using UTF-8 JSON with
+`sort_keys=True`, `separators=(",", ":")`, and `ensure_ascii=False`. Object key
+order is irrelevant; array order remains significant. The snapshot's sequence
+is the registry's expected revision plus one, including publication of an older
+immutable version. The existing pointer's `versionId` and `prefix` locate that
+exact package, so entries are not copied into registry metadata.
+
+The snapshot and pointer are persisted in the same existing revision-conditional
+DynamoDB write. A conflict commits neither. Empty entries produce a snapshot
+with count zero; absent `catalog` produces the unchanged legacy pointer shape
+without `catalogRevision`. Publishing TEST preserves both production pointers;
+production updates its environment pointer and the existing legacy `published`
+pointer. Request-supplied catalog or snapshot fields cannot replace the validated
+stored declaration. Publication adds no public catalog read endpoint, table, IAM
+grant, or extra S3 write. An enrolled source also receives a durable pending
+handoff for a separate signed projection request, as described below.
+
+### Scoped automatic projection and retry
+
+`_project_published_catalog(registration, environment)` is a separate internal
+replay primitive. `publishDraft` never calls it. For an enrolled source, the
+publication response contains a pending handoff backed by the snapshot committed
+with the pointer. The source's deployment workflow consumes that handoff in a
+separate signed `reconcileCatalog` request. This keeps S3/projection latency and
+retry budget outside publication: there is no projection read or write after
+the pointer commit. Registration is derived from a validated private IAM grant
+for the exact domain, scope, environment, and `publishDraft`; callers cannot
+supply their own approval through the API. A source's declared IDs must be
+approved before its pointer can be committed.
+
+The initial code-owned enrollment contains exactly one TEST source:
+`zoositioweb.com.mx`, entry ID `zoositioweb-com-mx`. It requires the source's real
+existing scoped publish grant; the code-owned default never grants API access
+or guesses a tenant, draft, or role. There is no implicit production enrollment
+or corporate publisher hook. Projection only updates its source document; it
+does not publish the corporate draft, so corporate publication cannot recurse.
+
+A private grant may override this default with one of these closed variants:
+
+```json
+{"catalog": {"enabled": false}}
+```
+
+```json
+{
+  "catalog": {
+    "enabled": true,
+    "entryIds": ["example-site"],
+    "environments": ["test"]
+  }
+}
+```
+
+These snippets are the optional field of a full six-key IAM grant, not public
+site configuration or a request payload. `enabled` must be a boolean. Disabled
+options contain only `enabled` and take precedence over code-owned enrollment.
+Enabled options contain exactly these three fields, with one to 32 unique
+canonical entry IDs and exactly the grant's own single stack environment.
+Production requires its separately reviewed production grant and explicit
+production options; TEST never enrolls production. Each public draft entry ID
+may have only one enrolled owner within an environment. Malformed options fail
+the whole authorization object closed. Existing six-key grants remain valid.
+
+The scope bootstrap preserves existing optional enrollment verbatim and blocks
+removal, ownership changes, type changes, or option changes before any write.
+Its normal registry generator does not invent or activate catalog options;
+intentional private enrollment changes require a separate reviewed operation.
+An opt-out stops future publisher/replay writes; reader enrollment must also be
+disabled when withdrawing an existing source from the public catalog.
+
+The internal closed registration contains `sourceDomain`, `tenantId`, `draftId`,
+and its approved `entryIds`. Those scope values come from the exact private
+grant, rather than authored public JSON. Successful `publishDraft` responses
+for enrolled sources include `catalogSync.status: pending`. That response is
+fully validated before the pointer CAS. A pointer CAS conflict returns the
+existing conflict response and never invokes the projector. Non-enrolled
+publish responses remain unchanged. Every deployment client that publishes an
+enrolled source must consume `pending`; an older client leaves a durable intent
+for a later signed replay rather than silently synchronizing the catalog.
+
+The same IAM endpoint accepts this closed retry body:
+
+```json
+{"action": "reconcileCatalog", "domain": "example.com", "environment": "test"}
+```
+
+Reconciliation requires the caller's exact existing `publishDraft` permission
+plus effective enrollment. It adds no authorization action to the private grant
+and grants no permission to edit another source or the corporate draft. The
+request accepts no version, entry IDs, registration, or receipt. It resolves
+the current publication afresh, returns its safe `catalogSync` status (`applied`,
+`noop`, `legacy`, or `unpublished`), and
+does not republish or rewrite source metadata/S3. An unsuccessful retry returns
+HTTP 500 with fixed `catalog_projection_pending` and logs no exception details;
+the durable snapshot remains. An IAM/SigV4 operator or source-owned post-deploy
+job can retry that action with bounded backoff, including transport timeouts.
+A source-owned workflow should treat exhaustion as catalog pending, never as a
+reason to roll back a successfully published source. A future scheduled reconciler must enumerate only enrolled
+sources and use those same exact grants. No scheduler or broadened operator
+role is introduced in this increment.
+
+The primitive strongly reads the source registry, verifies its scope and exact
+`publishedEnvironments[environment]` pointer, reloads/revalidates that immutable
+package, checks the stored snapshot's digest/count/sequence, and strongly reads
+the source again before writing. It accepts no request-selected version, draft
+pointer, production fallback for TEST, or unapproved entry ID.
+
+One complete bounded source document is stored in the existing environment
+table under `pk=CATALOG#<environment>` and
+`sk=SOURCE#DRAFT#<canonical-domain>`. Its fields are `schemaVersion: 1`,
+`sourceId: draft:<canonical-domain>`, `sourceDomain`, `environment`,
+`catalogState`, `sequence`, `versionId`, `prefix`, `entriesSha256`, `entryCount`,
+and the exact validated `entries`. The storage key, package prefix, and any
+operational metadata are not a public response contract. No tenant, draft
+authorization identity, or role is copied into the document.
+
+The conditional PutItem permits only a missing item or a strictly higher
+sequence. An identical replay is a no-op; equal sequence with different content
+is a conflict; a newer existing projection wins. A rollback of a declared
+catalog gets its new publication sequence. Publication failure and projection
+failure remain independent, and projection never rewrites a source pointer or
+S3 package.
+
+`catalogState: declared` replaces the source's prior collection, including an
+explicit empty collection or disabled records. If a previously adopted source
+publishes a legacy package without `catalog`, the primitive writes a higher
+`catalogState: legacy` tombstone with empty entries, using the current registry
+revision as its sequence. Readers must restore that source's manual seed, if
+one exists, and remove automatic entries without a seed. This prevents stale
+automatic cards from surviving an older-package rollback. A never-adopted legacy
+source remains a no-op. A missing published pointer is reported as unpublished;
+it is never replaced with another environment's pointer.
+For an already-adopted legacy pointer, an unrelated registry revision can cause
+one newer tombstone write without changing visible entries. This conservative
+barrier also covers republication of the same legacy version; second-resolution
+timestamps cannot reliably distinguish those cases. Replays at an unchanged
+registry revision remain no-ops.
+
+The second read and projection PutItem are separate operations. A publication
+after that read can briefly leave an older projection when no newer projection
+has yet been written. Reconciliation resolves the latest pointer and advances
+the document; the ordering condition prevents it from overwriting a newer
+projection. Before a consumer is activated, its loader must verify the source's
+current published pointer or this boundary must gain an independently approved
+transactional condition. This primitive does not claim atomicity across source
+publication and catalog projection, nor across different sources.
+
+The checked-in Authoring policy already permits GetItem and PutItem on its
+existing table, but deployed authority still needs verification before use.
+Reader permissions, scheduled reconciliation, cache refresh, and consumer
+deployment remain separate work. Likewise, live
+canonical URL, public response, robots/noindex, and HTML checks are activation
+prerequisites; this offline contract does not infer indexability from authored
+static metadata or block TEST merely for its intentional noindex response.
+
+The protected TEST workflow checks the authorization key parameter and Lambda
+readiness, not the private authorization object's contents or a signed source
+canary. Before deployment/activation, verify that private object's exact grants
+without printing its contents, and run the approved signed source canary after
+deployment. A green workflow alone does not establish catalog publish authority.
 
 ## Server-only feature descriptors
 

@@ -184,6 +184,55 @@ class ServerScopeBootstrapTests(unittest.TestCase):
                     bootstrap.parse_args(rejected)
         self.assertEqual(parsed.add_domain, "zooberiahsystems.com")
 
+    def test_lynx_offer_selection_matches_only_the_reviewed_inventory(self):
+        new_pairs = {
+            domain: f"LynxPardelle/{repo}"
+            for domain, repo in bootstrap.ISOLATED_PRODUCTION_REPOS.items()
+            if domain not in {"zooberiahsystems.com", "dipsydoo.com.mx"}
+        }
+        reviewed_pairs = json.dumps(new_pairs, sort_keys=True, separators=(",", ":")).encode("ascii")
+        self.assertEqual(len(new_pairs), 47)
+        self.assertEqual(
+            hashlib.sha256(reviewed_pairs).hexdigest(),
+            "98c32d41c1dafbf9d50aa7501ca61442f197a46198033d39973103f482c7ab01",
+        )
+
+        domain = "curso-musica-electronica.music.lynxpardelle.com"
+        repo = "draft-curso-musica-electronica-music-lynxpardelle-com"
+        arguments = [
+            "verify-test", "--registry", "registry.json", "--expected-draft-count", "47",
+            "--profile", "operator", "--test-commit", "a" * 40,
+            "--test-run-id", "123", "--canary-repo", repo, "--canary-run-id", "456",
+        ]
+        self.assertEqual(bootstrap.parse_args(arguments + ["--add-domain", domain]).add_domain, domain)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                bootstrap.parse_args(arguments + ["--add-domain", "otro.music.lynxpardelle.com"])
+            with self.assertRaises(SystemExit):
+                bootstrap.parse_args(arguments + [
+                    "--add-domain", "curso-diseno-sonoro.music.lynxpardelle.com",
+                ])
+
+    def test_lynx_offer_registry_identity_mismatch_stops_before_external_reads(self):
+        domain = "curso-musica-electronica.music.lynxpardelle.com"
+        repo = "draft-curso-musica-electronica-music-lynxpardelle-com"
+        for entry in (draft(domain, "draft-wrong-repo"), draft(domain, repo, owner="OtherOwner")):
+            for environment in ("test", "production"):
+                with self.subTest(entry=entry["githubUrl"], environment=environment):
+                    flag = "--test-bucket" if environment == "test" else "--production-bucket"
+                    args = bootstrap.parse_args([
+                        "plan", "--registry", "registry.json", "--expected-draft-count", "1",
+                        "--profile", "operator", "--add-domain", domain, "--environment", environment,
+                        flag, bootstrap.ENVIRONMENT_BUCKETS[environment],
+                    ])
+                    with (
+                        mock.patch.object(bootstrap, "_load_json_file", return_value=registry(entry)),
+                        mock.patch.object(bootstrap, "CommandRunner") as runner,
+                        self.assertRaisesRegex(bootstrap.BootstrapError, "repository"),
+                    ):
+                        bootstrap._isolated_command(args, write=False)
+                    runner.assert_not_called()
+
     def test_isolated_registry_duplicate_keys_fail_before_any_external_access(self):
         raw = json.dumps(self.registry)
         for old, duplicated in (
@@ -282,6 +331,64 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             self.fail("binding collector does not yet guard the isolated role")
         self.assertEqual(len(commands), 2)
 
+    def test_long_domain_role_is_verified_independently_of_the_repository_slug(self):
+        owner = "LynxPardelle"
+        account = "123456789012"
+        domain = "curso-musica-electronica.music.lynxpardelle.com"
+        repo = "draft-curso-musica-electronica-music-lynxpardelle-com"
+        prefix = f"repo:{owner}@1234567/{repo}@7654321"
+        source_registry = registry(draft(domain, repo))
+        cases = (
+            ("test", "test", "draft-curso-musica-electronica-musi-e9d3b7a15f28b971-test-deploy"),
+            ("production", "main", "draft-curso-musica-electronic-e9d3b7a15f28b971-production-deploy"),
+        )
+        for environment, branch, role_name in cases:
+            with self.subTest(environment=environment):
+                role_arn = f"arn:aws:iam::{account}:role/{role_name}"
+                trust = {"Statement": [{
+                    "Effect": "Allow",
+                    "Principal": {"Federated": f"arn:aws:iam::{account}:oidc-provider/token.actions.githubusercontent.com"},
+                    "Action": "sts:AssumeRoleWithWebIdentity",
+                    "Condition": {"StringEquals": {
+                        "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                        "token.actions.githubusercontent.com:ref": f"refs/heads/{branch}",
+                        "token.actions.githubusercontent.com:sub": f"{prefix}:environment:{environment}",
+                    }},
+                }]}
+                iam = {"Arn": role_arn, "RoleName": role_name, "AssumeRolePolicyDocument": trust}
+                expected = {
+                    "domain": domain, "repo": repo, "environment": environment, "roleArn": role_arn,
+                }
+                evidence = {"github": {"DRAFT_DOMAIN": domain, "AWS_ROLE_ARN": role_arn}, "iam": iam}
+                self.assertEqual(bootstrap.verify_role_evidence(
+                    owner=owner, domain=domain, repo=repo, environment=environment,
+                    account_id=account, evidence=evidence, oidc_subject=f"{prefix}:environment:{environment}",
+                ), expected)
+
+                if environment == "test":
+                    def runner_for(arn):
+                        return mock.Mock(run_json=mock.Mock(side_effect=[
+                            {"use_default": True, "sub_claim_prefix": prefix},
+                            [{"name": "DRAFT_DOMAIN", "value": domain}, {"name": "AWS_ROLE_ARN", "value": arn}],
+                            {"Role": iam},
+                        ]))
+
+                    runner = runner_for(role_arn)
+                    self.assertEqual(bootstrap.collect_verified_bindings(
+                        source_registry, environment=environment, profile="operator",
+                        account_id=account, runner=runner, domain=domain,
+                    ), [expected])
+                    self.assertIn(role_name, runner.run_json.call_args.args[0])
+
+                    wrong_arn = role_arn.replace("e9d3b7a15f28b971", "0000000000000000")
+                    runner = runner_for(wrong_arn)
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "isolated role coordinates"):
+                        bootstrap.collect_verified_bindings(
+                            source_registry, environment=environment, profile="operator",
+                            account_id=account, runner=runner, domain=domain,
+                        )
+                    self.assertEqual(runner.run_json.call_count, 2)
+
     def test_isolated_production_binding_reads_only_the_selected_exact_identity(self):
         production_registry = registry(
             draft("example.com", "draft-example-com"),
@@ -362,6 +469,52 @@ class ServerScopeBootstrapTests(unittest.TestCase):
             self.assertEqual(bootstrap.canonical_json_bytes(old), bootstrap.canonical_json_bytes(new))
         self.assertEqual(new_rules[-1]["domains"], [target["domain"]])
 
+    def test_isolated_candidate_preserves_prior_short_and_hashed_role_bindings(self):
+        baseline_scopes, _, _ = self._isolated_baseline()
+        baseline = json.loads(baseline_scopes)
+        domains = (
+            "curso-musica-electronica.music.lynxpardelle.com",
+            "servicio-logos.music.lynxpardelle.com",
+        )
+
+        for environment in ("test", "production"):
+            with self.subTest(environment=environment):
+                scope_bytes = baseline_scopes
+                authz_bytes = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(
+                    baseline,
+                    [binding(item["domain"], item["repo"], environment) for item in baseline["scopes"]],
+                    environment,
+                ))
+                for domain in domains:
+                    repo = bootstrap.LYNX_OFFER_REPOS[domain]
+                    role_name = bootstrap._deployment_role_name(domain, environment)
+                    legacy_name = f"{repo}-{environment}-deploy"
+                    self.assertEqual(role_name == legacy_name, domain == domains[1])
+                    target = {"domain": domain, "repo": repo, "tenantId": repo, "draftId": repo}
+                    target_binding = {
+                        "domain": domain, "repo": repo, "environment": environment,
+                        "roleArn": f"arn:aws:iam::123456789012:role/{role_name}",
+                    }
+                    inputs = {
+                        "scope_bytes": scope_bytes, "authz_bytes": authz_bytes,
+                        "target_scope": target, "expected_owner": "123456789012", "environment": environment,
+                    }
+
+                    wrong = {**target_binding, "roleArn": f"arn:aws:iam::123456789012:role/{role_name[:-1]}x"}
+                    with self.assertRaisesRegex(bootstrap.BootstrapError, "authorization rollback binding is not exact"):
+                        bootstrap.build_isolated_bundle(**inputs, target_binding=wrong)
+
+                    proposed_scope, proposed_authz, mode = bootstrap.build_isolated_bundle(
+                        **inputs, target_binding=target_binding,
+                    )
+                    self.assertEqual(mode, "add")
+                    previous_scopes = [
+                        item for item in json.loads(proposed_scope)["scopes"] if item["domain"] != domain
+                    ]
+                    self.assertEqual(previous_scopes, json.loads(scope_bytes)["scopes"])
+                    self.assertEqual(bootstrap.canonical_json_bytes(json.loads(proposed_authz)[:-1]), authz_bytes)
+                    scope_bytes, authz_bytes = proposed_scope, proposed_authz
+
     def test_isolated_production_candidate_preserves_existing_bytes_and_appends_one_exact_rule(self):
         scopes, rules, _ = self._isolated_baseline()
         production_rules = json.loads(rules)
@@ -438,6 +591,321 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         with self.assertRaises(bootstrap.BootstrapError):
             self._isolated_candidate(new_scopes, new_rules, changed)
 
+
+    def _recovery_candidate(self, incident="audiovisual", prior_count=None):
+        if incident == "audiovisual":
+            domain, environment, observed = "curso-produccion-audiovisual.music.lynxpardelle.com", "production", 17
+        elif incident == "acordes":
+            domain, environment, observed = "masterclass-acordes.music.lynxpardelle.com", "test", 36
+        else:
+            self.assertEqual(incident, "estructura")
+            domain, environment, observed = "masterclass-estructura-musical.music.lynxpardelle.com", "test", 39
+        prior_count = observed if prior_count is None else prior_count
+        prior_scope, _, _ = self._isolated_baseline()
+        prior_contract = json.loads(prior_scope)
+        for number in range(prior_count - len(prior_contract["scopes"])):
+            repo = f"draft-previous-{number}-example"
+            prior_contract["scopes"].append({
+                "domain": f"previous-{number}.example", "repo": repo, "tenantId": repo, "draftId": repo,
+            })
+        prior_contract["scopes"].sort(key=lambda item: item["domain"])
+        prior_scope = bootstrap.canonical_json_bytes(prior_contract)
+        account = "123456789012"
+        prior_authz = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(
+            prior_contract,
+            [binding(item["domain"], item["repo"], environment) for item in prior_contract["scopes"]],
+            environment,
+        ))
+        repo = bootstrap.LYNX_OFFER_REPOS[domain]
+        target = {"domain": domain, "repo": repo, "tenantId": repo, "draftId": repo}
+        role = binding(domain, repo, environment)
+        role["roleArn"] = f"arn:aws:iam::{account}:role/{bootstrap._deployment_role_name(domain, environment)}"
+        live_scope, proposed_authz, _ = bootstrap.build_isolated_bundle(
+            scope_bytes=prior_scope, authz_bytes=prior_authz, target_scope=target,
+            target_binding=role, expected_owner=account, environment=environment,
+        )
+        return {
+            "prior_scope_bytes": prior_scope, "current_scope_bytes": live_scope,
+            "current_authz_bytes": prior_authz, "target_scope": target, "target_binding": role,
+            "expected_owner": account, "environment": environment, "incident": incident,
+        }, proposed_authz
+
+    def test_audiovisual_recovery_reconstructs_only_the_missing_production_grant(self):
+        inputs, proposed_authz = self._recovery_candidate()
+        self.assertEqual(bootstrap.build_recovery_bundle(**inputs), (
+            inputs["current_scope_bytes"], proposed_authz, "recover-authz",
+        ))
+        self.assertEqual(bootstrap.canonical_json_bytes(json.loads(proposed_authz)[:-1]), inputs["current_authz_bytes"])
+
+    def test_audiovisual_recovery_rejects_any_other_scope_drift_or_completed_grant(self):
+        inputs, proposed_authz = self._recovery_candidate()
+        drifted = json.loads(inputs["current_scope_bytes"])
+        drifted["scopes"][0]["tenantId"] = "unexpected-tenant"
+        for patch in (
+            {"current_scope_bytes": bootstrap.canonical_json_bytes(drifted)},
+            {"current_scope_bytes": inputs["prior_scope_bytes"]},
+            {"prior_scope_bytes": inputs["current_scope_bytes"]},
+            {"current_authz_bytes": proposed_authz},
+            {"environment": "test"},
+            {"target_scope": {**inputs["target_scope"], "domain": "curso-diseno-sonoro.music.lynxpardelle.com"}},
+            {"target_binding": {**inputs["target_binding"], "roleArn": inputs["target_binding"]["roleArn"] + "x"}},
+        ):
+            with self.subTest(fields=tuple(patch)), self.assertRaises(bootstrap.BootstrapError):
+                bootstrap.build_recovery_bundle(**{**inputs, **patch})
+
+    def test_audiovisual_recovery_rejects_otherwise_exact_additions_with_different_counts(self):
+        for prior_count in (16, 18):
+            inputs, _ = self._recovery_candidate(prior_count=prior_count)
+            with self.subTest(prior_count=prior_count), self.assertRaisesRegex(
+                bootstrap.BootstrapError, "observed scope count"
+            ):
+                bootstrap.build_recovery_bundle(**inputs)
+
+    def test_audiovisual_recovery_cas_writes_only_authz_when_scope_is_already_live(self):
+        inputs, proposed_authz = self._recovery_candidate()
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["production"], inputs["expected_owner"]
+        store = FakeS3()
+        scope = inputs["current_scope_bytes"]
+        authz = inputs["current_authz_bytes"]
+        scope_head = store.put_object(bucket, bootstrap.SCOPE_KEY, scope, account)
+        authz_head = store.put_object(bucket, bootstrap.AUTHZ_KEY, authz, account)
+        arguments = dict(
+            bucket=bucket, expected_owner=account, scope_bytes=scope, authz_bytes=proposed_authz,
+            approved_scope_sha256=bootstrap.sha256_hex(scope), approved_authz_sha256=bootstrap.sha256_hex(proposed_authz),
+            expected_current_scope_etag=scope_head["etag"], expected_current_scope_version_id=scope_head["versionId"],
+            expected_current_scope_sha256=bootstrap.sha256_hex(scope),
+            expected_current_authz_etag=authz_head["etag"], expected_current_authz_version_id=authz_head["versionId"],
+            expected_current_authz_sha256=bootstrap.sha256_hex(authz), require_scope_unchanged=True,
+        )
+        prior_scope = inputs["prior_scope_bytes"]
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "recovery requires the reviewed scope"):
+            bootstrap.apply_private_bundle(
+                store, **{**arguments, "scope_bytes": prior_scope, "approved_scope_sha256": bootstrap.sha256_hex(prior_scope)}
+            )
+        self.assertEqual(len(store.puts), 2)
+        result = bootstrap.apply_private_bundle(store, **arguments)
+        self.assertEqual([item["key"] for item in store.puts[2:]], [bootstrap.AUTHZ_KEY])
+        self.assertEqual(store.puts[2]["ifMatch"], authz_head["etag"])
+        self.assertEqual(result["scope"]["versionId"], scope_head["versionId"])
+        self.assertFalse(result["scope"]["written"])
+        self.assertTrue(result["authz"]["written"])
+
+
+    def test_audiovisual_recovery_rejects_last_moment_same_etag_new_authz_version(self):
+        class SameBodyAuthzRace(FakeS3):
+            state_reads = 0
+
+            def bucket_state(self, bucket, expected_owner):
+                self.state_reads += 1
+                if self.state_reads == 2:
+                    etag = self.heads[bootstrap.AUTHZ_KEY]["etag"]
+                    body = self.objects[bootstrap.AUTHZ_KEY]
+                    super().put_object(bucket, bootstrap.AUTHZ_KEY, body, expected_owner)
+                    self.heads[bootstrap.AUTHZ_KEY]["etag"] = etag
+                return super().bucket_state(bucket, expected_owner)
+
+        inputs, proposed_authz = self._recovery_candidate()
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["production"], inputs["expected_owner"]
+        store = SameBodyAuthzRace()
+        scope, authz = inputs["current_scope_bytes"], inputs["current_authz_bytes"]
+        scope_head = store.put_object(bucket, bootstrap.SCOPE_KEY, scope, account)
+        authz_head = store.put_object(bucket, bootstrap.AUTHZ_KEY, authz, account)
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "authorization changed immediately before recovery"):
+            bootstrap.apply_private_bundle(
+                store, bucket=bucket, expected_owner=account, scope_bytes=scope, authz_bytes=proposed_authz,
+                approved_scope_sha256=bootstrap.sha256_hex(scope),
+                approved_authz_sha256=bootstrap.sha256_hex(proposed_authz),
+                expected_current_scope_etag=scope_head["etag"], expected_current_scope_version_id=scope_head["versionId"],
+                expected_current_scope_sha256=bootstrap.sha256_hex(scope),
+                expected_current_authz_etag=authz_head["etag"], expected_current_authz_version_id=authz_head["versionId"],
+                expected_current_authz_sha256=bootstrap.sha256_hex(authz), require_scope_unchanged=True,
+            )
+        self.assertEqual(len(store.puts), 3)
+        self.assertEqual(store.heads[bootstrap.AUTHZ_KEY]["etag"], authz_head["etag"])
+        self.assertNotEqual(store.heads[bootstrap.AUTHZ_KEY]["versionId"], authz_head["versionId"])
+        self.assertEqual(store.objects[bootstrap.AUTHZ_KEY], authz)
+
+    def test_audiovisual_recovery_version_lookup_requires_exact_latest_and_predecessor(self):
+        client = mock.Mock()
+        head = {"versionId": "current", "etag": '"current"'}
+        versions = [
+            {"Key": bootstrap.SCOPE_KEY, "IsLatest": True, "VersionId": "current", "ETag": '"current"'},
+            {"Key": bootstrap.SCOPE_KEY, "IsLatest": False, "VersionId": "prior", "ETag": '"prior"'},
+        ]
+        adapter = self._memory_s3(client, "production")
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["production"], "123456789012"
+        client.list_object_versions.return_value = {"Versions": versions, "IsTruncated": True}
+        self.assertEqual(adapter.prior_scope_version(bucket, account, head), "prior")
+        client.list_object_versions.assert_called_once_with(
+            Bucket=bucket, ExpectedBucketOwner=account, Prefix=bootstrap.SCOPE_KEY, MaxKeys=2,
+        )
+        for response in (
+            {"Versions": versions[::-1]},
+            {"Versions": versions, "DeleteMarkers": [{"Key": bootstrap.SCOPE_KEY}]},
+            {"Versions": [versions[0], {**versions[1], "Key": "system/other.json"}]},
+            {"Versions": [{**versions[0], "ETag": '"drift"'}, versions[1]]},
+        ):
+            client.list_object_versions.return_value = response
+            with self.subTest(fields=tuple(response)), self.assertRaises(bootstrap.BootstrapError):
+                adapter.prior_scope_version(bucket, account, head)
+
+    def test_audiovisual_recovery_command_rechecks_prior_scope_and_exact_test_evidence(self):
+        self._verify_recovery_command("audiovisual")
+
+    def test_acordes_recovery_command_writes_only_the_missing_test_grant_and_noops_normally(self):
+        self._verify_recovery_command("acordes")
+
+    def test_estructura_recovery_command_writes_only_the_missing_test_grant_and_noops_normally(self):
+        self._verify_recovery_command("estructura")
+
+    def _verify_recovery_command(self, incident):
+        inputs, candidate_authz = self._recovery_candidate(incident)
+        environment = inputs["environment"]
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS[environment], inputs["expected_owner"]
+        store = FakeS3()
+        prior = store.put_object(bucket, bootstrap.SCOPE_KEY, inputs["prior_scope_bytes"], account)
+        authz = store.put_object(bucket, bootstrap.AUTHZ_KEY, inputs["current_authz_bytes"], account)
+        current = store.put_object(bucket, bootstrap.SCOPE_KEY, inputs["current_scope_bytes"], account)
+        store.prior_scope_version = mock.Mock(return_value=prior["versionId"])
+        test_bucket = bootstrap.ENVIRONMENT_BUCKETS["test"]
+        test_store = FakeS3()
+        test_contract = json.loads(inputs["current_scope_bytes"])
+        test_rules = bootstrap.canonical_json_bytes(bootstrap.build_authz_rules(
+            test_contract,
+            [{
+                **binding(item["domain"], item["repo"], "test"),
+                "roleArn": (
+                    f'arn:aws:iam::{account}:role/'
+                    f'{bootstrap._deployment_role_name(item["domain"], "test")}'
+                ),
+            } for item in test_contract["scopes"]],
+            "test",
+        ))
+        test_store.put_object(test_bucket, bootstrap.SCOPE_KEY, inputs["current_scope_bytes"], account)
+        test_store.put_object(test_bucket, bootstrap.AUTHZ_KEY, test_rules, account)
+        target = inputs["target_scope"]
+        evidence = {"schemaVersion": 1, "result": "green"}
+        evidence_hash = bootstrap.sha256_hex(bootstrap.canonical_json_bytes(evidence))
+        args = bootstrap.argparse.Namespace(
+            add_domain=target["domain"], environment=environment, recovery=incident,
+            registry=Path("synthetic-registry.json"), expected_draft_count=3, tenant_override=[],
+            profile="operator", region="us-east-1", bucket=bucket, production_bucket=bucket, test_bucket=bucket,
+            approve_scope_sha256=bootstrap.sha256_hex(inputs["current_scope_bytes"]),
+            approve_authz_sha256=bootstrap.sha256_hex(candidate_authz),
+            expected_current_scope_etag=current["etag"], expected_current_scope_version_id=current["versionId"],
+            expected_current_scope_sha256=bootstrap.sha256_hex(inputs["current_scope_bytes"]),
+            expected_current_authz_etag=authz["etag"], expected_current_authz_version_id=authz["versionId"],
+            expected_current_authz_sha256=bootstrap.sha256_hex(inputs["current_authz_bytes"]),
+            expected_prior_scope_version_id=prior["versionId"],
+            expected_prior_scope_sha256=bootstrap.sha256_hex(inputs["prior_scope_bytes"]),
+            test_commit="a" * 40, test_run_id=123, canary_repo=target["repo"], canary_run_id=456,
+            approve_test_evidence_sha256=evidence_hash,
+        )
+        production_registry = registry(*self.registry["drafts"], draft(target["domain"], target["repo"]))
+        with mock.patch.object(bootstrap, "_load_json_file", return_value=production_registry), \
+             mock.patch.object(bootstrap, "_account_id", return_value=account), \
+             mock.patch.object(bootstrap, "collect_verified_bindings", return_value=[inputs["target_binding"]]), \
+             mock.patch.object(bootstrap, "InMemoryS3", side_effect=lambda **kw: (
+                 store if kw["environment"] == environment else test_store
+             )), \
+             mock.patch.object(bootstrap, "collect_test_green_evidence", return_value=evidence) as collect:
+            plan = bootstrap._plan(args)
+            self.assertEqual(plan["updateMode"], "recover-authz")
+            self.assertEqual(plan["priorScope"], {
+                "versionId": args.expected_prior_scope_version_id, "sha256": args.expected_prior_scope_sha256,
+            })
+            self.assertNotIn("roleArn", json.dumps(plan))
+            self.assertEqual(len(store.puts), 3)
+            collect.assert_not_called()
+            for field, value in (
+                ("expected_prior_scope_version_id", "wrong-version"),
+                ("expected_prior_scope_sha256", "a" * 64),
+                ("approve_authz_sha256", "b" * 64),
+                *([("approve_test_evidence_sha256", "c" * 64)] if environment == "production" else []),
+            ):
+                original = getattr(args, field)
+                setattr(args, field, value)
+                with self.subTest(field=field), self.assertRaises(bootstrap.BootstrapError):
+                    bootstrap._apply(args)
+                self.assertEqual(len(store.puts), 3)
+                setattr(args, field, original)
+            collect.reset_mock()
+            result = bootstrap._apply(args)
+            args.recovery = None
+            noop = bootstrap._plan(args)
+        self.assertEqual(noop["updateMode"], "noop")
+        self.assertEqual(result["ruleCount"], {"audiovisual": 18, "acordes": 37, "estructura": 40}[incident])
+        if environment == "production":
+            collect.assert_called_once()
+            self.assertEqual(collect.call_args.kwargs["expected_scope_bytes"], inputs["current_scope_bytes"])
+            self.assertEqual(collect.call_args.kwargs["expected_authz_bytes"], test_rules)
+            self.assertEqual(result["testEvidenceSha256"], evidence_hash)
+        else:
+            collect.assert_not_called()
+            self.assertNotIn("testEvidenceSha256", result)
+        self.assertEqual(result["scope"]["versionId"], current["versionId"])
+        self.assertFalse(result["scopeWritten"])
+        self.assertTrue(result["authzWritten"])
+        self.assertEqual([record["key"] for record in store.puts[3:]], [bootstrap.AUTHZ_KEY])
+
+    def test_audiovisual_recovery_cli_accepts_only_the_exact_production_scope(self):
+        domain = "curso-produccion-audiovisual.music.lynxpardelle.com"
+        arguments = [
+            "plan", "--registry", "fixture.json", "--expected-draft-count", "3", "--profile", "operator",
+            "--environment", "production", "--production-bucket", bootstrap.ENVIRONMENT_BUCKETS["production"],
+            "--add-domain", domain, "--recover-audiovisual",
+        ]
+        self.assertEqual(bootstrap.parse_args(arguments).recovery, "audiovisual")
+        for additional in (
+            arguments[:-3] + ["--recover-audiovisual"],
+            arguments[:-2] + ["curso-diseno-sonoro.music.lynxpardelle.com", "--recover-audiovisual"],
+        ):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                bootstrap.parse_args(additional)
+
+    def test_acordes_recovery_cli_limits_the_new_selector_to_test(self):
+        domain = "masterclass-acordes.music.lynxpardelle.com"
+        common = ["plan", "--registry", "fixture.json", "--expected-draft-count", "3", "--profile", "operator"]
+        exact = ["--environment", "test", "--test-bucket", bootstrap.ENVIRONMENT_BUCKETS["test"],
+                 "--add-domain", domain, "--recover-acordes"]
+        self.assertEqual(bootstrap.parse_args(common + exact).recovery, "acordes")
+        for args in (
+            exact[:-2] + ["masterclass-intervalos.music.lynxpardelle.com", "--recover-acordes"],
+            exact + ["--recover-audiovisual"],
+            ["--environment", "production", "--production-bucket", bootstrap.ENVIRONMENT_BUCKETS["production"],
+             "--add-domain", domain, "--recover-acordes"],
+        ):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                bootstrap.parse_args(common + args)
+
+    def test_acordes_recovery_rejects_otherwise_exact_addition_at_a_different_count(self):
+        inputs, _ = self._recovery_candidate("acordes", prior_count=35)
+        with self.assertRaisesRegex(bootstrap.BootstrapError, "observed scope count"):
+            bootstrap.build_recovery_bundle(**inputs)
+
+    def test_estructura_recovery_cli_limits_the_selector_to_the_exact_test_incident(self):
+        domain = "masterclass-estructura-musical.music.lynxpardelle.com"
+        common = ["plan", "--registry", "fixture.json", "--expected-draft-count", "3", "--profile", "operator"]
+        exact = ["--environment", "test", "--test-bucket", bootstrap.ENVIRONMENT_BUCKETS["test"],
+                 "--add-domain", domain, "--recover-estructura"]
+        self.assertEqual(bootstrap.parse_args(common + exact).recovery, "estructura")
+        for args in (
+            exact[:-2] + ["masterclass-acordes.music.lynxpardelle.com", "--recover-estructura"],
+            exact + ["--recover-acordes"],
+            ["--environment", "production", "--production-bucket", bootstrap.ENVIRONMENT_BUCKETS["production"],
+             "--add-domain", domain, "--recover-estructura"],
+        ):
+            with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                bootstrap.parse_args(common + args)
+
+    def test_estructura_recovery_rejects_otherwise_exact_additions_with_different_counts(self):
+        for prior_count in (38, 40):
+            inputs, _ = self._recovery_candidate("estructura", prior_count=prior_count)
+            with self.subTest(prior_count=prior_count), self.assertRaisesRegex(
+                bootstrap.BootstrapError, "observed scope count"
+            ):
+                bootstrap.build_recovery_bundle(**inputs)
+
     def test_isolated_candidate_rejects_cross_field_identity_collisions(self):
         scopes, rules, target = self._isolated_baseline()
         for key, value in (("tenantId", "zoosite"), ("tenantId", "draft-example-com"),
@@ -473,7 +941,8 @@ class ServerScopeBootstrapTests(unittest.TestCase):
     def _memory_s3(self, client=None, environment="test"):
         adapter = getattr(bootstrap, "InMemoryS3", None)
         self.assertIsNotNone(adapter, "isolated S3 transport is not implemented")
-        return adapter(profile="operator", region="us-east-1", environment=environment, client=client)
+        factory = None if client is None else lambda: client
+        return adapter(profile="operator", region="us-east-1", environment=environment, client_factory=factory)
 
     def test_isolated_sdk_reads_and_writes_bodies_only_in_memory(self):
         body = b'{"synthetic":true}\n'
@@ -513,6 +982,73 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertEqual(sdk.Session.call_args.kwargs, {"profile_name": "operator"})
         self.assertEqual(sdk.Session.return_value.client.call_args.kwargs["region_name"], "us-east-1")
 
+    def test_isolated_sdk_opens_a_fresh_client_for_each_conditional_put(self):
+        read_client, scope_client, authz_client = mock.Mock(), mock.Mock(), mock.Mock()
+        read_client.get_object.return_value = {"Body": io.BytesIO(b"[]\n")}
+        scope_client.put_object.return_value = {"ETag": '"scope-new"', "VersionId": "scope-version"}
+        authz_client.put_object.return_value = {"ETag": '"authz-new"', "VersionId": "authz-version"}
+        sdk, config = mock.Mock(), mock.Mock()
+        session = sdk.Session.return_value
+        session.client.side_effect = [read_client, scope_client, authz_client]
+        with mock.patch.dict(sys.modules, {"boto3": sdk, "botocore.config": config}):
+            adapter = self._memory_s3()
+            bucket, account = bootstrap.ENVIRONMENT_BUCKETS["test"], "123456789012"
+            adapter.get_object(bucket, bootstrap.SCOPE_KEY, account)
+            adapter.put_object(bucket, bootstrap.SCOPE_KEY, b"[]\n", account, if_match='"scope-old"')
+            adapter.put_object(bucket, bootstrap.AUTHZ_KEY, b"[]\n", account, if_match='"authz-old"')
+        sdk.Session.assert_called_once_with(profile_name="operator")
+        config.Config.assert_called_once()
+        self.assertEqual(config.Config.call_args.kwargs["retries"], {"mode": "standard", "total_max_attempts": 1})
+        self.assertEqual(session.client.call_args_list, [
+            mock.call("s3", region_name="us-east-1", config=config.Config.return_value),
+        ] * 3)
+        read_client.put_object.assert_not_called()
+        read_client.close.assert_not_called()
+        scope_client.get_object.assert_not_called()
+        authz_client.get_object.assert_not_called()
+        self.assertEqual((scope_client.put_object.call_count, authz_client.put_object.call_count), (1, 1))
+        self.assertEqual(scope_client.put_object.call_args.kwargs["IfMatch"], '"scope-old"')
+        self.assertEqual(authz_client.put_object.call_args.kwargs["IfMatch"], '"authz-old"')
+        self.assertEqual(scope_client.put_object.call_args.kwargs["Key"], bootstrap.SCOPE_KEY)
+        self.assertEqual(authz_client.put_object.call_args.kwargs["Key"], bootstrap.AUTHZ_KEY)
+        scope_client.close.assert_called_once()
+        authz_client.close.assert_called_once()
+
+    def test_isolated_sdk_closes_failed_write_client_without_retry(self):
+        class ConnectionClosedError(Exception):
+            pass
+
+        reader, writer = mock.Mock(), mock.Mock()
+        writer.put_object.side_effect = ConnectionClosedError("PRIVATE-SENTINEL")
+        factory = mock.Mock(side_effect=[reader, writer])
+        adapter = bootstrap.InMemoryS3(
+            profile="operator", region="us-east-1", environment="test", client_factory=factory,
+        )
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["test"], "123456789012"
+        with self.assertRaises(bootstrap.S3OperationError) as captured:
+            adapter.put_object(bucket, bootstrap.AUTHZ_KEY, b"[]\n", account, if_match='"old"')
+        self.assertEqual((captured.exception.operation, captured.exception.family), ("authz_put", "connection"))
+        self.assertEqual(factory.call_count, 2)
+        reader.put_object.assert_not_called()
+        writer.put_object.assert_called_once()
+        writer.close.assert_called_once()
+
+    def test_isolated_sdk_preserves_acknowledged_write_when_transport_cleanup_fails(self):
+        reader, writer = mock.Mock(), mock.Mock()
+        writer.put_object.return_value = {"ETag": '"new"', "VersionId": "version"}
+        writer.close.side_effect = OSError("PRIVATE-SENTINEL")
+        factory = mock.Mock(side_effect=[reader, writer])
+        adapter = bootstrap.InMemoryS3(
+            profile="operator", region="us-east-1", environment="test", client_factory=factory,
+        )
+        result = adapter.put_object(
+            bootstrap.ENVIRONMENT_BUCKETS["test"], bootstrap.AUTHZ_KEY, b"[]\\n",
+            "123456789012", if_match='"old"',
+        )
+        self.assertEqual(result, {"etag": '"new"', "versionId": "version"})
+        writer.put_object.assert_called_once()
+        writer.close.assert_called_once()
+
     def test_isolated_sdk_sanitizes_precondition_failed_without_retry(self):
         class ConditionalFailure(Exception):
             response = {"Error": {"Code": "PreconditionFailed", "Message": "PRIVATE-SENTINEL"}}
@@ -525,6 +1061,37 @@ class ServerScopeBootstrapTests(unittest.TestCase):
         self.assertIn("precondition", str(raised.exception).lower())
         self.assertNotIn("PRIVATE-SENTINEL", str(raised.exception))
         self.assertIsNone(raised.exception.__cause__)
+        self.assertEqual(client.put_object.call_count, 1)
+
+    def test_isolated_s3_diagnostics_report_only_allowlisted_operation_and_family(self):
+        class ReadTimeoutError(Exception):
+            pass
+
+        class ErrorWithPrivateCode(Exception):
+            response = {"Error": {"Code": "PRIVATE-SENTINEL", "Message": "PRIVATE-SENTINEL"}}
+
+        client = mock.Mock()
+        runner = mock.Mock()
+        adapter = bootstrap.InMemoryS3(
+            profile="operator", region="us-east-1", environment="test", client_factory=lambda: client, runner=runner,
+        )
+        bucket, account = bootstrap.ENVIRONMENT_BUCKETS["test"], "123456789012"
+        client.get_object.side_effect = ReadTimeoutError("PRIVATE-SENTINEL")
+        client.put_object.side_effect = ErrorWithPrivateCode("PRIVATE-SENTINEL")
+        runner.run_json.side_effect = bootstrap.BootstrapError("aws operation timed out")
+        for operation, family, action in (
+            ("scope_versioned_get", "timeout", lambda: adapter.get_object(
+                bucket, bootstrap.SCOPE_KEY, account, "PRIVATE-SENTINEL")),
+            ("authz_put", "unknown", lambda: adapter.put_object(
+                bucket, bootstrap.AUTHZ_KEY, b"PRIVATE-SENTINEL", account, if_match='"PRIVATE-SENTINEL"')),
+            ("authz_head", "timeout", lambda: adapter.head_object(bucket, bootstrap.AUTHZ_KEY, account)),
+            ("bucket_controls", "timeout", lambda: adapter.bucket_state(bucket, account)),
+        ):
+            with self.subTest(operation=operation), self.assertRaises(bootstrap.S3OperationError) as captured:
+                action()
+            self.assertEqual((captured.exception.operation, captured.exception.family), (operation, family))
+            self.assertNotIn("PRIVATE-SENTINEL", str(captured.exception))
+            self.assertIsNone(captured.exception.__cause__)
         self.assertEqual(client.put_object.call_count, 1)
 
     def _isolated_apply_fixture(self, fake_type=FakeS3):
