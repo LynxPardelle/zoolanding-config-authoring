@@ -2045,6 +2045,29 @@ def _read_stable_versioned_object(
     return current_body
 
 
+def _require_catalog_grants_preserved(previous: bytes, candidate: bytes) -> None:
+    try:
+        old_rules = json.loads(previous)
+    except (ValueError, UnicodeError):
+        # A malformed historical object cannot authorize catalog participation.
+        return
+    if not isinstance(old_rules, list):
+        return
+    enrolled = [rule for rule in old_rules if isinstance(rule, dict) and "catalog" in rule]
+    if not enrolled:
+        return
+    try:
+        new_rules = json.loads(candidate)
+    except (ValueError, UnicodeError):
+        raise BootstrapError("reviewed catalog authorization must be preserved") from None
+    if not isinstance(new_rules, list):
+        raise BootstrapError("reviewed catalog authorization must be preserved")
+    for old_rule in enrolled:
+        matches = [rule for rule in new_rules if isinstance(rule, dict) and rule.get("roleArn") == old_rule.get("roleArn")]
+        if len(matches) != 1 or canonical_json_bytes(matches[0]) != canonical_json_bytes(old_rule):
+            raise BootstrapError("reviewed catalog authorization must be preserved")
+
+
 def apply_private_bundle(
     s3: Any,
     *,
@@ -2090,6 +2113,15 @@ def apply_private_bundle(
             or current_authz.get("versionId") != expected_current_authz_version_id
         ):
             raise BootstrapError("authorization object changed after review")
+        try:
+            enrollment_baseline = _read_stable_versioned_object(
+                s3, bucket=bucket, key=AUTHZ_KEY, expected_owner=expected_owner, head=current_authz,
+            )
+        except BootstrapError:
+            raise
+        except Exception:
+            raise BootstrapError("authorization baseline could not be verified") from None
+        _require_catalog_grants_preserved(enrollment_baseline, authz_bytes)
     scope_head = s3.head_object(bucket, SCOPE_KEY, expected_owner)
     if require_scope_unchanged and (
         bucket not in ENVIRONMENT_BUCKETS.values() or scope_head is None

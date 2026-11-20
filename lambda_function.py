@@ -4,8 +4,9 @@ import json
 import os
 import re
 import unicodedata
+from decimal import Decimal
 from typing import Any, Dict, Optional
-from urllib.parse import unquote
+from urllib.parse import unquote, urlsplit
 
 from server_policy_validation import PolicyValidationError, validate_notification_secrets, validate_server_policy_files
 from zoolanding_lambda_common import (
@@ -19,6 +20,7 @@ from zoolanding_lambda_common import (
     list_json_keys,
     list_object_keys,
     load_item,
+    load_item_consistently,
     load_json_from_s3,
     log,
     not_found,
@@ -27,6 +29,7 @@ from zoolanding_lambda_common import (
     ok,
     parse_json_body,
     put_item_if_revision,
+    put_catalog_projection_if_newer,
     put_json_to_s3_if_absent,
     RevisionConflictError,
     server_error,
@@ -41,7 +44,8 @@ DEPLOY_AUTHZ_CONFIG_S3_KEY = os.getenv("DEPLOY_AUTHZ_CONFIG_S3_KEY", "").strip()
 ENVIRONMENT_NAME = os.getenv("ENVIRONMENT_NAME", "test").strip().lower()
 
 WRITE_ACTIONS = {"createSite", "upsertDraft", "publishDraft", "setSiteStatus"}
-ALL_ACTIONS = WRITE_ACTIONS | {"getSite"}
+ALL_ACTIONS = WRITE_ACTIONS | {"getSite", "reconcileCatalog"}
+DEPLOY_AUTHZ_ACTIONS = ALL_ACTIONS - {"reconcileCatalog"}
 ENVIRONMENTS = {"production", "test"}
 SAFE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{1,78}[a-z0-9]$")
 SERVER_SCOPE_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -67,9 +71,17 @@ LOCAL_DRAFT_CONTEXT_FOLDERS = {
 LOCAL_DRAFT_CONTEXT_FILES = {"draft-repo.config.json"}
 SERVER_ONLY_KEY_PATTERN = re.compile(r"(secret|token|credential|password|privatekey|authorization)", re.IGNORECASE)
 MAX_RUNTIME_CONTENT_HUBS = 4
+CATALOG_SLUG_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
+CATALOG_PATH_PATTERN = re.compile(r"/(?:[A-Za-z0-9._~-]+(?:/[A-Za-z0-9._~-]+)*)?")
+CATALOG_REQUIRED_FIELDS = {"entryId", "kind", "path", "title", "description", "imageUrl", "imageAlt", "enabled"}
+CATALOG_OPTIONAL_FIELDS = {"category", "builtWith"}
+CATALOG_ASSET_HOST = "assets.zoolandingpage.com.mx"
 MANIFEST_FILE_NAME = "_manifest.json"
 DEPLOY_AUTHZ_RULE_KEYS = {
     "roleArn", "tenantId", "draftId", "domains", "environments", "actions"
+}
+CURATED_CATALOG_ENTRIES = {
+    ("test", "zoositioweb.com.mx"): ("zoositioweb-com-mx",),
 }
 
 
@@ -88,6 +100,8 @@ SAFE_VALIDATION_CODES = {
     "environment_invalid",
     "environment_mismatch",
     "invalid_route_language",
+    "invalid_catalog",
+    "catalog_source_invalid",
     "invalid_server_path",
     "invalid_site_config_path",
     "kind_mismatch",
@@ -281,6 +295,114 @@ def _validate_site_route_languages(content: Dict[str, Any]) -> None:
         seen_pairs.add(pair)
 
 
+def _catalog_route_identity(value: Any) -> str:
+    """Match the public router's identity when checking protected route shadows."""
+    path = str(value or "").strip().split("#", 1)[0].split("?", 1)[0] or "/"
+    try:
+        path = unquote(path, errors="strict")
+    except UnicodeError:
+        pass
+    path = re.sub(r"\\+", "/", path)
+    if not path.startswith("/"):
+        path = "/" + path
+    return re.sub(r"/+", "/", path).rstrip("/") or "/"
+
+
+def _catalog_slug(value: Any, limit: int) -> bool:
+    return isinstance(value, str) and len(value) <= limit and CATALOG_SLUG_PATTERN.fullmatch(value) is not None
+
+
+def _catalog_text(value: Any, limit: int) -> bool:
+    return (
+        isinstance(value, str)
+        and 0 < len(value) <= limit
+        and value == value.strip()
+        and value == unicodedata.normalize("NFC", value)
+        and not any(char in "<>" or unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value)
+    )
+
+
+def _catalog_image_url(value: Any, domain: str) -> bool:
+    if (
+        not isinstance(value, str)
+        or not 0 < len(value) <= 1024
+        or not value.startswith("https://")
+        or any(char.isspace() or char in "\\?#" or unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in value)
+    ):
+        return False
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return False
+    # Exact DNS authority also excludes userinfo, explicit ports and trailing dots.
+    return parsed.scheme == "https" and parsed.netloc.lower() in {domain, CATALOG_ASSET_HOST}
+
+
+def _validate_site_catalog(content: Dict[str, Any], domain: str) -> None:
+    """Validate optional public listings without fetching URLs or changing storage."""
+    if "catalog" not in content:
+        return
+    catalog = content["catalog"]
+    if not isinstance(catalog, dict) or set(catalog) != {"entries"}:
+        raise ValueError("invalid_catalog")
+    entries = catalog["entries"]
+    if not isinstance(entries, list) or len(entries) > 32:
+        raise ValueError("invalid_catalog")
+    if not entries:
+        return
+
+    routes = content.get("routes")
+    if not isinstance(routes, list):
+        raise ValueError("invalid_catalog")
+    site = content.get("site")
+    seo = site.get("seo") if isinstance(site, dict) else None
+    redirects = seo.get("redirects") if isinstance(seo, dict) else None
+    redirect_sources = {
+        _catalog_route_identity(rule["from"])
+        for rule in redirects if isinstance(rule, dict) and isinstance(rule.get("from"), str)
+    } if isinstance(redirects, list) else set()
+
+    entry_ids: set[str] = set()
+    paths: set[str] = set()
+    for record in entries:
+        if (
+            not isinstance(record, dict)
+            or not CATALOG_REQUIRED_FIELDS.issubset(record)
+            or not set(record).issubset(CATALOG_REQUIRED_FIELDS | CATALOG_OPTIONAL_FIELDS)
+        ):
+            raise ValueError("invalid_catalog")
+        entry_id, path = record["entryId"], record["path"]
+        if (
+            not _catalog_slug(entry_id, 64)
+            or not isinstance(record["kind"], str)
+            or record["kind"] not in {"website", "app"}
+            or type(record["enabled"]) is not bool
+            or not isinstance(path, str)
+            or len(path) > 256
+            or CATALOG_PATH_PATTERN.fullmatch(path) is None
+            or any(segment in {".", ".."} for segment in path.split("/"))
+            or not _catalog_text(record["title"], 100)
+            or not _catalog_text(record["description"], 320)
+            or not _catalog_text(record["imageAlt"], 200)
+            or not _catalog_image_url(record["imageUrl"], domain)
+            or ("category" in record and not _catalog_slug(record["category"], 48))
+            or ("builtWith" in record and (not isinstance(record["builtWith"], str) or record["builtWith"] not in {"zoolandingpage", "zoositioweb"}))
+        ):
+            raise ValueError("invalid_catalog")
+        if entry_id in entry_ids or path in paths or path in redirect_sources:
+            raise ValueError("invalid_catalog")
+        if not any(isinstance(route, dict) and route.get("path") == path for route in routes):
+            raise ValueError("invalid_catalog")
+        for route in routes:
+            if not isinstance(route, dict) or _catalog_route_identity(route.get("path")) != path:
+                continue
+            auth = route.get("auth")
+            if isinstance(auth, dict) and auth.get("required") is True:
+                raise ValueError("invalid_catalog")
+        entry_ids.add(entry_id)
+        paths.add(path)
+
+
 def _content_hub_file_info(domain: str, path: str) -> Optional[tuple[str, Optional[str]]]:
     prefix = f"{domain}/content-hubs/"
     if not path.startswith(prefix):
@@ -394,10 +516,15 @@ def _load_deploy_authz_config() -> list[Dict[str, Any]]:
     role_arns: set[str] = set()
     domains: set[str] = set()
     draft_ids: set[str] = set()
+    catalog_entry_ids: set[str] = set()
     validated: list[Dict[str, Any]] = []
     try:
         for entry in parsed:
-            if not isinstance(entry, dict) or set(entry) != DEPLOY_AUTHZ_RULE_KEYS:
+            if (
+                not isinstance(entry, dict)
+                or not DEPLOY_AUTHZ_RULE_KEYS.issubset(entry)
+                or not set(entry).issubset(DEPLOY_AUTHZ_RULE_KEYS | {"catalog"})
+            ):
                 raise ValueError("authorization rule shape is invalid")
             role_arn = entry.get("roleArn")
             tenant_id = entry.get("tenantId")
@@ -418,11 +545,16 @@ def _load_deploy_authz_config() -> list[Dict[str, Any]]:
                 or rule_environments != [environment]
                 or not isinstance(actions, list)
                 or not actions
-                or any(not isinstance(action, str) or action not in ALL_ACTIONS for action in actions)
+                or any(not isinstance(action, str) or action not in DEPLOY_AUTHZ_ACTIONS for action in actions)
                 or len(actions) != len(set(actions))
             ):
                 raise ValueError("authorization rule values are invalid")
             domain = _strict_domain(rule_domains[0], "authorization domain")
+            registration = _catalog_registration_for_rule(entry)
+            if registration is not None:
+                if catalog_entry_ids.intersection(registration["entryIds"]):
+                    raise ValueError("catalog authorization ownership is ambiguous")
+                catalog_entry_ids.update(registration["entryIds"])
             if (
                 role_arn in role_arns
                 or domain in domains
@@ -497,6 +629,37 @@ def _authorized_server_scope(rule: Dict[str, Any]) -> Optional[Dict[str, str]]:
     return {"tenantId": tenant_id, "draftId": draft_id}
 
 
+def _catalog_registration_for_rule(rule: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    domain = rule["domains"][0]
+    environment = rule["environments"][0]
+    if "catalog" in rule:
+        options = rule["catalog"]
+        if not isinstance(options, dict) or type(options.get("enabled")) is not bool:
+            raise ValueError("catalog_source_invalid")
+        if options["enabled"] is False:
+            if set(options) != {"enabled"}:
+                raise ValueError("catalog_source_invalid")
+            return None
+        entry_ids = options.get("entryIds")
+        if (
+            set(options) != {"enabled", "entryIds", "environments"}
+            or options["environments"] != [environment]
+            or not isinstance(entry_ids, list)
+            or not 0 < len(entry_ids) <= 32
+            or any(not _catalog_slug(value, 64) for value in entry_ids)
+            or len(set(entry_ids)) != len(entry_ids)
+        ):
+            raise ValueError("catalog_source_invalid")
+    else:
+        entry_ids = CURATED_CATALOG_ENTRIES.get((environment, domain))
+        if entry_ids is None:
+            return None
+    return {
+        "sourceDomain": domain, "tenantId": rule["tenantId"], "draftId": rule["draftId"],
+        "entryIds": list(entry_ids),
+    }
+
+
 def _rule_allows(rule: Dict[str, Any], caller_arn: str, action: str, domain: str, environment: str) -> bool:
     role_arn = rule.get("roleArn")
     actions = rule.get("actions")
@@ -526,6 +689,7 @@ def _authorize_request(
     payload: Dict[str, Any],
     action: str,
 ) -> tuple[bool, str, Optional[Dict[str, str]]]:
+    payload.pop("_authorizedCatalogRegistration", None)
     domain = _strict_domain(payload.get("domain"))
     environment = _normalize_environment(payload.get("environment") or payload.get("stageEnvironment"))
 
@@ -533,11 +697,13 @@ def _authorize_request(
     if not caller_arn:
         return False, "Missing signed deploy identity", None
 
-    matching_scopes = [
-        _authorized_server_scope(rule)
+    permission_action = "publishDraft" if action == "reconcileCatalog" else action
+    matching_rules = [
+        rule
         for rule in _load_deploy_authz_config()
-        if _rule_allows(rule, caller_arn, action, domain, environment)
+        if _rule_allows(rule, caller_arn, permission_action, domain, environment)
     ]
+    matching_scopes = [_authorized_server_scope(rule) for rule in matching_rules]
     unique_scopes = {
         (scope["tenantId"], scope["draftId"])
         for scope in matching_scopes
@@ -545,6 +711,11 @@ def _authorize_request(
     }
     if len(unique_scopes) == 1:
         tenant_id, draft_id = next(iter(unique_scopes))
+        registration = _catalog_registration_for_rule(matching_rules[0]) if action in {"publishDraft", "reconcileCatalog"} else None
+        if action == "reconcileCatalog" and registration is None:
+            return False, "Deploy identity is not enrolled for catalog reconciliation", None
+        if registration is not None:
+            payload["_authorizedCatalogRegistration"] = registration
         return True, caller_arn, {"tenantId": tenant_id, "draftId": draft_id}
     if len(unique_scopes) > 1:
         return False, "Deploy identity has ambiguous server scope authorization", None
@@ -640,6 +811,7 @@ def _normalize_files(
         if path == f"{domain}/site-config.json":
             _validate_site_config_runtime_limits(content)
             _validate_site_route_languages(content)
+            _validate_site_catalog(content, domain)
         _content_hub_file_info(domain, path)
 
         inferred_kind = _infer_kind(path)
@@ -1001,6 +1173,12 @@ def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
         expected_scope=authorized_scope,
     )
     validate_notification_secrets(stored_files, environment, describe_secret)
+    registration = payload.get("_authorizedCatalogRegistration")
+    if registration is not None:
+        site_config = _read_site_file(stored_files, f"{domain}/site-config.json") or {}
+        entries = site_config.get("catalog", {}).get("entries", [])
+        if any(record["entryId"] not in registration["entryIds"] for record in entries):
+            raise ValueError("catalog_source_invalid")
 
     expected_revision = int(loaded_metadata.get("revision") or 0)
     metadata = copy.deepcopy(loaded_metadata)
@@ -1012,6 +1190,18 @@ def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
         "updatedAt": updated_at,
         "updatedBy": _updated_by(payload, request_id),
     }
+    site_config = _read_site_file(stored_files, f"{domain}/site-config.json")
+    if site_config is not None and "catalog" in site_config:
+        entries = site_config["catalog"]["entries"]
+        entries_bytes = json.dumps(
+            entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+        ).encode("utf-8")
+        published_pointer["catalogRevision"] = {
+            "schemaVersion": 1,
+            "sequence": expected_revision + 1,
+            "entriesSha256": hashlib.sha256(entries_bytes).hexdigest(),
+            "entryCount": len(entries),
+        }
     published_environments = metadata.get("publishedEnvironments") if isinstance(metadata.get("publishedEnvironments"), dict) else {}
     published_environments[environment] = published_pointer
     metadata["publishedEnvironments"] = published_environments
@@ -1021,15 +1211,157 @@ def _publish_draft(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
     metadata["updatedAt"] = updated_at
     metadata["updatedBy"] = _updated_by(payload, request_id)
     metadata["revision"] = expected_revision + 1
-    response = ok({
+    response_payload = {
         "domain": domain,
         "environment": environment,
         "published": published_pointer,
         "draft": metadata.get("draft"),
         "lifecycle": metadata.get("lifecycle"),
-    })
+    }
+    if registration is not None:
+        response_payload["catalogSync"] = {"status": "pending"}
+    response = ok(response_payload)
     _save_registry_conditionally(metadata, expected_revision)
     return response
+
+
+def _run_catalog_sync(registration: Dict[str, Any], environment: str, request_id: str) -> Dict[str, str]:
+    try:
+        outcome = _project_published_catalog(registration, environment)
+        status = outcome.get("status")
+        if status in {"applied", "noop", "legacy", "unpublished"}:
+            return {"status": status}
+    except Exception:
+        pass
+    log("WARN", "Catalog projection remains pending", requestId=request_id, errorCode="catalog_projection_pending")
+    return {"status": "pending"}
+
+
+def _reconcile_catalog(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
+    registration = payload["_authorizedCatalogRegistration"]
+    outcome = _run_catalog_sync(registration, _normalize_environment(payload.get("environment")), request_id)
+    if outcome["status"] == "pending":
+        return server_error("catalog_projection_pending")
+    return ok({"domain": registration["sourceDomain"], "environment": _stack_environment(), "catalogSync": outcome})
+
+
+def _catalog_uint(value: Any, minimum: int = 0) -> int:
+    if not (type(value) is int or (isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value())):
+        raise ValueError("catalog_revision_invalid")
+    result = int(value)
+    if result < minimum:
+        raise ValueError("catalog_revision_invalid")
+    return result
+
+
+def _catalog_projection_outcome(existing: Any, candidate: Dict[str, Any]) -> Optional[str]:
+    if existing is None:
+        return None
+    if (
+        not isinstance(existing, dict)
+        or _catalog_uint(existing.get("schemaVersion"), 1) != 1
+        or any(existing.get(field) != candidate[field] for field in ("pk", "sk", "sourceId", "sourceDomain", "environment"))
+        or existing.get("catalogState") not in {"declared", "legacy"}
+    ):
+        raise ValueError("catalog_projection_conflict")
+    sequence = _catalog_uint(existing.get("sequence"), 1)
+    if sequence > candidate["sequence"]:
+        return "stale"
+    if sequence == candidate["sequence"]:
+        existing_json = json.dumps(existing, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=_catalog_uint)
+        candidate_json = json.dumps(candidate, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        if existing_json == candidate_json:
+            return "noop"
+        raise ValueError("catalog_projection_conflict")
+    return None
+
+
+def _project_published_catalog(registration: Dict[str, Any], environment: str) -> Dict[str, Any]:
+    """Internal replay primitive; registration is server-owned, never an API grant."""
+    if not isinstance(registration, dict) or set(registration) != {"sourceDomain", "tenantId", "draftId", "entryIds"}:
+        raise ValueError("catalog_source_invalid")
+    domain = _strict_domain(registration["sourceDomain"])
+    environment = _assert_stack_environment({"environment": environment})
+    scope = _request_server_scope({"_authorizedServerScope": {key: registration[key] for key in ("tenantId", "draftId")}})
+    approved_ids = registration["entryIds"]
+    if (
+        not isinstance(approved_ids, list)
+        or not 0 < len(approved_ids) <= 32
+        or any(not _catalog_slug(value, 64) for value in approved_ids)
+        or len(set(approved_ids)) != len(approved_ids)
+    ):
+        raise ValueError("catalog_source_invalid")
+
+    result = {"sourceId": f"draft:{domain}", "environment": environment}
+    metadata = copy.deepcopy(load_item_consistently(CONFIG_TABLE_NAME, site_pk(domain)))
+    if metadata is None:
+        return {**result, "status": "unpublished"}
+    _assert_metadata_server_scope(metadata, scope)
+    registry_revision = _catalog_uint(metadata.get("revision"), 1)
+    published = metadata.get("publishedEnvironments")
+    pointer = published.get(environment) if isinstance(published, dict) else None
+    if not isinstance(pointer, dict):
+        return {**result, "status": "unpublished"}
+    version_id = _strict_version_id(pointer.get("versionId"))
+    prefix, stored_files = _load_validated_stored_files(domain, environment, version_id, expected_scope=scope)
+    if pointer.get("prefix", prefix) != prefix:
+        raise ValueError("catalog_revision_invalid")
+    site_config = _read_site_file(stored_files, f"{domain}/site-config.json")
+    if site_config is None:
+        raise StoredPackageError()
+
+    pk, sk = f"CATALOG#{environment}", f"SOURCE#DRAFT#{domain}"
+    existing = load_item_consistently(CONFIG_TABLE_NAME, pk, sk)
+    declared = "catalog" in site_config
+    if not declared and existing is None:
+        if "catalogRevision" in pointer:
+            raise ValueError("catalog_revision_invalid")
+        return {**result, "status": "legacy"}
+    entries = site_config["catalog"]["entries"] if declared else []
+    if any(record["entryId"] not in approved_ids for record in entries):
+        raise ValueError("catalog_source_invalid")
+    digest = hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()
+    sequence = registry_revision
+    if declared:
+        revision = pointer.get("catalogRevision")
+        if not isinstance(revision, dict) or set(revision) != {"schemaVersion", "sequence", "entriesSha256", "entryCount"}:
+            raise ValueError("catalog_revision_invalid")
+        sequence = _catalog_uint(revision["sequence"], 1)
+        if (
+            _catalog_uint(revision["schemaVersion"], 1) != 1
+            or sequence > registry_revision
+            or _catalog_uint(revision["entryCount"]) != len(entries)
+            or revision["entriesSha256"] != digest
+        ):
+            raise ValueError("catalog_revision_invalid")
+    elif "catalogRevision" in pointer:
+        raise ValueError("catalog_revision_invalid")
+
+    candidate = {
+        "pk": pk, "sk": sk, "schemaVersion": 1, **result, "sourceDomain": domain,
+        "catalogState": "declared" if declared else "legacy", "sequence": sequence,
+        "versionId": version_id, "prefix": prefix, "entriesSha256": digest,
+        "entryCount": len(entries), "entries": copy.deepcopy(entries),
+    }
+    current_metadata = load_item_consistently(CONFIG_TABLE_NAME, site_pk(domain))
+    if current_metadata is None:
+        return {**result, "status": "source_changed"}
+    _assert_metadata_server_scope(current_metadata, scope)
+    current_published = current_metadata.get("publishedEnvironments")
+    current_pointer = current_published.get(environment) if isinstance(current_published, dict) else None
+    if current_metadata.get("revision") != metadata.get("revision") or current_pointer != pointer:
+        return {**result, "status": "source_changed"}
+    outcome = _catalog_projection_outcome(existing, candidate)
+    if outcome is not None:
+        return {**result, "status": outcome, "sequence": sequence}
+    try:
+        put_catalog_projection_if_newer(CONFIG_TABLE_NAME, candidate)
+    except RevisionConflictError:
+        outcome = _catalog_projection_outcome(load_item_consistently(CONFIG_TABLE_NAME, pk, sk), candidate)
+        if outcome is None:
+            raise ValueError("catalog_projection_conflict") from None
+        return {**result, "status": outcome, "sequence": sequence}
+    return {**result, "status": "applied", "sequence": sequence}
 
 
 def _set_site_status(payload: Dict[str, Any], request_id: str) -> Dict[str, Any]:
@@ -1081,6 +1413,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     action = str(payload.get("action") or "").strip()
     if action not in ALL_ACTIONS:
         return bad_request("Unsupported action")
+    payload.pop("_authorizedCatalogRegistration", None)
+    if action == "reconcileCatalog" and set(payload) - {"action", "domain", "environment"}:
+        return bad_request("invalid_request")
 
     try:
         _assert_stack_environment(payload)
@@ -1096,6 +1431,8 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             return _get_site(payload)
         if action == "publishDraft":
             return _publish_draft(payload, request_id)
+        if action == "reconcileCatalog":
+            return _reconcile_catalog(payload, request_id)
         return _set_site_status(payload, request_id)
     except VersionAlreadyExistsError:
         return conflict("version_already_exists")
